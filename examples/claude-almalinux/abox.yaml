@@ -1,0 +1,24 @@
+# abox instance configuration for Claude Code on AlmaLinux 9
+# See 'abox yaml' for full reference
+
+version: 1
+name: claude-almalinux
+cpus: 8
+memory: 8192
+disk: 40G
+base: almalinux-9
+subnet: ""
+provision:
+  - scripts/00-abox-setup.sh
+  - scripts/01-apply-overlay.sh
+  - scripts/02-nodejs-repo.sh
+  - scripts/03-system-packages.sh
+  - scripts/04-go.sh
+  - scripts/05-rust.sh
+  - scripts/06-claude-code.sh
+overlay: overlay
+dns:
+  upstream: 8.8.8.8:53
+allowlist:
+  - api.anthropic.com
+  - platform.claude.com

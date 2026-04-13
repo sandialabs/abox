@@ -1,0 +1,115 @@
+version: 2
+
+project_name: abox
+
+before:
+  hooks:
+    - go mod tidy
+    - go run ./cmd/gendocs
+
+builds:
+  - id: abox
+    main: ./cmd/abox
+    binary: abox
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/sandialabs/abox/internal/version.Version={{.Version}}
+      - -X github.com/sandialabs/abox/internal/version.Commit={{.Commit}}
+      - -X github.com/sandialabs/abox/internal/version.Date={{.Date}}
+
+  - id: abox-helper
+    main: ./cmd/abox-helper
+    binary: abox-helper
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/sandialabs/abox/internal/version.Version={{.Version}}
+      - -X github.com/sandialabs/abox/internal/version.Commit={{.Commit}}
+      - -X github.com/sandialabs/abox/internal/version.Date={{.Date}}
+
+archives:
+  - id: abox
+    ids:
+      - abox
+      - abox-helper
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE*
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Bug Fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Other
+      order: 999
+
+nfpms:
+  - id: abox
+    package_name: abox
+    ids:
+      - abox
+      - abox-helper
+    vendor: "NTESS, LLC"
+    homepage: https://github.com/sandialabs/abox
+    maintainer: jcrusse@sandia.gov
+    description: Security-isolated VM environments for AI coding agents
+    formats:
+      - deb
+    bindir: /usr/bin
+    contents:
+      - src: completions/abox.bash
+        dst: /usr/share/bash-completion/completions/abox
+      - src: completions/_abox
+        dst: /usr/share/zsh/vendor-completions/_abox
+      - src: completions/abox.fish
+        dst: /usr/share/fish/vendor_completions.d/abox.fish
+      - src: manpages/abox*.1.gz
+        dst: /usr/share/man/man1/
+    scripts:
+      postinstall: packaging/postinst.sh
+    deb:
+      lintian_overrides:
+        - statically-linked-binary
+        - changelog-file-missing-in-native-package
+
+release:
+  github:
+    owner: sandialabs
+    name: abox
+  draft: false
+  prerelease: auto
+  name_template: "{{ .Tag }}"

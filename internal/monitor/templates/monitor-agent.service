@@ -1,0 +1,28 @@
+[Unit]
+Description=abox Monitor Agent
+After=tetragon.service
+Requires=tetragon.service
+ConditionPathExists=/dev/virtio-ports/abox.monitor.0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/abox-monitor-agent
+Restart=always
+RestartSec=5
+StandardOutput=null
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=no
+DeviceAllow=/dev/virtio-ports/abox.monitor.0 rw
+ReadWritePaths=/dev/virtio-ports
+MemoryMax=256M
+TasksMax=64
+LimitNOFILE=1024
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,73 @@
+<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
+  <name>abox-{{.Name}}</name>
+{{- if .UUID}}
+  <uuid>{{.UUID}}</uuid>
+{{- end}}
+  <memory unit='MiB'>{{.Memory}}</memory>
+  <vcpu>{{.CPUs}}</vcpu>
+  <iothreads>1</iothreads>
+  <memoryBacking>
+    <nosharepages/>
+  </memoryBacking>
+  <os>
+    <type arch='x86_64'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <cpu mode='host-model'>
+    <feature policy='disable' name='vmx'/>
+    <feature policy='disable' name='svm'/>
+  </cpu>
+  <clock offset='utc'>
+    <timer name='rtc' tickpolicy='catchup'/>
+    <timer name='pit' tickpolicy='delay'/>
+    <timer name='hpet' present='no'/>
+    <timer name='kvmclock' present='yes'/>
+  </clock>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' cache='none' io='native'
+              discard='unmap' detect_zeroes='unmap' iothread='1'/>
+      <source file='{{.DiskPath}}'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+{{- if .CloudInitISO}}
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='{{.CloudInitISO}}'/>
+      <target dev='sda' bus='sata'/>
+      <readonly/>
+    </disk>
+{{- end}}
+    <interface type='network'>
+      <mac address='{{.MACAddress}}'/>
+      <source network='{{.Bridge}}'/>
+      <model type='virtio'/>
+      <driver name='vhost' queues='{{.NetQueues}}'/>
+    </interface>
+    <rng model='virtio'>
+      <backend model='random'>/dev/urandom</backend>
+    </rng>
+    <controller type='usb' model='none'/>
+    <video><model type='none'/></video>
+    <memballoon model='none'/>
+{{- if .MonitorSocket}}
+    <controller type='virtio-serial' index='0'/>
+    <channel type='unix'>
+      <source mode='bind' path='{{.MonitorSocket}}'>
+        <permissions mode='0600' owner='{{.MonitorSocketUID}}' group='{{.MonitorSocketGID}}'/>
+      </source>
+      <target type='virtio' name='abox.monitor.0'/>
+    </channel>
+{{- end}}
+  </devices>
+  <qemu:commandline>
+    <qemu:arg value='-sandbox'/>
+    <qemu:arg value='on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny'/>
+  </qemu:commandline>
+</domain>

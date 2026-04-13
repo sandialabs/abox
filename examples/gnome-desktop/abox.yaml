@@ -1,0 +1,23 @@
+# abox instance configuration
+# See 'abox yaml' for full reference
+
+version: 1
+name: gnome-desktop
+cpus: 4
+memory: 8192
+disk: 40G
+base: ubuntu-24.04
+user: ubuntu
+provision:
+  - scripts/00-abox-setup.sh
+  - scripts/01-gnome-xrdp-packages.sh
+  - scripts/02-xrdp-config.sh
+  - scripts/03-polkit-config.sh
+  - scripts/04-user-setup.sh
+dns:
+  upstream: 8.8.8.8:53
+allowlist:
+  - archive.ubuntu.com
+  - security.ubuntu.com
+  - "*.launchpad.net"
+  - "*.ubuntu.com"

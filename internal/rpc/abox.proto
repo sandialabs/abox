@@ -1,0 +1,153 @@
+syntax = "proto3";
+package abox;
+option go_package = "github.com/jcrussell/abox/internal/rpc";
+
+// Privilege Helper Service - runs as root for privileged operations
+service Privilege {
+  rpc Ping(Empty) returns (StringMsg);
+  rpc Shutdown(Empty) returns (Empty);
+  rpc QemuImgCreate(QemuImgReq) returns (Empty);
+  rpc Chmod(ChmodReq) returns (Empty);
+  rpc MkdirAll(MkdirReq) returns (Empty);
+  rpc RemoveAll(PathReq) returns (Empty);
+  rpc CopyFile(CopyReq) returns (Empty);
+  rpc UfwAdd(UfwReq) returns (Empty);
+  rpc UfwRemove(UfwReq) returns (Empty);
+  rpc UfwStatus(Empty) returns (UfwStatusResp);
+  rpc IptablesAdd(IptablesReq) returns (Empty);
+  rpc IptablesRemove(IptablesReq) returns (Empty);
+  rpc IptablesFlush(IptablesFlushReq) returns (Empty);
+}
+
+// DNS Filter Service - manages DNS filtering
+service DNSFilter {
+  rpc Status(Empty) returns (DNSStatus);
+  rpc SetMode(ModeReq) returns (StringMsg);
+  rpc Profile(ProfileReq) returns (ProfileResp);
+  rpc SetLogLevel(LogLevelReq) returns (StringMsg);
+  rpc GetLogLevel(Empty) returns (LogLevelResp);
+  rpc Shutdown(Empty) returns (Empty);
+}
+
+// Allowlist Service - manages shared domain allowlist
+// Used by both DNS and HTTP filters
+service Allowlist {
+  rpc Add(DomainReq) returns (StringMsg);
+  rpc Remove(DomainReq) returns (StringMsg);
+  rpc List(Empty) returns (DomainList);
+  rpc Reload(Empty) returns (StringMsg);
+}
+
+// HTTP Filter Service - manages HTTP proxy filtering
+service HTTPFilter {
+  rpc Status(Empty) returns (HTTPStatus);
+  rpc SetMode(ModeReq) returns (StringMsg);
+  rpc Profile(ProfileReq) returns (ProfileResp);
+  rpc SetLogLevel(LogLevelReq) returns (StringMsg);
+  rpc GetLogLevel(Empty) returns (LogLevelResp);
+  rpc StartKeyLog(KeyLogReq) returns (Empty);
+  rpc StopKeyLog(Empty) returns (Empty);
+  rpc Shutdown(Empty) returns (Empty);
+}
+
+// Shared messages
+message Empty {}
+message StringMsg { string message = 1; }
+message PathReq { string path = 1; }
+message DomainReq { string domain = 1; }
+message DomainList { repeated string domains = 1; }
+
+// Privilege-specific messages
+message QemuImgReq {
+  string backing_file = 1;
+  string output = 2;
+  string size = 3;
+}
+
+message ChmodReq {
+  string path = 1;
+  string mode = 2;
+}
+
+message MkdirReq {
+  string path = 1;
+  string mode = 2;
+}
+
+message CopyReq {
+  string src = 1;
+  string dst = 2;
+}
+
+message UfwReq {
+  string bridge = 1;
+}
+
+message UfwStatusResp {
+  bool installed = 1;
+  bool active = 2;
+}
+
+message IptablesReq {
+  string bridge = 1;
+  int32 dns_port = 2;
+  string protocol = 3;
+}
+
+message IptablesFlushReq {
+  string bridge = 1;
+}
+
+// DNS-specific messages
+message ModeReq { string mode = 1; }
+
+message ProfileReq { string subcommand = 1; }
+
+message ProfileResp {
+  string message = 1;
+  repeated string domains = 2;
+  int32 count = 3;
+}
+
+message DNSStatus {
+  string mode = 1;
+  int32 domains = 2;
+  uint64 total_queries = 3;
+  uint64 allowed_queries = 4;
+  uint64 blocked_queries = 5;
+  uint64 cache_hits = 6;
+  string uptime = 7;
+  int32 dns_port = 8;  // The actual port dnsfilter is listening on
+}
+
+message HTTPStatus {
+  string mode = 1;
+  int32 domains = 2;
+  uint64 total_requests = 3;
+  uint64 allowed_requests = 4;
+  uint64 blocked_requests = 5;
+  string uptime = 6;
+  int32 http_port = 7;  // The actual port httpfilter is listening on
+  bool mitm_enabled = 8;  // Whether TLS MITM interception is active
+}
+
+// TLS key log messages
+message KeyLogReq { string path = 1; }
+
+// Log level messages
+message LogLevelReq { string level = 1; }
+message LogLevelResp { string level = 1; }
+
+// Monitor Service - manages Tetragon event streaming
+service Monitor {
+  rpc Status(Empty) returns (MonitorStatus);
+  rpc Shutdown(Empty) returns (Empty);
+}
+
+message MonitorStatus {
+  bool running = 1;
+  uint64 events_logged = 2;
+  string log_file = 3;
+  int64 log_size_bytes = 4;
+  string uptime = 5;
+}

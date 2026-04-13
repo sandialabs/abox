@@ -1,0 +1,18 @@
+<network xmlns:dnsmasq='http://libvirt.org/schemas/network/dnsmasq/1.0'>
+  <name>{{.Bridge}}</name>
+  <forward mode='nat'>
+    <nat>
+      <port start='1024' end='65535'/>
+    </nat>
+  </forward>
+  <bridge name='{{.Bridge}}' stp='on' delay='0'/>
+  <ip address='{{.Gateway}}' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='{{.DHCPStart}}' end='{{.DHCPEnd}}'/>
+      <host mac='{{.MACAddress}}' ip='{{.IPAddress}}'/>
+    </dhcp>
+  </ip>
+  <dnsmasq:options>
+    <dnsmasq:option value='port=0'/>
+  </dnsmasq:options>
+</network>

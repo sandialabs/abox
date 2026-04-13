@@ -1,0 +1,19 @@
+bootcmd:
+  - |
+    # Configure DNS (distro-agnostic)
+    if systemctl is-enabled systemd-resolved 2>/dev/null; then
+      # Debian/Ubuntu: use systemd-resolved
+      mkdir -p /etc/systemd/resolved.conf.d
+      printf '[Resolve]\nDNS={{.Gateway}}\nDomains=~.\n' > /etc/systemd/resolved.conf.d/00-abox.conf
+      systemctl restart systemd-resolved
+    elif command -v nmcli >/dev/null 2>&1; then
+      # RHEL/AlmaLinux/Rocky: use NetworkManager
+      # Disable NetworkManager DNS management via conf drop-in and set resolv.conf directly
+      mkdir -p /etc/NetworkManager/conf.d
+      printf '[main]\ndns=none\n' > /etc/NetworkManager/conf.d/99-abox-dns.conf
+      nmcli general reload
+      echo "nameserver {{.Gateway}}" > /etc/resolv.conf
+    else
+      # Fallback: direct resolv.conf modification
+      echo "nameserver {{.Gateway}}" > /etc/resolv.conf
+    fi

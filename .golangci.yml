@@ -1,0 +1,134 @@
+version: "2"
+
+run:
+  concurrency: 4
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - copyloopvar
+    - dupl
+    - dupword
+    - durationcheck
+    - errcheck
+    - errorlint
+    - exhaustive
+    - exptostd
+    - fatcontext
+    - forcetypeassert
+    - gocognit
+    - goconst
+    - gocritic
+    - gocyclo
+    - gosec
+    - govet
+    - ineffassign
+    - intrange
+    - makezero
+    - mirror
+    - misspell
+    - modernize
+    - nakedret
+    - nestif
+    - nilerr
+    - nilnil
+    - noctx
+    - nolintlint
+    - nosprintfhostport
+    - perfsprint
+    - predeclared
+    - reassign
+    - recvcheck
+    - revive
+    - staticcheck
+    - thelper
+    - unconvert
+    - unparam
+    - unused
+    - usestdlibvars
+    - usetesting
+    - wastedassign
+    - whitespace
+  settings:
+    errcheck:
+      exclude-functions:
+        # Close on defers - errors rarely actionable
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (net.Conn).Close
+        - (*compress/gzip.Writer).Close
+        - (*archive/tar.Writer).Close
+        - (*compress/gzip.Reader).Close
+        # Print functions - rarely fail
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Print
+        - fmt.Printf
+        - fmt.Println
+        # Cleanup operations - best effort
+        - os.Remove
+        - os.RemoveAll
+        - os.Unsetenv
+        # HTTP response writes - errors rarely actionable
+        - (net/http.ResponseWriter).Write
+    gocognit:
+      min-complexity: 20
+    nestif:
+      min-complexity: 7
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    revive:
+      rules:
+        - name: indent-error-flow
+        - name: if-return
+        - name: receiver-naming
+        - name: error-naming
+        - name: error-return
+        - name: increment-decrement
+  exclusions:
+    presets: []
+    rules:
+      - linters: [bodyclose, gocognit, nestif, dupl, goconst, noctx, usestdlibvars, fatcontext, forcetypeassert, gosec, perfsprint, wastedassign, nakedret]
+        path: "_test\\.go$"
+      - linters: [gocognit, gocritic, nestif, noctx, goconst, thelper, usetesting]
+        path: "^e2e/"
+      # Generated protobuf code
+      - linters: [forcetypeassert, gosec]
+        path: "\\.pb\\.go$"
+      # exec.Command is fundamental to this CLI tool
+      - linters: [gosec]
+        text: "G204:"
+      # Unhandled errors: errcheck already covers what we care about
+      - linters: [gosec]
+        text: "G104:"
+      # File open by variable path is fundamental to CLI tools
+      - linters: [gosec]
+        text: "G304:"
+      # bubbletea-style TUI models use mixed receivers by design
+      - linters: [recvcheck]
+        path: "(internal/tui/|pkg/cmd/doctor/tui\\.go)"
+      # ASCII art diagram contains intentional repeated tokens
+      - linters: [dupword]
+        path: "pkg/cmd/doctor/diagram\\.go"
+      # exec.Command and net.Listen/Dial are pervasive in this CLI tool
+      # and rarely have meaningful context to thread. Only flag HTTP client calls.
+      - linters: [noctx]
+        text: "os/exec\\.Command|net\\.Listen|net\\.DialTimeout|net\\.ListenPacket"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/sandialabs/abox
+
+output:
+  show-stats: true

@@ -1,0 +1,19 @@
+# abox instance configuration
+# See 'abox yaml' for full reference
+
+version: 1
+name: opencode
+cpus: 8
+memory: 8192
+disk: 40G
+base: ubuntu-24.04
+subnet: ""
+provision:
+  - scripts/00-abox-setup.sh
+  - scripts/01-system-packages.sh
+  - scripts/10-go.sh
+  - scripts/20-opencode.sh
+dns:
+  upstream: 8.8.8.8:53
+allowlist:
+  - google.com

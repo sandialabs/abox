@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [],
+    "deny": [],
+    "additionalDirectories": []
+  },
+  "sandbox": {
+    "permissions": "auto-allow"
+  }
+}

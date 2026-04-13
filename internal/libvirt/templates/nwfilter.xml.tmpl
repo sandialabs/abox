@@ -1,0 +1,50 @@
+<filter name='abox-{{.Name}}-traffic' chain='root' priority='-500'>
+{{if .UUID}}  <uuid>{{.UUID}}</uuid>
+{{end}}  <!-- Allow all inbound traffic (responses) -->
+  <rule action='accept' direction='in' priority='100'>
+    <all/>
+  </rule>
+
+  <!-- Allow DHCP client traffic -->
+  <rule action='accept' direction='out' priority='100'>
+    <udp srcportstart='68' srcportend='68' dstportstart='67' dstportend='67'/>
+  </rule>
+
+  <!-- Allow DNS to gateway port 53 (UDP).
+       The VM sends queries to port 53, which nwfilter sees first. -->
+  <rule action='accept' direction='out' priority='100'>
+    <udp dstipaddr='{{.Gateway}}' dstportstart='53' dstportend='53'/>
+  </rule>
+
+  <!-- Allow DNS to gateway port 53 (TCP) -->
+  <rule action='accept' direction='out' priority='100'>
+    <tcp dstipaddr='{{.Gateway}}' dstportstart='53' dstportend='53'/>
+  </rule>
+
+  <!-- Allow DNS to dnsfilter port (UDP).
+       After iptables NAT PREROUTING redirects port 53 to the dnsfilter port,
+       libvirt's iptables rules (generated from nwfilter) need to allow it. -->
+  <rule action='accept' direction='out' priority='100'>
+    <udp dstipaddr='{{.Gateway}}' dstportstart='{{.DNSPort}}' dstportend='{{.DNSPort}}'/>
+  </rule>
+
+  <!-- Allow DNS to dnsfilter port (TCP) -->
+  <rule action='accept' direction='out' priority='100'>
+    <tcp dstipaddr='{{.Gateway}}' dstportstart='{{.DNSPort}}' dstportend='{{.DNSPort}}'/>
+  </rule>
+
+  <!-- Allow HTTP proxy on gateway (all HTTP/HTTPS must go through filtering proxy). -->
+  <rule action='accept' direction='out' priority='100'>
+    <tcp dstipaddr='{{.Gateway}}' dstportstart='{{.HTTPPort}}' dstportend='{{.HTTPPort}}'/>
+  </rule>
+
+  <!-- Allow ICMP to gateway -->
+  <rule action='accept' direction='out' priority='150'>
+    <icmp dstipaddr='{{.Gateway}}'/>
+  </rule>
+
+  <!-- Drop all other outbound -->
+  <rule action='drop' direction='out' priority='999'>
+    <all/>
+  </rule>
+</filter>

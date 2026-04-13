@@ -1,0 +1,38 @@
+# Binaries
+/abox
+/abox-helper
+/gendocs
+/matrix
+*.exe
+
+# GoReleaser output
+/dist/
+
+# Generated docs (gendocs)
+/manpages/
+/completions/
+
+# Editor/IDE
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test results
+e2e-results/
+
+# Notes (local only)
+notes/
+
+# Temporary files
+*.tmp
+*.bak
