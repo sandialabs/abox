@@ -44,8 +44,8 @@ flowchart TB
 ## Quick Start
 
 ```bash
-# Build and install
-go build -o abox ./cmd/abox
+# Build and install to ~/.local/bin (ensure it's on PATH)
+make install
 abox base pull ubuntu-24.04    # Or: abox base list  (to see all available images)
 
 # Create and start an instance
@@ -78,8 +78,8 @@ abox down --remove       # Stop and delete
 # Debian/Ubuntu
 sudo apt install libvirt-daemon-system qemu-kvm qemu-utils sshfs fuse3 genisoimage
 
-# Build abox
-go build -o abox ./cmd/abox
+# Build abox (static binary with embedded version info)
+make build
 
 # Verify dependencies
 abox check-deps

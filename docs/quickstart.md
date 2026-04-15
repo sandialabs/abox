@@ -20,7 +20,7 @@ Install the required packages for your distribution. See [System Requirements: I
 ```bash
 git clone https://github.com/sandialabs/abox.git
 cd abox
-go build -o abox ./cmd/abox
+make build
 ```
 
 ### 3. Add to PATH
