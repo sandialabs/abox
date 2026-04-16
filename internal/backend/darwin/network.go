@@ -38,7 +38,8 @@ func (m *NetworkManager) Exists(name string) bool {
 	return true
 }
 
-// IsActive returns true if the associated VM is running.
+// IsActive returns true on macOS — vmnet is a system service that is always available.
+// The network becomes active for a specific VM when that VM starts.
 func (m *NetworkManager) IsActive(name string) bool {
-	return false
+	return true
 }
