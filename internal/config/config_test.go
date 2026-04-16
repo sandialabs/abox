@@ -326,6 +326,42 @@ func TestGetPaths_PathTraversal(t *testing.T) {
 	}
 }
 
+func TestGetPathsWithOptions_DiskFormat(t *testing.T) {
+	mock := NewMockFileSystem()
+	prev := SetFileSystem(mock)
+	defer SetFileSystem(prev)
+
+	t.Run("default_format_is_qcow2", func(t *testing.T) {
+		paths, err := GetPathsWithOptions("test", "/tmp/storage", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.HasSuffix(paths.Disk, "disk.qcow2") {
+			t.Errorf("Disk = %q, want suffix disk.qcow2", paths.Disk)
+		}
+	})
+
+	t.Run("raw_format", func(t *testing.T) {
+		paths, err := GetPathsWithOptions("test", "/tmp/storage", "raw")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.HasSuffix(paths.Disk, "disk.raw") {
+			t.Errorf("Disk = %q, want suffix disk.raw", paths.Disk)
+		}
+	})
+
+	t.Run("qcow2_format_explicit", func(t *testing.T) {
+		paths, err := GetPathsWithOptions("test", "/tmp/storage", "qcow2")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.HasSuffix(paths.Disk, "disk.qcow2") {
+			t.Errorf("Disk = %q, want suffix disk.qcow2", paths.Disk)
+		}
+	})
+}
+
 func TestDefaultInstance(t *testing.T) {
 	inst := DefaultInstance("test")
 

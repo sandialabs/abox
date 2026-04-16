@@ -227,8 +227,12 @@ func runCreate(ctx context.Context, opts *Options, name string) error {
 		return fmt.Errorf("failed to detect backend: %w", err)
 	}
 
-	// Get paths using the backend's storage directory
-	paths, err := config.GetPathsWithStorage(name, be.StorageDir())
+	// Get paths using the backend's storage directory and disk format
+	diskFormat := ""
+	if dfp, ok := be.(backend.DiskFormatProvider); ok {
+		diskFormat = dfp.DiskFormat()
+	}
+	paths, err := config.GetPathsWithOptions(name, be.StorageDir(), diskFormat)
 	if err != nil {
 		return err
 	}
@@ -493,7 +497,7 @@ func allocateSubnet(opts *Options, be backend.Backend) (string, string, error) {
 
 // buildInstanceConfig constructs the instance configuration struct.
 func buildInstanceConfig(opts *Options, name string, paths *config.Paths, be backend.Backend, gateway, subnet string) *config.Instance {
-	return &config.Instance{
+	inst := &config.Instance{
 		Version:    config.CurrentInstanceVersion,
 		Name:       name,
 		Backend:    be.Name(),
@@ -524,6 +528,13 @@ func buildInstanceConfig(opts *Options, name string, paths *config.Paths, be bac
 		MACAddress: be.GenerateMAC(),
 		IPAddress:  deriveIPAddress(gateway),
 	}
+
+	// Set disk format if the backend requires a non-default format (e.g., "raw" for vfkit)
+	if dfp, ok := be.(backend.DiskFormatProvider); ok {
+		inst.DiskFormat = dfp.DiskFormat()
+	}
+
+	return inst
 }
 
 // createInstanceResources creates SSH keys, CA cert, allowlist, network, disk, and VM.

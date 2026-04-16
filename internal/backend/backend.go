@@ -232,6 +232,15 @@ type TrafficInterceptor interface {
 	GetFilterUUID(filterName string) string
 }
 
+// DiskFormatProvider is an optional interface for backends that use a non-default
+// disk image format. The default format is "qcow2". Backends that require a
+// different format (e.g., "raw" for vfkit on macOS) implement this interface.
+// Check support via type assertion: dfp, ok := be.(DiskFormatProvider)
+type DiskFormatProvider interface {
+	// DiskFormat returns the disk image format for this backend (e.g., "raw", "qcow2").
+	DiskFormat() string
+}
+
 // SubnetProvider is an optional interface for backends that manage their own
 // networking subnet (e.g., macOS vmnet shared mode). When implemented, the
 // create flow uses this instead of the default subnet pool allocation.

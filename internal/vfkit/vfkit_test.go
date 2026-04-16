@@ -13,7 +13,7 @@ func TestBuildArgs_Basic(t *testing.T) {
 		Name:       "test",
 		CPUs:       2,
 		MemoryMB:   4096,
-		DiskPath:   "/tmp/disk.qcow2",
+		DiskPath:   "/tmp/disk.raw",
 		MACAddress: "02:ab:00:11:22:33",
 	}
 
@@ -21,7 +21,7 @@ func TestBuildArgs_Basic(t *testing.T) {
 
 	assertContains(t, args, "--cpus", "2")
 	assertContains(t, args, "--memory", "4096")
-	assertContainsDevice(t, args, "virtio-blk,path=/tmp/disk.qcow2")
+	assertContainsDevice(t, args, "virtio-blk,path=/tmp/disk.raw")
 	assertContainsDevice(t, args, "virtio-net,nat,mac=02:ab:00:11:22:33")
 	assertContainsBootloader(t, args, "efi,variable-store=/tmp/efi-variable-store,create")
 
@@ -40,7 +40,7 @@ func TestBuildArgs_WithCloudInit(t *testing.T) {
 		Name:         "test",
 		CPUs:         1,
 		MemoryMB:     2048,
-		DiskPath:     "/tmp/disk.qcow2",
+		DiskPath:     "/tmp/disk.raw",
 		CloudInitISO: "/tmp/cidata.iso",
 		MACAddress:   "02:ab:00:44:55:66",
 	}
@@ -68,7 +68,7 @@ func TestBuildArgs_WithConsoleLog(t *testing.T) {
 		Name:       "test",
 		CPUs:       2,
 		MemoryMB:   4096,
-		DiskPath:   "/tmp/disk.qcow2",
+		DiskPath:   "/tmp/disk.raw",
 		MACAddress: "02:ab:00:11:22:33",
 		ConsoleLog: "/tmp/console.log",
 	}
@@ -82,7 +82,7 @@ func TestBuildArgs_WithRESTAPI(t *testing.T) {
 		Name:       "test",
 		CPUs:       2,
 		MemoryMB:   4096,
-		DiskPath:   "/tmp/disk.qcow2",
+		DiskPath:   "/tmp/disk.raw",
 		MACAddress: "02:ab:00:11:22:33",
 		RESTfulURI: "tcp://localhost:12345",
 	}
@@ -96,7 +96,7 @@ func TestBuildArgs_Full(t *testing.T) {
 		Name:         "myvm",
 		CPUs:         4,
 		MemoryMB:     8192,
-		DiskPath:     "/data/instances/myvm/disk.qcow2",
+		DiskPath:     "/data/instances/myvm/disk.raw",
 		CloudInitISO: "/data/instances/myvm/cidata.iso",
 		MACAddress:   "02:ab:00:aa:bb:cc",
 		ConsoleLog:   "/data/instances/myvm/console.log",
@@ -107,7 +107,7 @@ func TestBuildArgs_Full(t *testing.T) {
 
 	assertContains(t, args, "--cpus", "4")
 	assertContains(t, args, "--memory", "8192")
-	assertContainsDevice(t, args, "virtio-blk,path=/data/instances/myvm/disk.qcow2")
+	assertContainsDevice(t, args, "virtio-blk,path=/data/instances/myvm/disk.raw")
 	assertContainsDevice(t, args, "virtio-blk,path=/data/instances/myvm/cidata.iso")
 	assertContainsDevice(t, args, "virtio-net,nat,mac=02:ab:00:aa:bb:cc")
 	assertContainsDevice(t, args, "virtio-serial,logFilePath=/data/instances/myvm/console.log")
@@ -116,7 +116,7 @@ func TestBuildArgs_Full(t *testing.T) {
 }
 
 func TestEFIStorePath(t *testing.T) {
-	cfg := VMConfig{DiskPath: "/data/instances/myvm/disk.qcow2"}
+	cfg := VMConfig{DiskPath: "/data/instances/myvm/disk.raw"}
 	want := "/data/instances/myvm/efi-variable-store"
 	if got := cfg.EFIStorePath(); got != want {
 		t.Errorf("EFIStorePath() = %q, want %q", got, want)

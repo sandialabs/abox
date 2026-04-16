@@ -126,6 +126,11 @@ func (b *Backend) StorageDir() string {
 	return storageDir()
 }
 
+// DiskFormat returns "raw" — vfkit (Apple Virtualization.framework) only supports raw disk images.
+func (b *Backend) DiskFormat() string {
+	return "raw"
+}
+
 // NetworkDefaults returns the vmnet shared mode gateway and subnet.
 // This implements backend.SubnetProvider so the create flow uses
 // vmnet's managed network instead of allocating from the abox subnet pool.

@@ -121,6 +121,7 @@ type Instance struct {
 	Backend       string         `yaml:"backend,omitempty"`        // VM backend (libvirt, proxmox, vfkit); auto-detected if empty
 	BackendConfig map[string]any `yaml:"backend_config,omitempty"` // backend-specific overrides (each backend owns its keys)
 	StorageDir    string         `yaml:"storage_dir,omitempty"`    // backend storage root for disk images; set at creation time
+	DiskFormat    string         `yaml:"disk_format,omitempty"`    // disk image format: "qcow2" (default) or "raw" (vfkit/macOS)
 	CPUs          int            `yaml:"cpus"`
 	Memory        int            `yaml:"memory"` // MB
 	Base          string         `yaml:"base"`
@@ -186,7 +187,7 @@ type Paths struct {
 	Config           string // ~/.local/share/abox/instances/<name>/config.yaml
 	Allowlist        string // ~/.local/share/abox/instances/<name>/allowlist.conf
 	DiskDir          string // <storage_dir>/instances/<name>
-	Disk             string // <storage_dir>/instances/<name>/disk.qcow2
+	Disk             string // <storage_dir>/instances/<name>/disk.qcow2 (or disk.raw for darwin)
 	CloudInitISO     string // <storage_dir>/instances/<name>/cidata.iso
 	SSHKey           string // ~/.local/share/abox/instances/<name>/id_ed25519
 	KnownHosts       string // ~/.local/share/abox/instances/<name>/known_hosts
@@ -241,7 +242,16 @@ func GetPaths(name string) (*Paths, error) {
 // GetPathsWithStorage returns all paths for the given instance name,
 // using storageDir as the root for backend-managed disk images.
 // If storageDir is empty, falls back to LibvirtImagesDir.
+// Disk format defaults to "qcow2". Use GetPathsWithOptions for raw format.
 func GetPathsWithStorage(name, storageDir string) (*Paths, error) {
+	return GetPathsWithOptions(name, storageDir, "")
+}
+
+// GetPathsWithOptions returns all paths for the given instance name,
+// using storageDir as the root and diskFormat for the disk image extension.
+// If storageDir is empty, falls back to LibvirtImagesDir.
+// If diskFormat is empty, defaults to "qcow2".
+func GetPathsWithOptions(name, storageDir, diskFormat string) (*Paths, error) {
 	if storageDir == "" {
 		storageDir = LibvirtImagesDir
 	}
@@ -272,6 +282,12 @@ func GetPathsWithStorage(name, storageDir string) (*Paths, error) {
 	// Disk images stored in backend-accessible location
 	diskDir := filepath.Join(storageDir, "instances", name)
 
+	// Determine disk filename from format
+	diskFilename := "disk.qcow2"
+	if diskFormat == "raw" {
+		diskFilename = "disk.raw"
+	}
+
 	// Logs directory under instance
 	logsDir := filepath.Join(cleanInstanceDir, "logs")
 
@@ -285,7 +301,7 @@ func GetPathsWithStorage(name, storageDir string) (*Paths, error) {
 		Config:           filepath.Join(cleanInstanceDir, "config.yaml"),
 		Allowlist:        filepath.Join(cleanInstanceDir, "allowlist.conf"),
 		DiskDir:          diskDir,
-		Disk:             filepath.Join(diskDir, "disk.qcow2"),
+		Disk:             filepath.Join(diskDir, diskFilename),
 		CloudInitISO:     filepath.Join(diskDir, "cidata.iso"),
 		SSHKey:           filepath.Join(cleanInstanceDir, "id_ed25519"),
 		KnownHosts:       filepath.Join(cleanInstanceDir, "known_hosts"),
@@ -408,10 +424,14 @@ func Load(name string) (*Instance, *Paths, error) {
 		return nil, nil, fmt.Errorf("invalid config: %w", err)
 	}
 
-	// Recompute paths with the instance's storage dir if it differs from default
+	// Recompute paths with the instance's storage dir and disk format
 	paths := initialPaths
-	if inst.StorageDir != "" && inst.StorageDir != LibvirtImagesDir {
-		paths, err = GetPathsWithStorage(name, inst.StorageDir)
+	if inst.StorageDir != "" || inst.DiskFormat != "" {
+		storageDir := inst.StorageDir
+		if storageDir == "" {
+			storageDir = LibvirtImagesDir
+		}
+		paths, err = GetPathsWithOptions(name, storageDir, inst.DiskFormat)
 		if err != nil {
 			return nil, nil, err
 		}

@@ -287,7 +287,11 @@ func allocateResources(opts *Options, name string, manifest *export.Manifest, w 
 		return nil, nil, nil, nil, fmt.Errorf("failed to get backend: %w", err)
 	}
 
-	paths, err := config.GetPathsWithStorage(name, be.StorageDir())
+	diskFormat := ""
+	if dfp, ok := be.(backend.DiskFormatProvider); ok {
+		diskFormat = dfp.DiskFormat()
+	}
+	paths, err := config.GetPathsWithOptions(name, be.StorageDir(), diskFormat)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -316,15 +320,16 @@ func allocateResources(opts *Options, name string, manifest *export.Manifest, w 
 	cleanup.be = be
 
 	inst := &config.Instance{
-		Version: config.CurrentInstanceVersion,
-		Name:    name,
-		Backend: be.Name(),
-		CPUs:    cpus,
-		Memory:  memory,
-		Base:    manifest.Instance.Base,
-		Subnet:  subnet,
-		Gateway: gateway,
-		Bridge:  bridge,
+		Version:    config.CurrentInstanceVersion,
+		Name:       name,
+		Backend:    be.Name(),
+		DiskFormat: diskFormat,
+		CPUs:       cpus,
+		Memory:     memory,
+		Base:       manifest.Instance.Base,
+		Subnet:     subnet,
+		Gateway:    gateway,
+		Bridge:     bridge,
 		DNS: config.DNSConfig{
 			Port:     0,
 			Upstream: "8.8.8.8:53",

@@ -215,7 +215,7 @@ func TestBuildVMConfig(t *testing.T) {
 	_ = os.MkdirAll(logsDir, 0o755)
 
 	paths := &config.Paths{
-		Disk:         filepath.Join(tmpDir, "disk.qcow2"),
+		Disk:         filepath.Join(tmpDir, "disk.raw"),
 		CloudInitISO: cloudInitISO,
 		LogsDir:      logsDir,
 	}

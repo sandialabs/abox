@@ -12,7 +12,7 @@ type VMConfig struct {
 	Name         string // instance name (for logging)
 	CPUs         int
 	MemoryMB     int
-	DiskPath     string // path to qcow2/raw disk image
+	DiskPath     string // path to raw disk image (vfkit only supports raw format)
 	CloudInitISO string // path to cidata.iso (optional, empty to skip)
 	MACAddress   string // e.g. "02:ab:00:xx:xx:xx"
 	ConsoleLog   string // path for virtio-serial console output (optional)

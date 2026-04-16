@@ -186,9 +186,13 @@ func instancesUsingBase(baseImagePath string) ([]string, error) {
 			continue
 		}
 
+		// Check for both qcow2 (libvirt) and raw (darwin/vfkit) disk formats
 		diskPath := filepath.Join(instancesDir, entry.Name(), "disk.qcow2")
 		if _, err := os.Stat(diskPath); os.IsNotExist(err) {
-			continue
+			diskPath = filepath.Join(instancesDir, entry.Name(), "disk.raw")
+			if _, err := os.Stat(diskPath); os.IsNotExist(err) {
+				continue
+			}
 		}
 
 		cmd := exec.Command("qemu-img", "info", "--output=json", diskPath)
