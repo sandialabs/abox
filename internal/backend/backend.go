@@ -3,7 +3,7 @@
 // Currently available backends:
 //   - libvirt (Linux): QEMU/KVM via libvirt
 //
-// Additional backends (proxmox, macos) are planned for future releases.
+// Additional backends (proxmox, vfkit) are planned for future releases.
 //
 // Backend selection is automatic at runtime based on platform and availability.
 // The detected backend is recorded in instance config at create time.
@@ -20,7 +20,7 @@ import (
 // Backend is the main interface for VM management backends.
 // Each backend implements platform-specific operations for VMs, networks, and disks.
 type Backend interface {
-	// Name returns the backend identifier (e.g., "libvirt", "proxmox", "macos").
+	// Name returns the backend identifier (e.g., "libvirt", "proxmox", "vfkit").
 	Name() string
 
 	// IsAvailable checks if this backend can be used on the current system.

@@ -11,14 +11,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/sandialabs/abox/internal/backend"
 	"github.com/sandialabs/abox/internal/config"
+	"github.com/sandialabs/abox/internal/vfkit"
 )
 
 const (
 	// Name is the identifier for this backend.
-	Name = "macos"
+	Name = "vfkit"
 
 	// Priority determines auto-detection order. Lower is tried first.
 	Priority = 10
@@ -93,13 +95,11 @@ func (b *Backend) TrafficInterceptor() backend.TrafficInterceptor {
 
 // DryRun outputs the vfkit configuration that would be used for an instance.
 func (b *Backend) DryRun(inst *config.Instance, paths *config.Paths, w io.Writer, opts backend.VMCreateOptions) error {
-	fmt.Fprintln(w, "=== vfkit Configuration ===")
-	fmt.Fprintf(w, "CPUs: %d\n", inst.CPUs)
-	fmt.Fprintf(w, "Memory: %d\n", inst.Memory)
-	fmt.Fprintf(w, "Disk: %s\n", paths.Disk)
-	fmt.Fprintf(w, "Cloud-init ISO: %s\n", paths.CloudInitISO)
-	fmt.Fprintf(w, "Network: vmnet shared (NAT)\n")
-	fmt.Fprintf(w, "MAC: %s\n", inst.MACAddress)
+	cfg := buildVMConfig(inst, paths)
+	args := vfkit.BuildArgs(cfg)
+
+	fmt.Fprintln(w, "=== vfkit Command ===")
+	fmt.Fprintf(w, "vfkit \\\n  %s\n", strings.Join(args, " \\\n  "))
 	return nil
 }
 

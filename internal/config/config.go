@@ -118,7 +118,7 @@ type MonitorConfig struct {
 type Instance struct {
 	Version       int            `yaml:"version"`
 	Name          string         `yaml:"name"`
-	Backend       string         `yaml:"backend,omitempty"`        // VM backend (libvirt, proxmox, macos); auto-detected if empty
+	Backend       string         `yaml:"backend,omitempty"`        // VM backend (libvirt, proxmox, vfkit); auto-detected if empty
 	BackendConfig map[string]any `yaml:"backend_config,omitempty"` // backend-specific overrides (each backend owns its keys)
 	StorageDir    string         `yaml:"storage_dir,omitempty"`    // backend storage root for disk images; set at creation time
 	CPUs          int            `yaml:"cpus"`
