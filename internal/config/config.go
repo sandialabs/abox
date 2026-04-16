@@ -328,12 +328,15 @@ func getBaseDir() (string, error) {
 }
 
 // RuntimeDir returns the user's runtime directory for sockets and temp files.
-// Uses XDG_RUNTIME_DIR if set, otherwise falls back to /run/user/<uid>.
+// Uses XDG_RUNTIME_DIR if set, otherwise falls back to a platform-specific default:
+//   - Linux: /run/user/<uid>
+//   - macOS: os.TempDir() (typically /var/folders/xx/.../T/, private to the user)
+//
 // Returns an error if the directory doesn't exist.
 func RuntimeDir() (string, error) {
 	dir := fsys.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {
-		dir = fmt.Sprintf("/run/user/%d", os.Getuid())
+		dir = runtimeDirFallback()
 	}
 	if _, err := fsys.Stat(dir); os.IsNotExist(err) {
 		return "", fmt.Errorf("runtime directory %s does not exist; ensure you are logged in or set XDG_RUNTIME_DIR", dir)

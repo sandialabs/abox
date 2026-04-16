@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 
@@ -308,6 +309,12 @@ func (f *Factory) PrivilegeClient() (rpc.PrivilegeClient, error) {
 		}
 		f.privilegeHelper = helper
 		return helper.client, nil
+	}
+
+	// On macOS, use a direct client that executes operations as the current user
+	// (no privilege escalation needed — storage dirs are user-owned).
+	if runtime.GOOS == "darwin" {
+		return rpc.NewDirectClient(), nil
 	}
 
 	// Determine socket directory: prefer XDG_RUNTIME_DIR for security

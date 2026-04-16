@@ -18,7 +18,6 @@ import (
 	"github.com/sandialabs/abox/pkg/cmd/export"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 	"github.com/sandialabs/abox/pkg/cmd/forward"
-	"github.com/sandialabs/abox/pkg/cmd/helper"
 	"github.com/sandialabs/abox/pkg/cmd/helptopics"
 	"github.com/sandialabs/abox/pkg/cmd/http"
 	importcmd "github.com/sandialabs/abox/pkg/cmd/importcmd"
@@ -45,10 +44,6 @@ import (
 	versioncmd "github.com/sandialabs/abox/pkg/cmd/version"
 
 	"github.com/spf13/cobra"
-
-	// Register VM backends via blank imports.
-	// Backends self-register in their init() functions.
-	_ "github.com/sandialabs/abox/internal/backend/libvirt"
 )
 
 // Command group IDs for organizing help output.
@@ -253,6 +248,6 @@ func addSubcommands(cmd *cobra.Command, f *factory.Factory) {
 	addGroupedCommand(cmd, doctor.NewCmdDoctor(f, nil), groupUtilities)
 	addGroupedCommand(cmd, versioncmd.NewCmdVersion(f, nil), groupUtilities)
 
-	// Hidden helper command for privilege escalation
-	cmd.AddCommand(helper.NewCmdHelper())
+	// Hidden helper command for privilege escalation (platform-specific)
+	addPlatformCommands(cmd)
 }

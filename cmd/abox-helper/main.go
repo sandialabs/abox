@@ -1,3 +1,5 @@
+//go:build linux
+
 // abox-helper is a minimal setuid root binary for the abox privilege helper.
 //
 // It is designed to be installed as:
