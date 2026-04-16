@@ -16,6 +16,7 @@ import (
 	"github.com/sandialabs/abox/internal/backend"
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/vfkit"
+	"github.com/sandialabs/abox/internal/vmnet"
 )
 
 const (
@@ -123,4 +124,11 @@ func (b *Backend) GenerateMAC() string {
 // StorageDir returns the root directory for disk images on macOS.
 func (b *Backend) StorageDir() string {
 	return storageDir()
+}
+
+// NetworkDefaults returns the vmnet shared mode gateway and subnet.
+// This implements backend.SubnetProvider so the create flow uses
+// vmnet's managed network instead of allocating from the abox subnet pool.
+func (b *Backend) NetworkDefaults() (gateway, subnet string) {
+	return vmnet.GatewayIP(), vmnet.Subnet()
 }

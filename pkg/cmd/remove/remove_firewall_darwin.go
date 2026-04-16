@@ -6,8 +6,12 @@ import (
 	"io"
 
 	"github.com/sandialabs/abox/internal/config"
+	"github.com/sandialabs/abox/internal/firewall"
 )
 
-// cleanupFirewallRules is a no-op on macOS.
-// Phase 6 will add pfctl cleanup here.
-func cleanupFirewallRules(_ io.Writer, _ *Options, _ *config.Instance, _ string) {}
+// cleanupFirewallRules removes pfctl rules for the instance during removal.
+func cleanupFirewallRules(_ io.Writer, opts *Options, _ *config.Instance, name string) {
+	if client, err := opts.Factory.PrivilegeClientFor(name); err == nil {
+		firewall.NewPfctlClient(client).Flush(name)
+	}
+}

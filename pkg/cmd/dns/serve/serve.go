@@ -79,8 +79,9 @@ func runServe(opts *Options, name string) error {
 	}
 	defer server.CloseTrafficLogger()
 
-	// Listen on the gateway IP because iptables REDIRECT sends packets to the bridge IP.
-	listenAddr := fmt.Sprintf("%s:%d", setup.Inst.Gateway, setup.Inst.DNS.Port)
+	// On Linux, listen on the gateway IP because iptables REDIRECT sends packets to the bridge IP.
+	// On macOS, listen on 127.0.0.1 because pfctl redirects VM DNS traffic to localhost.
+	listenAddr := fmt.Sprintf("%s:%d", filterbase.DNSListenAddress(setup.Inst.Gateway), setup.Inst.DNS.Port)
 
 	dnsServer, err := server.Start(listenAddr)
 	if err != nil {
@@ -88,7 +89,7 @@ func runServe(opts *Options, name string) error {
 	}
 	defer func() { _ = dnsServer.Shutdown() }()
 
-	fmt.Fprintf(os.Stderr, "DNS server listening on %s:%d (UDP+TCP)\n", setup.Inst.Gateway, dnsServer.Port)
+	fmt.Fprintf(os.Stderr, "DNS server listening on %s:%d (UDP+TCP)\n", filterbase.DNSListenAddress(setup.Inst.Gateway), dnsServer.Port)
 
 	// Start API server
 	api := dnsfilter.NewAPIServer(setup.Paths.DNSSocket, setup.Filter, server, setup.Loader)

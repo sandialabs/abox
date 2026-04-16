@@ -86,9 +86,9 @@ func runServe(opts *Options, name string) error {
 	}
 	defer server.CloseTrafficLogger()
 
-	// Start HTTP server
-	// Listen on the gateway IP for the HTTP proxy
-	listenAddr := fmt.Sprintf("%s:%d", setup.Inst.Gateway, setup.Inst.HTTP.Port)
+	// On Linux, listen on the gateway IP (bridge interface).
+	// On macOS, listen on 0.0.0.0 so the VM can reach the proxy at the vmnet gateway.
+	listenAddr := fmt.Sprintf("%s:%d", filterbase.HTTPListenAddress(setup.Inst.Gateway), setup.Inst.HTTP.Port)
 
 	if err := server.Start(listenAddr); err != nil {
 		return fmt.Errorf("failed to start HTTP server: %w", err)
@@ -99,7 +99,7 @@ func runServe(opts *Options, name string) error {
 		_ = server.Shutdown(ctx)
 	}()
 
-	fmt.Fprintf(os.Stderr, "HTTP proxy listening on %s:%d\n", setup.Inst.Gateway, server.GetListenPort())
+	fmt.Fprintf(os.Stderr, "HTTP proxy listening on %s:%d\n", filterbase.HTTPListenAddress(setup.Inst.Gateway), server.GetListenPort())
 
 	// Start API server
 	api := httpfilter.NewAPIServer(setup.Paths.HTTPSocket, setup.Filter, server, setup.Loader)

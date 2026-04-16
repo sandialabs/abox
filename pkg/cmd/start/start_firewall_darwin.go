@@ -10,7 +10,8 @@ import (
 )
 
 // setupHostFirewall is a no-op on macOS.
-// Phase 6 will add pfctl-based DNS redirect rules here.
+// pfctl DNS redirect rules are set up post-boot in setupPostBootFirewall
+// because vmnet assigns VM IPs dynamically via DHCP.
 func setupHostFirewall(_ io.Writer, _ *factory.Factory, _ *config.Instance, _ string) error {
 	return nil
 }

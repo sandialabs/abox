@@ -324,7 +324,7 @@ func initInstance(
 		return nil, nil, "", err
 	}
 
-	subnet, gateway, err := allocateSubnet(opts)
+	subnet, gateway, err := allocateSubnet(opts, be)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -467,13 +467,21 @@ func warnCustomTemplate(opts *Options, be backend.Backend) {
 }
 
 // allocateSubnet validates or allocates a subnet and returns subnet, gateway, and any error.
-func allocateSubnet(opts *Options) (string, string, error) {
+// If the backend implements SubnetProvider (e.g., macOS vmnet), its managed network
+// is used instead of the abox subnet pool.
+func allocateSubnet(opts *Options, be backend.Backend) (string, string, error) {
 	if opts.Subnet != "" {
 		gateway, _, err := config.ValidateSubnet(opts.Subnet)
 		if err != nil {
 			return "", "", fmt.Errorf("invalid subnet: %w", err)
 		}
 		return opts.Subnet, gateway, nil
+	}
+
+	// Use backend-managed network if available (e.g., vmnet shared mode on macOS).
+	if sp, ok := be.(backend.SubnetProvider); ok {
+		gateway, subnet := sp.NetworkDefaults()
+		return subnet, gateway, nil
 	}
 
 	subnet, gateway, _, err := config.AllocateSubnet("")
@@ -735,8 +743,12 @@ func runDryRun(opts *Options, name string, paths *config.Paths, be backend.Backe
 	var gateway string
 	var err error
 	if subnet == "" {
-		subnet = "10.10.10.0/24"
-		gateway = "10.10.10.1"
+		if sp, ok := be.(backend.SubnetProvider); ok {
+			gateway, subnet = sp.NetworkDefaults()
+		} else {
+			subnet = "10.10.10.0/24"
+			gateway = "10.10.10.1"
+		}
 	} else {
 		// Validate the provided subnet
 		gateway, _, err = config.ValidateSubnet(opts.Subnet)

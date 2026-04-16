@@ -108,6 +108,13 @@ func runStart(ctx context.Context, opts *Options, name string) error {
 
 	ip := waitForIP(w, be, name)
 
+	// On macOS, pfctl DNS redirect rules are set up after the VM boots and
+	// its IP is known (vmnet assigns IPs dynamically). On Linux this is a no-op
+	// since iptables rules are set up pre-boot via setupHostFirewall.
+	if err := setupPostBootFirewall(w, opts.Factory, inst, name, ip); err != nil {
+		return err
+	}
+
 	if !opts.Brief {
 		ipInfo := " (IP not yet available)"
 		if ip != "" {

@@ -72,6 +72,8 @@ const (
 	ActionSecurityFiltered = "security.filtered"
 	ActionIptablesAddDNS   = "iptables.add_dns_redirect"
 	ActionIptablesFlushDNS = "iptables.flush_dns_redirect"
+	ActionPfctlAddDNS      = "pfctl.add_dns_redirect"
+	ActionPfctlFlushDNS    = "pfctl.flush_dns_redirect"
 	ActionTetragonDownload = "tetragon.download"
 	ActionMonitorStatus    = "monitor.status"
 	ActionMonitorShutdown  = "monitor.shutdown"

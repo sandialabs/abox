@@ -1,9 +1,10 @@
 // Package backend provides a pluggable interface for VM management backends.
 //
-// Currently available backends:
+// Available backends:
 //   - libvirt (Linux): QEMU/KVM via libvirt
+//   - vfkit (macOS): Apple Virtualization.framework via vfkit
 //
-// Additional backends (proxmox, vfkit) are planned for future releases.
+// Additional backends (proxmox) are planned for future releases.
 //
 // Backend selection is automatic at runtime based on platform and availability.
 // The detected backend is recorded in instance config at create time.
@@ -229,6 +230,16 @@ type TrafficInterceptor interface {
 
 	// GetFilterUUID returns the UUID of a filter, or empty string if not found.
 	GetFilterUUID(filterName string) string
+}
+
+// SubnetProvider is an optional interface for backends that manage their own
+// networking subnet (e.g., macOS vmnet shared mode). When implemented, the
+// create flow uses this instead of the default subnet pool allocation.
+// Check support via type assertion: sp, ok := be.(SubnetProvider)
+type SubnetProvider interface {
+	// NetworkDefaults returns the gateway IP and subnet CIDR for this backend's
+	// managed network. For example, vmnet shared mode returns ("192.168.64.1", "192.168.64.0/24").
+	NetworkDefaults() (gateway, subnet string)
 }
 
 // TemplateValidator is an optional interface for backends that support custom templates.
