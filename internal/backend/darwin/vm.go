@@ -145,7 +145,7 @@ func getIPByMAC(mac string) (string, error) {
 // Exported-style name but unexported for testability without exec.
 func parseARPOutput(output, mac string) (string, error) {
 	normalized := normalizeMAC(mac)
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		// Format: ? (IP) at MAC on IFACE ...
 		if !strings.Contains(line, " at ") {
 			continue
@@ -274,7 +274,10 @@ func (m *VMManager) Remove(ctx context.Context, name string) error {
 	// Clear backend state so Exists returns false.
 	inst, paths, err := loadInstanceState(name)
 	if err != nil {
-		// If config can't be loaded, nothing to clear.
+		// Remove is idempotent: a missing/unreadable config means there's
+		// nothing left to clear, and we don't want to fail a caller that's
+		// just cleaning up a half-created instance.
+		logging.Debug("skipping backend state cleanup: config unreadable", "name", name, "error", err)
 		return nil
 	}
 
