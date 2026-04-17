@@ -18,9 +18,10 @@ import (
 // mockPfctlPrivilegeClient implements rpc.PrivilegeClient for pfctl testing.
 type mockPfctlPrivilegeClient struct {
 	rpc.PrivilegeClient
-	pfctlEnableFunc      func(ctx context.Context, in *rpc.Empty, opts ...grpc.CallOption) (*rpc.Empty, error)
-	pfctlLoadAnchorFunc  func(ctx context.Context, in *rpc.PfctlAnchorReq, opts ...grpc.CallOption) (*rpc.Empty, error)
-	pfctlFlushAnchorFunc func(ctx context.Context, in *rpc.PfctlAnchorReq, opts ...grpc.CallOption) (*rpc.Empty, error)
+	pfctlEnableFunc         func(ctx context.Context, in *rpc.Empty, opts ...grpc.CallOption) (*rpc.Empty, error)
+	pfctlLoadAnchorFunc     func(ctx context.Context, in *rpc.PfctlAnchorReq, opts ...grpc.CallOption) (*rpc.Empty, error)
+	pfctlFlushAnchorFunc    func(ctx context.Context, in *rpc.PfctlAnchorReq, opts ...grpc.CallOption) (*rpc.Empty, error)
+	pfctlTeardownConfigFunc func(ctx context.Context, in *rpc.Empty, opts ...grpc.CallOption) (*rpc.Empty, error)
 }
 
 func (m *mockPfctlPrivilegeClient) PfctlEnable(ctx context.Context, in *rpc.Empty, opts ...grpc.CallOption) (*rpc.Empty, error) {
@@ -40,6 +41,13 @@ func (m *mockPfctlPrivilegeClient) PfctlLoadAnchor(ctx context.Context, in *rpc.
 func (m *mockPfctlPrivilegeClient) PfctlFlushAnchor(ctx context.Context, in *rpc.PfctlAnchorReq, opts ...grpc.CallOption) (*rpc.Empty, error) {
 	if m.pfctlFlushAnchorFunc != nil {
 		return m.pfctlFlushAnchorFunc(ctx, in, opts...)
+	}
+	return &rpc.Empty{}, nil
+}
+
+func (m *mockPfctlPrivilegeClient) PfctlTeardownConfig(ctx context.Context, in *rpc.Empty, opts ...grpc.CallOption) (*rpc.Empty, error) {
+	if m.pfctlTeardownConfigFunc != nil {
+		return m.pfctlTeardownConfigFunc(ctx, in, opts...)
 	}
 	return &rpc.Empty{}, nil
 }
@@ -251,5 +259,40 @@ func TestFilterMarkerLifecycle(t *testing.T) {
 	// Remove on missing marker should be a no-op, not an error.
 	if err := removeFilterMarker("abox-dev-traffic"); err != nil {
 		t.Errorf("removeFilterMarker on missing marker: %v", err)
+	}
+}
+
+func TestPfctlClient_TeardownConfig_Success(t *testing.T) {
+	called := false
+	mock := &mockPfctlPrivilegeClient{
+		pfctlTeardownConfigFunc: func(_ context.Context, _ *rpc.Empty, _ ...grpc.CallOption) (*rpc.Empty, error) {
+			called = true
+			return &rpc.Empty{}, nil
+		},
+	}
+
+	client := NewPfctlClient(mock)
+	if err := client.TeardownConfig(); err != nil {
+		t.Fatalf("TeardownConfig() error = %v", err)
+	}
+	if !called {
+		t.Error("PfctlTeardownConfig RPC was not called")
+	}
+}
+
+func TestPfctlClient_TeardownConfig_RPCError(t *testing.T) {
+	mock := &mockPfctlPrivilegeClient{
+		pfctlTeardownConfigFunc: func(_ context.Context, _ *rpc.Empty, _ ...grpc.CallOption) (*rpc.Empty, error) {
+			return nil, fmt.Errorf("pfctl teardown failed")
+		},
+	}
+
+	client := NewPfctlClient(mock)
+	err := client.TeardownConfig()
+	if err == nil {
+		t.Fatal("expected error when RPC fails")
+	}
+	if !strings.Contains(err.Error(), "pfctl teardown failed") {
+		t.Errorf("error should wrap RPC error, got: %v", err)
 	}
 }

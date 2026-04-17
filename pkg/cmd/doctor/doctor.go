@@ -265,6 +265,12 @@ func runHostChecks(w io.Writer, name string) (results []CheckResult, inst *confi
 	printResult(w, result)
 	results = append(results, result)
 
+	// Platform-specific host checks (macOS: PF anchors wired in /etc/pf.conf).
+	for _, r := range platformHostChecks() {
+		printResult(w, r)
+		results = append(results, r)
+	}
+
 	return results, inst, paths, be, vmIP, vmRunning
 }
 

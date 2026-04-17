@@ -250,4 +250,7 @@ func addSubcommands(cmd *cobra.Command, f *factory.Factory) {
 
 	// Hidden helper command for privilege escalation (platform-specific)
 	addPlatformCommands(cmd)
+
+	// Platform-specific grouped commands (e.g. macOS-only `teardown-pf`).
+	addPlatformGroupedCommands(cmd, f)
 }

@@ -177,8 +177,44 @@ func (s *PrivilegeServer) CopyFile(_ context.Context, req *rpc.CopyReq) (*rpc.Em
 	return &rpc.Empty{}, nil
 }
 
-// PfctlEnable enables the PF firewall.
+// PfctlEnable enables the PF firewall and ensures /etc/pf.conf references the
+// abox/* anchors so per-instance sub-anchor rules are evaluated by the kernel.
+//
+// On first run after install, /etc/pf.conf is updated atomically (one rdr
+// reference in the translation section, one anchor reference in the filter
+// section, each placed adjacent to the corresponding com.apple/* sibling)
+// and the main ruleset is reloaded. Subsequent calls detect the existing
+// references and no-op.
 func (s *PrivilegeServer) PfctlEnable(_ context.Context, _ *rpc.Empty) (*rpc.Empty, error) {
+	changed, err := ensureAnchorReferences(PfconfDefaultPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to wire PF anchor references: %w", err)
+	}
+	if changed {
+		if err := reloadPfConf(); err != nil {
+			// Roll back the file edit so the user isn't left with a pf.conf
+			// referencing anchors that the kernel rejected for unrelated
+			// reasons. Surface both errors if rollback itself fails — silent
+			// rollback failure would leave pf.conf in an unknown state.
+			if _, rmErr := removeAnchorReferences(PfconfDefaultPath); rmErr != nil {
+				logging.Audit("PF rollback failed",
+					"action", logging.ActionPfctlWireAnchors,
+					"error", rmErr.Error(),
+				)
+				return nil, fmt.Errorf(
+					"pfctl -f %s failed after wiring anchors: %w "+
+						"(rollback also failed: %v — pf.conf may be left "+
+						"with abox references; run `abox teardown-pf` to clean up)",
+					PfconfDefaultPath, err, rmErr)
+			}
+			return nil, fmt.Errorf("pfctl -f %s failed after wiring anchors: %w",
+				PfconfDefaultPath, err)
+		}
+		logging.Audit("PF anchor references wired into /etc/pf.conf",
+			"action", logging.ActionPfctlWireAnchors,
+		)
+	}
+
 	cmd := safeCommand(cmdPath("pfctl"), "-e")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -189,6 +225,38 @@ func (s *PrivilegeServer) PfctlEnable(_ context.Context, _ *rpc.Empty) (*rpc.Emp
 		return nil, fmt.Errorf("failed to enable PF: %s: %w", string(output), err)
 	}
 	return &rpc.Empty{}, nil
+}
+
+// PfctlTeardownConfig removes the abox-managed anchor references from
+// /etc/pf.conf and reloads the main ruleset. Used by `abox teardown-pf`.
+func (s *PrivilegeServer) PfctlTeardownConfig(_ context.Context, _ *rpc.Empty) (*rpc.Empty, error) {
+	changed, err := removeAnchorReferences(PfconfDefaultPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to remove PF anchor references: %w", err)
+	}
+	if !changed {
+		return &rpc.Empty{}, nil
+	}
+
+	if err := reloadPfConf(); err != nil {
+		return nil, fmt.Errorf("pfctl -f %s failed after removing anchors: %w",
+			PfconfDefaultPath, err)
+	}
+
+	logging.Audit("PF anchor references removed from /etc/pf.conf",
+		"action", logging.ActionPfctlUnwireAnchors,
+	)
+	return &rpc.Empty{}, nil
+}
+
+// reloadPfConf reloads the main PF ruleset from /etc/pf.conf.
+func reloadPfConf() error {
+	cmd := safeCommand(cmdPath("pfctl"), "-f", PfconfDefaultPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
+	}
+	return nil
 }
 
 // PfctlLoadAnchor loads PF rules into an instance-specific anchor.

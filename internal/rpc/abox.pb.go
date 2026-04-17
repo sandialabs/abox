@@ -1347,7 +1347,7 @@ const file_internal_rpc_abox_proto_rawDesc = "" +
 	"\revents_logged\x18\x02 \x01(\x04R\feventsLogged\x12\x19\n" +
 	"\blog_file\x18\x03 \x01(\tR\alogFile\x12$\n" +
 	"\x0elog_size_bytes\x18\x04 \x01(\x03R\flogSizeBytes\x12\x16\n" +
-	"\x06uptime\x18\x05 \x01(\tR\x06uptime2\xd0\x05\n" +
+	"\x06uptime\x18\x05 \x01(\tR\x06uptime2\x81\x06\n" +
 	"\tPrivilege\x12$\n" +
 	"\x04Ping\x12\v.abox.Empty\x1a\x0f.abox.StringMsg\x12$\n" +
 	"\bShutdown\x12\v.abox.Empty\x1a\v.abox.Empty\x12.\n" +
@@ -1364,7 +1364,8 @@ const file_internal_rpc_abox_proto_rawDesc = "" +
 	"\rIptablesFlush\x12\x16.abox.IptablesFlushReq\x1a\v.abox.Empty\x12'\n" +
 	"\vPfctlEnable\x12\v.abox.Empty\x1a\v.abox.Empty\x124\n" +
 	"\x0fPfctlLoadAnchor\x12\x14.abox.PfctlAnchorReq\x1a\v.abox.Empty\x125\n" +
-	"\x10PfctlFlushAnchor\x12\x14.abox.PfctlAnchorReq\x1a\v.abox.Empty2\x97\x02\n" +
+	"\x10PfctlFlushAnchor\x12\x14.abox.PfctlAnchorReq\x1a\v.abox.Empty\x12/\n" +
+	"\x13PfctlTeardownConfig\x12\v.abox.Empty\x1a\v.abox.Empty2\x97\x02\n" +
 	"\tDNSFilter\x12&\n" +
 	"\x06Status\x12\v.abox.Empty\x1a\x0f.abox.DNSStatus\x12)\n" +
 	"\aSetMode\x12\r.abox.ModeReq\x1a\x0f.abox.StringMsg\x12.\n" +
@@ -1447,64 +1448,66 @@ var file_internal_rpc_abox_proto_depIdxs = []int32{
 	0,  // 13: abox.Privilege.PfctlEnable:input_type -> abox.Empty
 	13, // 14: abox.Privilege.PfctlLoadAnchor:input_type -> abox.PfctlAnchorReq
 	13, // 15: abox.Privilege.PfctlFlushAnchor:input_type -> abox.PfctlAnchorReq
-	0,  // 16: abox.DNSFilter.Status:input_type -> abox.Empty
-	14, // 17: abox.DNSFilter.SetMode:input_type -> abox.ModeReq
-	15, // 18: abox.DNSFilter.Profile:input_type -> abox.ProfileReq
-	20, // 19: abox.DNSFilter.SetLogLevel:input_type -> abox.LogLevelReq
-	0,  // 20: abox.DNSFilter.GetLogLevel:input_type -> abox.Empty
-	0,  // 21: abox.DNSFilter.Shutdown:input_type -> abox.Empty
-	3,  // 22: abox.Allowlist.Add:input_type -> abox.DomainReq
-	3,  // 23: abox.Allowlist.Remove:input_type -> abox.DomainReq
-	0,  // 24: abox.Allowlist.List:input_type -> abox.Empty
-	0,  // 25: abox.Allowlist.Reload:input_type -> abox.Empty
-	0,  // 26: abox.HTTPFilter.Status:input_type -> abox.Empty
-	14, // 27: abox.HTTPFilter.SetMode:input_type -> abox.ModeReq
-	15, // 28: abox.HTTPFilter.Profile:input_type -> abox.ProfileReq
-	20, // 29: abox.HTTPFilter.SetLogLevel:input_type -> abox.LogLevelReq
-	0,  // 30: abox.HTTPFilter.GetLogLevel:input_type -> abox.Empty
-	19, // 31: abox.HTTPFilter.StartKeyLog:input_type -> abox.KeyLogReq
-	0,  // 32: abox.HTTPFilter.StopKeyLog:input_type -> abox.Empty
-	0,  // 33: abox.HTTPFilter.Shutdown:input_type -> abox.Empty
-	0,  // 34: abox.Monitor.Status:input_type -> abox.Empty
-	0,  // 35: abox.Monitor.Shutdown:input_type -> abox.Empty
-	1,  // 36: abox.Privilege.Ping:output_type -> abox.StringMsg
-	0,  // 37: abox.Privilege.Shutdown:output_type -> abox.Empty
-	0,  // 38: abox.Privilege.QemuImgCreate:output_type -> abox.Empty
-	0,  // 39: abox.Privilege.Chmod:output_type -> abox.Empty
-	0,  // 40: abox.Privilege.MkdirAll:output_type -> abox.Empty
-	0,  // 41: abox.Privilege.RemoveAll:output_type -> abox.Empty
-	0,  // 42: abox.Privilege.CopyFile:output_type -> abox.Empty
-	0,  // 43: abox.Privilege.UfwAdd:output_type -> abox.Empty
-	0,  // 44: abox.Privilege.UfwRemove:output_type -> abox.Empty
-	10, // 45: abox.Privilege.UfwStatus:output_type -> abox.UfwStatusResp
-	0,  // 46: abox.Privilege.IptablesAdd:output_type -> abox.Empty
-	0,  // 47: abox.Privilege.IptablesRemove:output_type -> abox.Empty
-	0,  // 48: abox.Privilege.IptablesFlush:output_type -> abox.Empty
-	0,  // 49: abox.Privilege.PfctlEnable:output_type -> abox.Empty
-	0,  // 50: abox.Privilege.PfctlLoadAnchor:output_type -> abox.Empty
-	0,  // 51: abox.Privilege.PfctlFlushAnchor:output_type -> abox.Empty
-	17, // 52: abox.DNSFilter.Status:output_type -> abox.DNSStatus
-	1,  // 53: abox.DNSFilter.SetMode:output_type -> abox.StringMsg
-	16, // 54: abox.DNSFilter.Profile:output_type -> abox.ProfileResp
-	1,  // 55: abox.DNSFilter.SetLogLevel:output_type -> abox.StringMsg
-	21, // 56: abox.DNSFilter.GetLogLevel:output_type -> abox.LogLevelResp
-	0,  // 57: abox.DNSFilter.Shutdown:output_type -> abox.Empty
-	1,  // 58: abox.Allowlist.Add:output_type -> abox.StringMsg
-	1,  // 59: abox.Allowlist.Remove:output_type -> abox.StringMsg
-	4,  // 60: abox.Allowlist.List:output_type -> abox.DomainList
-	1,  // 61: abox.Allowlist.Reload:output_type -> abox.StringMsg
-	18, // 62: abox.HTTPFilter.Status:output_type -> abox.HTTPStatus
-	1,  // 63: abox.HTTPFilter.SetMode:output_type -> abox.StringMsg
-	16, // 64: abox.HTTPFilter.Profile:output_type -> abox.ProfileResp
-	1,  // 65: abox.HTTPFilter.SetLogLevel:output_type -> abox.StringMsg
-	21, // 66: abox.HTTPFilter.GetLogLevel:output_type -> abox.LogLevelResp
-	0,  // 67: abox.HTTPFilter.StartKeyLog:output_type -> abox.Empty
-	0,  // 68: abox.HTTPFilter.StopKeyLog:output_type -> abox.Empty
-	0,  // 69: abox.HTTPFilter.Shutdown:output_type -> abox.Empty
-	22, // 70: abox.Monitor.Status:output_type -> abox.MonitorStatus
-	0,  // 71: abox.Monitor.Shutdown:output_type -> abox.Empty
-	36, // [36:72] is the sub-list for method output_type
-	0,  // [0:36] is the sub-list for method input_type
+	0,  // 16: abox.Privilege.PfctlTeardownConfig:input_type -> abox.Empty
+	0,  // 17: abox.DNSFilter.Status:input_type -> abox.Empty
+	14, // 18: abox.DNSFilter.SetMode:input_type -> abox.ModeReq
+	15, // 19: abox.DNSFilter.Profile:input_type -> abox.ProfileReq
+	20, // 20: abox.DNSFilter.SetLogLevel:input_type -> abox.LogLevelReq
+	0,  // 21: abox.DNSFilter.GetLogLevel:input_type -> abox.Empty
+	0,  // 22: abox.DNSFilter.Shutdown:input_type -> abox.Empty
+	3,  // 23: abox.Allowlist.Add:input_type -> abox.DomainReq
+	3,  // 24: abox.Allowlist.Remove:input_type -> abox.DomainReq
+	0,  // 25: abox.Allowlist.List:input_type -> abox.Empty
+	0,  // 26: abox.Allowlist.Reload:input_type -> abox.Empty
+	0,  // 27: abox.HTTPFilter.Status:input_type -> abox.Empty
+	14, // 28: abox.HTTPFilter.SetMode:input_type -> abox.ModeReq
+	15, // 29: abox.HTTPFilter.Profile:input_type -> abox.ProfileReq
+	20, // 30: abox.HTTPFilter.SetLogLevel:input_type -> abox.LogLevelReq
+	0,  // 31: abox.HTTPFilter.GetLogLevel:input_type -> abox.Empty
+	19, // 32: abox.HTTPFilter.StartKeyLog:input_type -> abox.KeyLogReq
+	0,  // 33: abox.HTTPFilter.StopKeyLog:input_type -> abox.Empty
+	0,  // 34: abox.HTTPFilter.Shutdown:input_type -> abox.Empty
+	0,  // 35: abox.Monitor.Status:input_type -> abox.Empty
+	0,  // 36: abox.Monitor.Shutdown:input_type -> abox.Empty
+	1,  // 37: abox.Privilege.Ping:output_type -> abox.StringMsg
+	0,  // 38: abox.Privilege.Shutdown:output_type -> abox.Empty
+	0,  // 39: abox.Privilege.QemuImgCreate:output_type -> abox.Empty
+	0,  // 40: abox.Privilege.Chmod:output_type -> abox.Empty
+	0,  // 41: abox.Privilege.MkdirAll:output_type -> abox.Empty
+	0,  // 42: abox.Privilege.RemoveAll:output_type -> abox.Empty
+	0,  // 43: abox.Privilege.CopyFile:output_type -> abox.Empty
+	0,  // 44: abox.Privilege.UfwAdd:output_type -> abox.Empty
+	0,  // 45: abox.Privilege.UfwRemove:output_type -> abox.Empty
+	10, // 46: abox.Privilege.UfwStatus:output_type -> abox.UfwStatusResp
+	0,  // 47: abox.Privilege.IptablesAdd:output_type -> abox.Empty
+	0,  // 48: abox.Privilege.IptablesRemove:output_type -> abox.Empty
+	0,  // 49: abox.Privilege.IptablesFlush:output_type -> abox.Empty
+	0,  // 50: abox.Privilege.PfctlEnable:output_type -> abox.Empty
+	0,  // 51: abox.Privilege.PfctlLoadAnchor:output_type -> abox.Empty
+	0,  // 52: abox.Privilege.PfctlFlushAnchor:output_type -> abox.Empty
+	0,  // 53: abox.Privilege.PfctlTeardownConfig:output_type -> abox.Empty
+	17, // 54: abox.DNSFilter.Status:output_type -> abox.DNSStatus
+	1,  // 55: abox.DNSFilter.SetMode:output_type -> abox.StringMsg
+	16, // 56: abox.DNSFilter.Profile:output_type -> abox.ProfileResp
+	1,  // 57: abox.DNSFilter.SetLogLevel:output_type -> abox.StringMsg
+	21, // 58: abox.DNSFilter.GetLogLevel:output_type -> abox.LogLevelResp
+	0,  // 59: abox.DNSFilter.Shutdown:output_type -> abox.Empty
+	1,  // 60: abox.Allowlist.Add:output_type -> abox.StringMsg
+	1,  // 61: abox.Allowlist.Remove:output_type -> abox.StringMsg
+	4,  // 62: abox.Allowlist.List:output_type -> abox.DomainList
+	1,  // 63: abox.Allowlist.Reload:output_type -> abox.StringMsg
+	18, // 64: abox.HTTPFilter.Status:output_type -> abox.HTTPStatus
+	1,  // 65: abox.HTTPFilter.SetMode:output_type -> abox.StringMsg
+	16, // 66: abox.HTTPFilter.Profile:output_type -> abox.ProfileResp
+	1,  // 67: abox.HTTPFilter.SetLogLevel:output_type -> abox.StringMsg
+	21, // 68: abox.HTTPFilter.GetLogLevel:output_type -> abox.LogLevelResp
+	0,  // 69: abox.HTTPFilter.StartKeyLog:output_type -> abox.Empty
+	0,  // 70: abox.HTTPFilter.StopKeyLog:output_type -> abox.Empty
+	0,  // 71: abox.HTTPFilter.Shutdown:output_type -> abox.Empty
+	22, // 72: abox.Monitor.Status:output_type -> abox.MonitorStatus
+	0,  // 73: abox.Monitor.Shutdown:output_type -> abox.Empty
+	37, // [37:74] is the sub-list for method output_type
+	0,  // [0:37] is the sub-list for method input_type
 	0,  // [0:0] is the sub-list for extension type_name
 	0,  // [0:0] is the sub-list for extension extendee
 	0,  // [0:0] is the sub-list for field type_name

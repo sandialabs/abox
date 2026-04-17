@@ -91,3 +91,7 @@ func (c *tokenPrivilegeClient) PfctlLoadAnchor(ctx context.Context, in *PfctlAnc
 func (c *tokenPrivilegeClient) PfctlFlushAnchor(ctx context.Context, in *PfctlAnchorReq, opts ...grpc.CallOption) (*Empty, error) {
 	return c.PrivilegeClient.PfctlFlushAnchor(c.withToken(ctx), in, opts...)
 }
+
+func (c *tokenPrivilegeClient) PfctlTeardownConfig(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error) {
+	return c.PrivilegeClient.PfctlTeardownConfig(c.withToken(ctx), in, opts...)
+}

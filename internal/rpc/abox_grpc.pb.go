@@ -19,22 +19,23 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Privilege_Ping_FullMethodName             = "/abox.Privilege/Ping"
-	Privilege_Shutdown_FullMethodName         = "/abox.Privilege/Shutdown"
-	Privilege_QemuImgCreate_FullMethodName    = "/abox.Privilege/QemuImgCreate"
-	Privilege_Chmod_FullMethodName            = "/abox.Privilege/Chmod"
-	Privilege_MkdirAll_FullMethodName         = "/abox.Privilege/MkdirAll"
-	Privilege_RemoveAll_FullMethodName        = "/abox.Privilege/RemoveAll"
-	Privilege_CopyFile_FullMethodName         = "/abox.Privilege/CopyFile"
-	Privilege_UfwAdd_FullMethodName           = "/abox.Privilege/UfwAdd"
-	Privilege_UfwRemove_FullMethodName        = "/abox.Privilege/UfwRemove"
-	Privilege_UfwStatus_FullMethodName        = "/abox.Privilege/UfwStatus"
-	Privilege_IptablesAdd_FullMethodName      = "/abox.Privilege/IptablesAdd"
-	Privilege_IptablesRemove_FullMethodName   = "/abox.Privilege/IptablesRemove"
-	Privilege_IptablesFlush_FullMethodName    = "/abox.Privilege/IptablesFlush"
-	Privilege_PfctlEnable_FullMethodName      = "/abox.Privilege/PfctlEnable"
-	Privilege_PfctlLoadAnchor_FullMethodName  = "/abox.Privilege/PfctlLoadAnchor"
-	Privilege_PfctlFlushAnchor_FullMethodName = "/abox.Privilege/PfctlFlushAnchor"
+	Privilege_Ping_FullMethodName                = "/abox.Privilege/Ping"
+	Privilege_Shutdown_FullMethodName            = "/abox.Privilege/Shutdown"
+	Privilege_QemuImgCreate_FullMethodName       = "/abox.Privilege/QemuImgCreate"
+	Privilege_Chmod_FullMethodName               = "/abox.Privilege/Chmod"
+	Privilege_MkdirAll_FullMethodName            = "/abox.Privilege/MkdirAll"
+	Privilege_RemoveAll_FullMethodName           = "/abox.Privilege/RemoveAll"
+	Privilege_CopyFile_FullMethodName            = "/abox.Privilege/CopyFile"
+	Privilege_UfwAdd_FullMethodName              = "/abox.Privilege/UfwAdd"
+	Privilege_UfwRemove_FullMethodName           = "/abox.Privilege/UfwRemove"
+	Privilege_UfwStatus_FullMethodName           = "/abox.Privilege/UfwStatus"
+	Privilege_IptablesAdd_FullMethodName         = "/abox.Privilege/IptablesAdd"
+	Privilege_IptablesRemove_FullMethodName      = "/abox.Privilege/IptablesRemove"
+	Privilege_IptablesFlush_FullMethodName       = "/abox.Privilege/IptablesFlush"
+	Privilege_PfctlEnable_FullMethodName         = "/abox.Privilege/PfctlEnable"
+	Privilege_PfctlLoadAnchor_FullMethodName     = "/abox.Privilege/PfctlLoadAnchor"
+	Privilege_PfctlFlushAnchor_FullMethodName    = "/abox.Privilege/PfctlFlushAnchor"
+	Privilege_PfctlTeardownConfig_FullMethodName = "/abox.Privilege/PfctlTeardownConfig"
 )
 
 // PrivilegeClient is the client API for Privilege service.
@@ -59,6 +60,7 @@ type PrivilegeClient interface {
 	PfctlEnable(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
 	PfctlLoadAnchor(ctx context.Context, in *PfctlAnchorReq, opts ...grpc.CallOption) (*Empty, error)
 	PfctlFlushAnchor(ctx context.Context, in *PfctlAnchorReq, opts ...grpc.CallOption) (*Empty, error)
+	PfctlTeardownConfig(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
 }
 
 type privilegeClient struct {
@@ -229,6 +231,16 @@ func (c *privilegeClient) PfctlFlushAnchor(ctx context.Context, in *PfctlAnchorR
 	return out, nil
 }
 
+func (c *privilegeClient) PfctlTeardownConfig(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, Privilege_PfctlTeardownConfig_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PrivilegeServer is the server API for Privilege service.
 // All implementations must embed UnimplementedPrivilegeServer
 // for forward compatibility.
@@ -251,6 +263,7 @@ type PrivilegeServer interface {
 	PfctlEnable(context.Context, *Empty) (*Empty, error)
 	PfctlLoadAnchor(context.Context, *PfctlAnchorReq) (*Empty, error)
 	PfctlFlushAnchor(context.Context, *PfctlAnchorReq) (*Empty, error)
+	PfctlTeardownConfig(context.Context, *Empty) (*Empty, error)
 	mustEmbedUnimplementedPrivilegeServer()
 }
 
@@ -308,6 +321,9 @@ func (UnimplementedPrivilegeServer) PfctlLoadAnchor(context.Context, *PfctlAncho
 }
 func (UnimplementedPrivilegeServer) PfctlFlushAnchor(context.Context, *PfctlAnchorReq) (*Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method PfctlFlushAnchor not implemented")
+}
+func (UnimplementedPrivilegeServer) PfctlTeardownConfig(context.Context, *Empty) (*Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method PfctlTeardownConfig not implemented")
 }
 func (UnimplementedPrivilegeServer) mustEmbedUnimplementedPrivilegeServer() {}
 func (UnimplementedPrivilegeServer) testEmbeddedByValue()                   {}
@@ -618,6 +634,24 @@ func _Privilege_PfctlFlushAnchor_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Privilege_PfctlTeardownConfig_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PrivilegeServer).PfctlTeardownConfig(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Privilege_PfctlTeardownConfig_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PrivilegeServer).PfctlTeardownConfig(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Privilege_ServiceDesc is the grpc.ServiceDesc for Privilege service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -688,6 +722,10 @@ var Privilege_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PfctlFlushAnchor",
 			Handler:    _Privilege_PfctlFlushAnchor_Handler,
+		},
+		{
+			MethodName: "PfctlTeardownConfig",
+			Handler:    _Privilege_PfctlTeardownConfig_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

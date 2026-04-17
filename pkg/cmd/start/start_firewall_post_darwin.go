@@ -16,6 +16,11 @@ import (
 // boots. The VM IP is assigned by vmnet DHCP, so rules that scope by source
 // address can only be written post-boot.
 //
+// PF itself and the /etc/pf.conf anchor wiring are handled pre-boot in
+// setupHostFirewall; this function only writes the per-instance sub-anchor
+// (abox/<name>), which doesn't reload the main ruleset and is therefore safe
+// after vmnet has installed its runtime rules.
+//
 // Rules loaded:
 //   - DNS redirect: VM traffic to any :53 → 127.0.0.1:<dnsPort>
 //   - Allow DHCP, HTTP proxy on gateway, and ICMP to gateway
@@ -34,10 +39,6 @@ func setupPostBootFirewall(w io.Writer, f *factory.Factory, inst *config.Instanc
 	pfctl := firewall.NewPfctlClient(client)
 
 	fmt.Fprintln(w, "Setting up traffic filter...")
-	if err := pfctl.EnsureEnabled(); err != nil {
-		return fmt.Errorf("failed to enable PF firewall: %w", err)
-	}
-
 	if err := pfctl.ApplyInstanceRules(name, vmIP, inst.Gateway, inst.DNS.Port, inst.HTTP.Port); err != nil {
 		return fmt.Errorf("failed to apply traffic filter: %w", err)
 	}

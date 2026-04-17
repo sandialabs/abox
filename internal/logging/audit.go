@@ -69,14 +69,16 @@ const (
 	ActionImagePrune = "image.prune"
 
 	// Infrastructure (no instance context)
-	ActionSecurityFiltered = "security.filtered"
-	ActionIptablesAddDNS   = "iptables.add_dns_redirect"
-	ActionIptablesFlushDNS = "iptables.flush_dns_redirect"
-	ActionPfctlAddDNS      = "pfctl.add_dns_redirect"
-	ActionPfctlFlushDNS    = "pfctl.flush_dns_redirect"
-	ActionTetragonDownload = "tetragon.download"
-	ActionMonitorStatus    = "monitor.status"
-	ActionMonitorShutdown  = "monitor.shutdown"
+	ActionSecurityFiltered   = "security.filtered"
+	ActionIptablesAddDNS     = "iptables.add_dns_redirect"
+	ActionIptablesFlushDNS   = "iptables.flush_dns_redirect"
+	ActionPfctlAddDNS        = "pfctl.add_dns_redirect"
+	ActionPfctlFlushDNS      = "pfctl.flush_dns_redirect"
+	ActionPfctlWireAnchors   = "pfctl.wire_anchors"
+	ActionPfctlUnwireAnchors = "pfctl.unwire_anchors"
+	ActionTetragonDownload   = "tetragon.download"
+	ActionMonitorStatus      = "monitor.status"
+	ActionMonitorShutdown    = "monitor.shutdown"
 )
 
 // AuditInstance logs an audit event to syslog for the specified instance.

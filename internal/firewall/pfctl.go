@@ -31,7 +31,11 @@ func NewPfctlClient(priv rpc.PrivilegeClient) *PfctlClient {
 	return &PfctlClient{priv: priv}
 }
 
-// EnsureEnabled enables the PF firewall if not already active.
+// EnsureEnabled wires abox anchor references into /etc/pf.conf if they're not
+// already present (running `pfctl -f /etc/pf.conf` once to reload the main
+// ruleset) and then enables the PF firewall. Both operations are idempotent:
+// already-wired pf.conf is a no-op, and `pfctl -e` on an already-enabled PF
+// is treated as success.
 func (c *PfctlClient) EnsureEnabled() error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout.Default)
 	defer cancel()
@@ -80,6 +84,27 @@ func (c *PfctlClient) ApplyInstanceRules(name, vmIP, gateway string, dnsPort, ht
 		"vm_ip", vmIP,
 		"dns_port", dnsPort,
 		"http_port", httpPort,
+	)
+
+	return nil
+}
+
+// TeardownConfig removes the abox-managed anchor references from /etc/pf.conf
+// and reloads the main ruleset. Returns an error if the helper fails to update
+// the file or if the reload fails. Used by `abox teardown-pf`.
+func (c *PfctlClient) TeardownConfig() error {
+	logging.Debug("tearing down PF anchor references in /etc/pf.conf")
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout.Default)
+	defer cancel()
+
+	_, err := c.priv.PfctlTeardownConfig(ctx, &rpc.Empty{})
+	if err != nil {
+		return fmt.Errorf("failed to tear down PF config: %w", err)
+	}
+
+	logging.Audit("PF anchor references removed from /etc/pf.conf",
+		"action", logging.ActionPfctlUnwireAnchors,
 	)
 
 	return nil

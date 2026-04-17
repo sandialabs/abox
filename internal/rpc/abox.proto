@@ -20,6 +20,7 @@ service Privilege {
   rpc PfctlEnable(Empty) returns (Empty);
   rpc PfctlLoadAnchor(PfctlAnchorReq) returns (Empty);
   rpc PfctlFlushAnchor(PfctlAnchorReq) returns (Empty);
+  rpc PfctlTeardownConfig(Empty) returns (Empty);
 }
 
 // DNS Filter Service - manages DNS filtering
