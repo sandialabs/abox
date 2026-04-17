@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**abox** is a CLI tool for creating security-isolated VM environments for AI coding agents. Each instance gets its own network, DNS filtering, and configuration.
+**abox** is a CLI tool for creating security-isolated VM environments for AI coding agents. Each instance gets its own network, DNS filtering, and configuration. Supports Linux (libvirt/KVM) and macOS (vfkit/Virtualization.framework on Apple Silicon).
 
 ## Development
 

@@ -10,8 +10,9 @@ Abox is tested on:
 - **Debian 13+** (Trixie and newer)
 - **Fedora 38+**
 - **Arch Linux** (rolling release)
+- **macOS 13+ on Apple Silicon** (arm64; see [macOS Support](macos.md))
 
-Other Linux distributions with libvirt 8.0+ and QEMU 6.0+ should work.
+Other Linux distributions with libvirt 8.0+ and QEMU 6.0+ should work. Intel Macs are not supported — Apple's Virtualization.framework only runs native arm64 guests.
 
 ## Required Software
 
@@ -21,7 +22,7 @@ Other Linux distributions with libvirt 8.0+ and QEMU 6.0+ should work.
 |----------|---------|---------|
 | Go | 1.25+ | Building the abox binary |
 
-### Runtime Dependencies
+### Runtime Dependencies (Linux)
 
 | Tool | Required | Package (Debian/Ubuntu) | Package (Fedora) | Used For |
 |------|----------|------------------------|------------------|----------|
@@ -42,6 +43,23 @@ Other Linux distributions with libvirt 8.0+ and QEMU 6.0+ should work.
 
 *At least one of pkexec or sudo is required.
 **At least one of genisoimage or xorriso is required.
+
+### Runtime Dependencies (macOS)
+
+| Tool | Required | Homebrew Package | Used For |
+|------|----------|------------------|----------|
+| vfkit | Yes | vfkit | All VM operations |
+| qemu-img | Yes | qemu | Base image conversion (qcow2 → raw) |
+| ssh | Yes | preinstalled | ssh, provision, scp |
+| scp | Yes | preinstalled | scp command |
+| ssh-keygen | Yes | preinstalled | Key generation |
+| xorriso | Yes | xorriso | Cloud-init ISO creation |
+| sudo | Yes | preinstalled | Privilege helper escalation |
+| pfctl | Yes | preinstalled (in `/sbin`) | Packet filter rules |
+| sshfs | For mount | `--cask macfuse` + `gromgit/fuse/sshfs-mac` | Mount command |
+| tcpdump | No | preinstalled | Packet capture (tap command) |
+
+macOS uses `sudo` only — there is no `pkexec` alternative and no libvirt group. See [macOS Support](macos.md) for platform notes.
 
 ### Check Dependencies
 
@@ -138,7 +156,25 @@ sudo usermod -aG libvirt $USER
 sudo systemctl enable --now libvirtd
 ```
 
-## User Configuration
+### macOS (Apple Silicon)
+
+```bash
+# Required packages
+brew install vfkit qemu xorriso
+
+# Optional — required only for 'abox mount'
+brew install --cask macfuse
+brew install gromgit/fuse/sshfs-mac
+```
+
+macOS does not require any group membership, polkit configuration, or
+daemon startup. On first `abox start`, abox edits `/etc/pf.conf` to wire
+its anchor references into the main PF ruleset; see
+[macOS Support: PF Anchor Wiring](macos.md#pf-anchor-wiring).
+
+## User Configuration (Linux)
+
+On macOS there is no per-user group or polkit setup; skip this section.
 
 ### libvirt Group Membership
 
@@ -183,7 +219,7 @@ polkit.addRule(function(action, subject) {
 
 ### CPU Virtualization
 
-Verify virtualization support:
+**Linux:** Verify virtualization support:
 
 ```bash
 # Check CPU flags
@@ -195,6 +231,9 @@ lscpu | grep Virtualization
 If virtualization is not shown:
 1. Enable VT-x/AMD-V in BIOS/UEFI settings
 2. Ensure you're not running inside another VM (nested virtualization)
+
+**macOS:** Apple Silicon has hardware virtualization always enabled — no
+BIOS setting or verification step is needed.
 
 ### Disk Space
 
@@ -236,6 +275,15 @@ If Secure Boot is enabled and KVM modules aren't signed:
 2. Or disable Secure Boot in BIOS/UEFI
 3. Or use the `modprobe` approach with MOK (Machine Owner Key)
 
+### macOS: Other vmnet-Based VM Runtimes
+
+The first `abox start` after installation reloads the main PF ruleset
+(via `pfctl -f /etc/pf.conf`). This can briefly disrupt other
+vmnet-based VMs running at that moment — Docker Desktop, OrbStack,
+Podman Machine, manually-launched vfkit/vz VMs. After the first wire,
+no further reloads happen. See [macOS Support: One-Time Network
+Disruption Warning](macos.md#one-time-network-disruption-warning).
+
 ### Debian 11/12 Cloud Images
 
 Debian 11 (Bullseye) and Debian 12 (Bookworm) cloud images have broken network initialization under libvirt/QEMU. The guest VM never sends any network traffic — no DHCP requests, no ARP — resulting in "No route to host" errors. Diagnostics confirmed empty DHCP leases, `FAILED` ARP entries, and no nwfilter interference during the boot window. The root cause is suspected to be pre-baked network configuration in the Debian cloud images that conflicts with cloud-init's NoCloud network-config. Debian 13 (Trixie) and newer work correctly. Abox only offers Debian 13+ as base images.
@@ -266,13 +314,21 @@ sudo firewall-cmd --reload
 
 ## Version Compatibility
 
-### Minimum Versions
+### Minimum Versions (Linux)
 
 | Component | Minimum Version |
 |-----------|----------------|
 | libvirt | 8.0 |
 | QEMU | 6.0 |
 | Linux kernel | 5.4 |
+
+### Minimum Versions (macOS)
+
+| Component | Minimum Version |
+|-----------|----------------|
+| macOS | 13 (Ventura) |
+| vfkit | 0.5+ (latest Homebrew recommended) |
+| qemu-img | 6.0 (for base image conversion) |
 
 ### Checking Versions
 

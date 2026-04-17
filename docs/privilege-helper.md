@@ -1,8 +1,8 @@
 # Privilege Helper
 
-abox requires root privileges for certain operations (iptables rules, disk image management, UFW firewall rules). By default, it spawns a privilege helper process via `sudo` or `pkexec`, which prompts for a password.
+abox requires root privileges for certain operations (iptables/pfctl rules, disk image management, firewall rules). By default, it spawns a privilege helper process via `sudo` or `pkexec`, which prompts for a password.
 
-For automated/headless workflows, there are two ways to eliminate password prompts.
+For automated/headless Linux workflows, there are two ways to eliminate password prompts. See [macOS](#macos) below for macOS behavior.
 
 ## Option 1: Setuid Helper (Recommended)
 
@@ -97,6 +97,27 @@ sudo usermod -aG abox $USER
 
 **Note:** The sudoers approach relies on sudo's own audit logging. The setuid helper provides its own syslog audit trail.
 
+## macOS
+
+macOS uses `sudo` exclusively — there is no setuid helper, no sudoers
+NOPASSWD option documented here, and no `abox` group.
+
+- `make install-helper` and the `abox-helper` binary are Linux-only (the
+  Makefile rejects running them on macOS).
+- `abox start` prompts for `sudo` once per privilege-helper lifetime.
+  The helper keeps running across multiple commands until the last
+  instance stops, so most sessions see a single prompt.
+- The gRPC privilege server is the same implementation as on Linux;
+  only the launch mechanism differs. Input validation, UID checking,
+  and token authentication are identical.
+- Audit output lands in the per-instance
+  `~/.local/share/abox/instances/<name>/logs/privilege-helper.log`
+  (there is no `journalctl` equivalent on macOS).
+
+On the very first `abox start` after install, the helper additionally
+edits `/etc/pf.conf` to add anchor references — see
+[macOS Support: PF Anchor Wiring](macos.md#pf-anchor-wiring).
+
 ## Security Comparison
 
 | Property | Setuid helper | sudoers NOPASSWD |
@@ -114,4 +135,5 @@ Both approaches use the same underlying gRPC privilege server with identical inp
 ## See Also
 
 - [Security Design](security.md) - abox's security model
+- [macOS Support](macos.md) - macOS privilege escalation and install flow
 - [Troubleshooting](troubleshooting.md) - Common issues and solutions

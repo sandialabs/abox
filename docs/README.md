@@ -6,6 +6,7 @@
 |------|----------|
 | Quick start | [Quickstart Guide](quickstart.md) |
 | System requirements | [Requirements](requirements.md) |
+| macOS setup and notes | [macOS Support](macos.md) |
 | Shell completion | [Shell Completion](shell-completion.md) |
 
 ## Configuration

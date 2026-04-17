@@ -4,16 +4,27 @@ Get started with abox in five minutes.
 
 ## Prerequisites
 
-A Linux system with:
-- KVM support (check with `lscpu | grep Virtualization`)
+**Linux:**
+- A system with KVM support (check with `lscpu | grep Virtualization`)
 - libvirt/QEMU installed
 - Go 1.25+ (for building)
+
+**macOS:**
+- Apple Silicon Mac running macOS 13+
+- Homebrew
+- vfkit, qemu, xorriso installed via `brew install`
+- Go 1.25+ (for building)
+
+See [macOS Support](macos.md) for the full macOS setup flow.
 
 ## Installation
 
 ### 1. Install Dependencies
 
-Install the required packages for your distribution. See [System Requirements: Installation Commands](requirements.md#installation-commands) for per-distro instructions.
+Install the required packages for your platform. See
+[System Requirements: Installation Commands](requirements.md#installation-commands)
+for per-distro Linux instructions, or
+[macOS Support: Installation](macos.md#installation) for the Homebrew flow.
 
 ### 2. Build abox
 
@@ -300,3 +311,4 @@ abox includes CLI help topics for quick reference:
 - [Filtering](filtering.md) - DNS and HTTP proxy filtering
 - [Troubleshooting](troubleshooting.md) - Common issues and solutions
 - [System Requirements](requirements.md) - Detailed compatibility info
+- [macOS Support](macos.md) - macOS-specific install, PF anchors, limitations
