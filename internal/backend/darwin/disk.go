@@ -84,10 +84,11 @@ func (m *DiskManager) Delete(_ context.Context, _ rpc.PrivilegeClient, paths *co
 }
 
 // EnsureBaseImage ensures the base image exists in the backend's image store
-// in raw format. Base images are downloaded as qcow2 and converted to raw
-// once during this step. Subsequent calls are no-ops.
+// in raw format. `abox base pull` now writes raw directly to the user cache,
+// so this step is just an APFS clone from user cache to backend storage —
+// no format conversion.
 func (m *DiskManager) EnsureBaseImage(ctx context.Context, _ rpc.PrivilegeClient, inst *config.Instance, paths *config.Paths) error {
-	userBaseImage := filepath.Join(paths.UserBaseImages, inst.Base+".qcow2")
+	userBaseImage := filepath.Join(paths.UserBaseImages, config.UserBaseImageName(inst.Base))
 	backendBaseImage := filepath.Join(paths.BaseImages, inst.Base+".raw")
 
 	// Check if raw base already exists in backend location
@@ -95,7 +96,7 @@ func (m *DiskManager) EnsureBaseImage(ctx context.Context, _ rpc.PrivilegeClient
 		return nil
 	}
 
-	// Check if qcow2 source exists in user cache
+	// Check if raw source exists in user cache
 	if _, err := os.Stat(userBaseImage); err != nil {
 		return &errhint.ErrHint{
 			Err:  fmt.Errorf("base image not found: %s", inst.Base),
@@ -108,14 +109,13 @@ func (m *DiskManager) EnsureBaseImage(ctx context.Context, _ rpc.PrivilegeClient
 		return fmt.Errorf("failed to create base images directory: %w", err)
 	}
 
-	// Convert qcow2 → raw (one-time per base image).
-	// Write to a temp file first, then rename atomically to avoid races
-	// where concurrent creates could see a half-written base image.
-	tempBase := backendBaseImage + ".converting"
-	logging.Debug("converting base image to raw format", "src", userBaseImage, "dst", backendBaseImage)
-	if err := convertQcow2ToRaw(ctx, userBaseImage, tempBase); err != nil {
+	// APFS clone user-cache raw → backend-dir raw. Write to a temp path first,
+	// then rename atomically so concurrent creates never see a half-copied file.
+	tempBase := backendBaseImage + ".copying"
+	logging.Debug("cloning base image into backend storage", "src", userBaseImage, "dst", backendBaseImage)
+	if err := cloneFile(ctx, userBaseImage, tempBase); err != nil {
 		os.Remove(tempBase)
-		return fmt.Errorf("failed to convert base image to raw: %w", err)
+		return fmt.Errorf("failed to clone base image into backend storage: %w", err)
 	}
 
 	if err := os.Chmod(tempBase, 0o644); err != nil { //nolint:gosec // base images need world-readable for VM access
@@ -127,10 +127,10 @@ func (m *DiskManager) EnsureBaseImage(ctx context.Context, _ rpc.PrivilegeClient
 	// the other is a no-op (both produced the same content).
 	if err := os.Rename(tempBase, backendBaseImage); err != nil {
 		os.Remove(tempBase)
-		return fmt.Errorf("failed to install converted base image: %w", err)
+		return fmt.Errorf("failed to install base image: %w", err)
 	}
 
-	logging.Debug("base image converted to raw format successfully")
+	logging.Debug("base image installed into backend storage")
 	return nil
 }
 

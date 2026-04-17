@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/iostreams"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 	"github.com/sandialabs/abox/pkg/cmdutil"
@@ -115,8 +116,10 @@ func TestNewCmdPrune_RejectsArgs(t *testing.T) {
 func TestFindUnusedImages(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create some qcow2 files
-	for _, name := range []string{"ubuntu-24.04.qcow2", "debian-12.qcow2", "fedora-40.qcow2", "readme.txt"} {
+	// Create some base image files using the host's extension (.qcow2 on linux,
+	// .raw on darwin) plus one unrelated file.
+	ext := config.UserBaseImageExt()
+	for _, name := range []string{"ubuntu-24.04" + ext, "debian-12" + ext, "fedora-40" + ext, "readme.txt"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0644); err != nil {
 			t.Fatal(err)
 		}
@@ -167,7 +170,7 @@ func TestFindUnusedImages_MissingDir(t *testing.T) {
 func TestFindUnusedImages_AllReferenced(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := os.WriteFile(filepath.Join(dir, "ubuntu-24.04.qcow2"), []byte("x"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "ubuntu-24.04"+config.UserBaseImageExt()), []byte("x"), 0644); err != nil {
 		t.Fatal(err)
 	}
 

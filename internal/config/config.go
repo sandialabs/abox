@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -368,6 +369,30 @@ func RuntimeDirOr(fallback string) string {
 		return fallback
 	}
 	return dir
+}
+
+// UserBaseImageExt returns the file extension (including the leading dot) for
+// base images on this host. The same extension applies to both the user
+// cache (paths.UserBaseImages) and the backend storage dir (paths.BaseImages)
+// because the backend format is fixed per-platform:
+//   - Linux (libvirt/KVM): ".qcow2"
+//   - macOS (vfkit):       ".raw" (Apple Virtualization.framework cannot read qcow2)
+//
+// `abox base pull` produces files with this extension, backends clone/copy
+// using the same extension, and callers that look up base images by name
+// (list, remove, prune, EnsureBaseImage) should all use this helper.
+func UserBaseImageExt() string {
+	if runtime.GOOS == "darwin" {
+		return ".raw"
+	}
+	return ".qcow2"
+}
+
+// UserBaseImageName returns the canonical base image filename for this host
+// (e.g., "ubuntu-24.04.raw" on macOS, "ubuntu-24.04.qcow2" on Linux). Applies
+// to both user cache and backend storage — see UserBaseImageExt.
+func UserBaseImageName(base string) string {
+	return base + UserBaseImageExt()
 }
 
 // EnsureDirs creates user-writable directories for an instance.

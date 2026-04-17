@@ -79,15 +79,17 @@ func (p *UbuntuProvider) FetchAvailable(ctx context.Context) ([]ImageInfo, error
 		return nil, fmt.Errorf("failed to parse Ubuntu catalog: %w", err)
 	}
 
-	return parseCatalog(&catalog)
+	return parseCatalog(&catalog, hostArch())
 }
 
 // parseCatalog extracts ImageInfo entries from the Ubuntu catalog JSON.
-func parseCatalog(catalog *ubuntuCatalog) ([]ImageInfo, error) {
+// arch is the Go-style architecture name ("amd64" or "arm64"); Ubuntu's
+// SimpleStreams catalog uses the same naming convention.
+func parseCatalog(catalog *ubuntuCatalog, arch string) ([]ImageInfo, error) {
 	var images []ImageInfo
 
 	for _, product := range catalog.Products {
-		if product.Arch != "amd64" {
+		if product.Arch != arch {
 			continue
 		}
 		if !product.Supported {

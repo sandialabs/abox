@@ -46,9 +46,11 @@ func (p *DebianProvider) FetchAvailable(ctx context.Context) ([]ImageInfo, error
 		return nil, fmt.Errorf("failed to fetch releases: %w", err)
 	}
 
+	arch := hostArch()
+
 	var images []ImageInfo
 	for _, rel := range releases {
-		img, err := p.fetchImageInfo(ctx, rel)
+		img, err := p.fetchImageInfo(ctx, rel, arch)
 		if err != nil {
 			// Skip releases where we can't get checksum
 			continue
@@ -230,8 +232,15 @@ func parseVersion(s string) int {
 	return v
 }
 
+// debianImageFilename returns the cloud image filename for a given Debian
+// version and Go-style arch ("amd64"/"arm64"). Debian uses the same naming
+// convention as Go.
+func debianImageFilename(version, arch string) string {
+	return fmt.Sprintf("debian-%s-generic-%s.qcow2", version, arch)
+}
+
 // fetchImageInfo fetches the image URL and checksum for a release.
-func (p *DebianProvider) fetchImageInfo(ctx context.Context, rel debianRelease) (*ImageInfo, error) {
+func (p *DebianProvider) fetchImageInfo(ctx context.Context, rel debianRelease, arch string) (*ImageInfo, error) {
 	// Fetch SHA512SUMS (use series for URL - it's lowercase)
 	checksumURL := fmt.Sprintf("%s/%s/latest/SHA512SUMS", debianCloudImagesURL, rel.series)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, checksumURL, nil)
@@ -248,8 +257,8 @@ func (p *DebianProvider) fetchImageInfo(ctx context.Context, rel debianRelease) 
 		return nil, fmt.Errorf("HTTP %d fetching checksums", resp.StatusCode)
 	}
 
-	// Parse SHA512SUMS to find the generic-amd64 cloud image
-	imageFilename := fmt.Sprintf("debian-%s-generic-amd64.qcow2", rel.version)
+	// Parse SHA512SUMS to find the generic cloud image for this arch
+	imageFilename := debianImageFilename(rel.version, arch)
 	hash, err := ParseChecksums(resp.Body, imageFilename)
 	if err != nil {
 		return nil, err
