@@ -178,6 +178,11 @@ func startFilters(ctx context.Context, w io.Writer, f *factory.Factory, be backe
 // startVMAndApplyFilter starts the monitor daemon (if enabled), boots the VM,
 // and applies the nwfilter to enforce traffic rules.
 func startVMAndApplyFilter(ctx context.Context, w io.Writer, be backend.Backend, name string, inst *config.Instance, paths *config.Paths) error {
+	// Reject monitor on platforms where it isn't supported (e.g. macOS).
+	if err := guardMonitor(inst); err != nil {
+		return err
+	}
+
 	// Start monitor daemon (if enabled)
 	if inst.Monitor.Enabled {
 		fmt.Fprintln(w, "Starting monitor daemon...")

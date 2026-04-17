@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/sandialabs/abox/internal/backend"
@@ -338,7 +337,7 @@ func checkInVMDNS(paths *config.Paths, inst *config.Instance, vmIP string, sshWo
 	}
 	result.Details = fmt.Sprintf("DNS query to %s failed", dnsfilter.HealthcheckDomain)
 	if testTCPConnect(paths, inst.GetUser(), vmIP, inst.Gateway, 53) {
-		result.Hint = "TCP connection to DNS port 53 works but dig query failed - check dnsfilter or iptables NAT rules"
+		result.Hint = "TCP connection to DNS port 53 works but dig query failed - check dnsfilter or the host DNS redirect rules (iptables on Linux, pfctl on macOS)"
 	} else {
 		result.Hint = "Cannot establish TCP connection to gateway:53 - check nwfilter rules"
 	}
@@ -477,14 +476,12 @@ func checkHostDiskSpace(paths *config.Paths) CheckResult {
 
 	// Check the instances directory which is under ~/.local/share/abox/
 	dataDir := paths.Instances
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(dataDir, &stat); err != nil {
+	availableBytes, err := statfsAvailableBytes(dataDir)
+	if err != nil {
 		result.Passed = false
 		result.Details = fmt.Sprintf("failed to check disk space: %v", err)
 		return result
 	}
-
-	availableBytes := stat.Bavail * uint64(stat.Bsize) //nolint:gosec // Bsize is always positive on Linux
 	availableMB := availableBytes / (1024 * 1024)
 
 	if availableBytes < minHostDiskSpaceBytes {

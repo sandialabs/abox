@@ -13,6 +13,10 @@ build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o abox ./cmd/abox
 
 build-helper:
+	@if [ "$$(uname -s)" = "Darwin" ]; then \
+		echo "build-helper is Linux-only; macOS does not use a setuid helper"; \
+		exit 1; \
+	fi
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o abox-helper ./cmd/abox-helper
 
 install: build
@@ -20,6 +24,10 @@ install: build
 	cp abox ~/.local/bin/
 
 install-helper: build-helper
+	@if [ "$$(uname -s)" = "Darwin" ]; then \
+		echo "install-helper is Linux-only; macOS does not use a setuid helper"; \
+		exit 1; \
+	fi
 	sudo groupadd --system abox 2>/dev/null || true
 	sudo install -o root -g abox -m 4750 abox-helper /usr/local/bin/
 
