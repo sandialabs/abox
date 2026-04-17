@@ -45,6 +45,7 @@ type Backend struct {
 	vm      *VMManager
 	network *NetworkManager
 	disk    *DiskManager
+	traffic *TrafficInterceptor
 }
 
 // New creates a new macOS backend.
@@ -53,6 +54,7 @@ func New() backend.Backend {
 	b.vm = &VMManager{}
 	b.network = &NetworkManager{}
 	b.disk = &DiskManager{}
+	b.traffic = &TrafficInterceptor{}
 	return b
 }
 
@@ -89,9 +91,9 @@ func (b *Backend) Snapshot() backend.SnapshotManager {
 	return nil
 }
 
-// TrafficInterceptor returns nil — traffic interception is not yet implemented.
+// TrafficInterceptor returns the pfctl-backed traffic interceptor.
 func (b *Backend) TrafficInterceptor() backend.TrafficInterceptor {
-	return nil
+	return b.traffic
 }
 
 // DryRun outputs the vfkit configuration that would be used for an instance.
