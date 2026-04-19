@@ -84,10 +84,8 @@ func runList(f *factory.Factory, exporter *cmdutil.Exporter, name string) error 
 		return fmt.Errorf("failed to list domains: %w", err)
 	}
 
-	out := f.IO.Out
-
 	if exporter.Enabled() {
-		return exporter.Write(out, allowlistJSON{
+		return exporter.Write(f.IO.Out, allowlistJSON{
 			Domains: resp.Domains,
 			Count:   len(resp.Domains),
 		})
@@ -99,6 +97,8 @@ func runList(f *factory.Factory, exporter *cmdutil.Exporter, name string) error 
 
 	f.IO.StartPager()
 	defer f.IO.StopPager()
+
+	out := f.IO.Out
 
 	if f.IO.IsTerminal() {
 		fmt.Fprintln(out, "Allowed domains:")

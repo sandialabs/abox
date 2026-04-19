@@ -87,8 +87,6 @@ func runList(ctx context.Context, f *factory.Factory, exporter *cmdutil.Exporter
 		return fmt.Errorf("failed to list snapshots: %w", err)
 	}
 
-	out := f.IO.Out
-
 	if exporter.Enabled() {
 		items := make([]snapshotJSON, 0, len(snapshots))
 		for _, snap := range snapshots {
@@ -99,7 +97,7 @@ func runList(ctx context.Context, f *factory.Factory, exporter *cmdutil.Exporter
 				Current:      snap.Current,
 			})
 		}
-		return exporter.Write(out, items)
+		return exporter.Write(f.IO.Out, items)
 	}
 
 	if len(snapshots) == 0 {
@@ -108,6 +106,8 @@ func runList(ctx context.Context, f *factory.Factory, exporter *cmdutil.Exporter
 
 	f.IO.StartPager()
 	defer f.IO.StopPager()
+
+	out := f.IO.Out
 
 	tp := tableprinter.New(out, f.ColorScheme, f.IO.IsTerminal())
 	tp.AddHeader("NAME", "CREATED", "STATE", "CURRENT")
