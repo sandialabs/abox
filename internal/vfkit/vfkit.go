@@ -3,9 +3,15 @@
 package vfkit
 
 import (
+	"fmt"
 	"path/filepath"
 	"strconv"
 )
+
+// NetFDChild is the fd number the vfkit child sees the network
+// socketpair end at. cmd.ExtraFiles[0] maps to fd 3 in the child;
+// VMConfig.NetFD must match this value.
+const NetFDChild = 3
 
 // VMConfig holds the configuration for launching a vfkit VM instance.
 type VMConfig struct {
@@ -19,6 +25,7 @@ type VMConfig struct {
 	RESTfulURI   string // e.g. "tcp://localhost:12345" (optional)
 	PIDFile      string // where to write the vfkit process PID
 	LogFile      string // where to redirect vfkit stderr (optional)
+	NetFD        int    // child-side fd number for the virtio-net socketpair end; must be NetFDChild
 }
 
 // EFIStorePath returns the path for the EFI variable store,
@@ -43,8 +50,12 @@ func BuildArgs(cfg VMConfig) []string {
 		args = append(args, "--device", "virtio-blk,path="+cfg.CloudInitISO)
 	}
 
-	// Network: vmnet shared mode with specific MAC address
-	args = append(args, "--device", "virtio-net,nat,mac="+cfg.MACAddress)
+	// Network: virtio-net attached to a file descriptor. The caller hands
+	// vfkit one end of a socketpair via cmd.ExtraFiles; the other end is
+	// connected to a vmnet-helper process that provides NAT/DHCP.
+	// cfg.NetFD is rendered verbatim — StartVM enforces it equals NetFDChild.
+	args = append(args, "--device",
+		fmt.Sprintf("virtio-net,fd=%d,mac=%s", cfg.NetFD, cfg.MACAddress))
 
 	// Console log via virtio-serial
 	if cfg.ConsoleLog != "" {

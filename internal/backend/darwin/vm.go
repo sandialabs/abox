@@ -218,7 +218,10 @@ func (m *VMManager) Start(ctx context.Context, name string) error {
 
 	cfg := buildVMConfig(inst, paths)
 
-	pid, err := vfkit.StartVM(cfg)
+	// TODO(phase-11.3): replace nil with the caller-side socketpair end
+	// that is connected to a vmnet-helper process. Currently fails fast
+	// with "vfkit: netFD is required" — expected until 11.3 lands.
+	pid, err := vfkit.StartVM(cfg, nil)
 	if err != nil {
 		return fmt.Errorf("failed to start VM: %w", err)
 	}

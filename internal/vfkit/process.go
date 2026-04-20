@@ -17,8 +17,27 @@ import (
 // StartVM launches vfkit as a detached background process.
 // The process is placed in its own process group so it survives the parent
 // exiting. The PID is written to cfg.PIDFile for later reconnection.
+//
+// netFD is the parent's handle to one end of a syscall.Socketpair; the
+// other end is held by a vmnet-helper process providing NAT/DHCP.
+// StartVM attaches netFD to cmd.ExtraFiles so the vfkit child sees it at
+// fd NetFDChild, and closes the parent-side copy once vfkit has launched
+// (success or failure). Callers must not reuse netFD after StartVM returns.
+//
 // Returns the PID of the launched process.
-func StartVM(cfg VMConfig) (int, error) {
+func StartVM(cfg VMConfig, netFD *os.File) (int, error) {
+	if netFD == nil {
+		return 0, fmt.Errorf("vfkit: netFD is required (socketpair end for vmnet-helper)")
+	}
+	if cfg.NetFD != NetFDChild {
+		// Close so the fd isn't leaked on the error return.
+		_ = netFD.Close()
+		return 0, fmt.Errorf(
+			"vfkit: cfg.NetFD must be %d (cmd.ExtraFiles[0] maps to fd %d in the child), got %d",
+			NetFDChild, NetFDChild, cfg.NetFD,
+		)
+	}
+
 	args := BuildArgs(cfg)
 
 	logging.Debug("starting vfkit",
@@ -31,12 +50,18 @@ func StartVM(cfg VMConfig) (int, error) {
 	// Put vfkit in its own process group so it isn't killed when abox exits.
 	vfkit.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
+	// Hand the socketpair end to the child. ExtraFiles[0] maps to fd 3.
+	vfkit.ExtraFiles = []*os.File{netFD}
+
 	// Redirect stderr to log file if configured.
 	var logFile *os.File
 	if cfg.LogFile != "" {
 		var err error
 		logFile, err = os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
+			// Nothing has launched yet; close the caller's fd so they aren't
+			// left holding it, then return.
+			_ = netFD.Close()
 			return 0, fmt.Errorf("open vfkit log file: %w", err)
 		}
 		vfkit.Stderr = logFile
@@ -45,14 +70,17 @@ func StartVM(cfg VMConfig) (int, error) {
 
 	if err := vfkit.Start(); err != nil {
 		// Close the log file if we opened one — the child never launched,
-		// so nobody else will close it.
+		// so nobody else will close it. Same for the net fd.
 		if logFile != nil {
 			_ = logFile.Close()
 		}
+		_ = netFD.Close()
 		return 0, fmt.Errorf("start vfkit: %w", err)
 	}
 	// On success, logFile stays open — the child process inherited the fd,
-	// and the OS closes it when vfkit exits.
+	// and the OS closes it when vfkit exits. Close the parent's copy of the
+	// net fd now; the child holds the other half of the socketpair.
+	_ = netFD.Close()
 
 	pid := vfkit.Process.Pid
 
