@@ -643,28 +643,48 @@ func checkProxyEnvVars(paths *config.Paths, user, ip, gateway string, httpPort i
 	return result
 }
 
-// checkDNSConfig verifies systemd-resolved is configured correctly in the guest.
+// checkDNSConfig verifies DNS is configured correctly in the guest.
+// Supports systemd-resolved (Debian/Ubuntu), NetworkManager (RHEL/AlmaLinux),
+// and direct resolv.conf configuration.
 func checkDNSConfig(paths *config.Paths, user, ip, gateway string) CheckResult {
 	result := CheckResult{Name: "DNS configuration"}
 
-	// Check if the abox DNS config file exists
+	// Try systemd-resolved config (Debian/Ubuntu)
 	output, err := runSSHCommandOutput(paths, user, ip, "cat", "/etc/systemd/resolved.conf.d/00-abox.conf")
-	if err != nil {
+	if err == nil {
+		if strings.Contains(string(output), gateway) {
+			result.Passed = true
+			result.Details = "DNS=" + gateway + " (systemd-resolved)"
+			return result
+		}
 		result.Passed = false
-		result.Details = "abox DNS config not found"
-		result.Hint = hintCheckCloudInit
-		return result
-	}
-
-	content := string(output)
-	if !strings.Contains(content, gateway) {
-		result.Passed = false
-		result.Details = "DNS config doesn't point to gateway"
+		result.Details = "systemd-resolved config doesn't point to gateway"
 		result.Hint = "systemd-resolved may not use the abox DNS filter"
 		return result
 	}
 
-	result.Passed = true
-	result.Details = "DNS=" + gateway
+	// Try NetworkManager config (RHEL/AlmaLinux/Rocky)
+	output, err = runSSHCommandOutput(paths, user, ip, "cat", "/etc/NetworkManager/conf.d/99-abox-dns.conf")
+	if err == nil && strings.Contains(string(output), "dns=none") {
+		// NetworkManager DNS is disabled; check resolv.conf directly
+		output, err = runSSHCommandOutput(paths, user, ip, "cat", "/etc/resolv.conf")
+		if err == nil && strings.Contains(string(output), gateway) {
+			result.Passed = true
+			result.Details = "DNS=" + gateway + " (NetworkManager/resolv.conf)"
+			return result
+		}
+	}
+
+	// Fallback: check resolv.conf directly
+	output, err = runSSHCommandOutput(paths, user, ip, "cat", "/etc/resolv.conf")
+	if err == nil && strings.Contains(string(output), gateway) {
+		result.Passed = true
+		result.Details = "DNS=" + gateway + " (resolv.conf)"
+		return result
+	}
+
+	result.Passed = false
+	result.Details = "abox DNS config not found"
+	result.Hint = hintCheckCloudInit
 	return result
 }
