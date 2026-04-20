@@ -14,15 +14,25 @@ import (
 	"github.com/sandialabs/abox/internal/errhint"
 )
 
+// qemuDiskGroups lists the groups used by QEMU to access disk images.
+// The name varies by distribution: libvirt-qemu (Debian/Ubuntu), qemu (Fedora),
+// or kvm.
+var qemuDiskGroups = []string{"libvirt-qemu", "qemu", "kvm"}
+
 // InLibvirtGroup checks if the current user is in the libvirt group.
 func InLibvirtGroup() bool {
 	return InGroup("libvirt")
 }
 
-// InLibvirtQemuGroup checks if the current user is in the libvirt-qemu or kvm group.
-// These groups are used by QEMU processes to access disk images.
+// InLibvirtQemuGroup checks if the current user is in a QEMU disk access group.
+// Returns true if the user is in any of the known QEMU disk access groups.
 func InLibvirtQemuGroup() bool {
-	return InGroup("libvirt-qemu") || InGroup("kvm")
+	for _, g := range qemuDiskGroups {
+		if InGroup(g) {
+			return true
+		}
+	}
+	return false
 }
 
 // InGroup checks if the current process is in the specified group.
@@ -74,8 +84,16 @@ func CanAccessLibvirtImages() error {
 	// Check write access
 	if err := unix.Access(checkDir, unix.W_OK); err != nil {
 		// Provide remediation suggestions
+		// Detect which QEMU disk group exists on this system for the hint message.
+		qemuGroup := qemuDiskGroups[0]
+		for _, g := range qemuDiskGroups {
+			if _, err := user.LookupGroup(g); err == nil {
+				qemuGroup = g
+				break
+			}
+		}
 		suggestions := []string{
-			"Add user to libvirt-qemu group: sudo usermod -aG libvirt-qemu " + os.Getenv("USER"),
+			"Add user to " + qemuGroup + " group: sudo usermod -aG " + qemuGroup + " " + os.Getenv("USER"),
 			"Or set ACLs: sudo setfacl -m u:" + os.Getenv("USER") + ":rwx " + imagesDir,
 		}
 		return &errhint.ErrHint{
