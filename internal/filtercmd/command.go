@@ -9,6 +9,9 @@ import (
 	"github.com/sandialabs/abox/pkg/cmd/completion"
 )
 
+// logsCmdUse is the cobra Use string shared by all filter logs subcommands.
+const logsCmdUse = "logs <instance>"
+
 // LogsConfig holds configuration for creating a logs command.
 type LogsConfig struct {
 	// Use is the command use string (e.g., "logs <instance>")
@@ -59,7 +62,7 @@ func NewLogsCommand(w io.Writer, cfg LogsConfig) *cobra.Command {
 // NewDNSLogsCommand creates the standard DNS logs command.
 func NewDNSLogsCommand(w io.Writer) *cobra.Command {
 	return NewLogsCommand(w, LogsConfig{
-		Use:   "logs <instance>",
+		Use:   logsCmdUse,
 		Short: "View DNS filter logs",
 		Long: `View the DNS filter logs for an instance.
 
@@ -87,7 +90,7 @@ Use --jq to filter JSON traffic logs with a jq expression.`,
 // NewHTTPLogsCommand creates the standard HTTP logs command.
 func NewHTTPLogsCommand(w io.Writer) *cobra.Command {
 	return NewLogsCommand(w, LogsConfig{
-		Use:   "logs <instance>",
+		Use:   logsCmdUse,
 		Short: "View HTTP filter logs",
 		Long: `View the HTTP filter logs for an instance.
 
@@ -112,7 +115,7 @@ Use --jq to filter JSON traffic logs with a jq expression.`,
 // NewMonitorLogsCommand creates the standard monitor logs command.
 func NewMonitorLogsCommand(w io.Writer) *cobra.Command {
 	return NewLogsCommand(w, LogsConfig{
-		Use:   "logs <instance>",
+		Use:   logsCmdUse,
 		Short: "View monitor logs",
 		Long: `View Tetragon monitoring events from the VM.
 

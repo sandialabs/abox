@@ -156,20 +156,25 @@ func CloseLogFile() {
 	}
 }
 
-const levelInfo = "info"
+const (
+	levelDebug = "debug"
+	levelInfo  = "info"
+	levelWarn  = "warn"
+	levelError = "error"
+)
 
 // ParseLevel parses a log level string and returns the corresponding slog.Level.
 // Valid values are "debug", "info", "warn"/"warning", and "error".
 // Returns slog.LevelInfo for empty or invalid values.
 func ParseLevel(s string) slog.Level {
 	switch strings.ToLower(s) {
-	case "debug":
+	case levelDebug:
 		return slog.LevelDebug
 	case levelInfo, "":
 		return slog.LevelInfo
-	case "warn", "warning":
+	case levelWarn, "warning":
 		return slog.LevelWarn
-	case "error":
+	case levelError:
 		return slog.LevelError
 	default:
 		return slog.LevelInfo
@@ -190,20 +195,20 @@ func GetLevel() slog.Level {
 func LevelString(level slog.Level) string {
 	switch level {
 	case slog.LevelDebug:
-		return "debug"
+		return levelDebug
 	case slog.LevelInfo:
 		return levelInfo
 	case slog.LevelWarn:
-		return "warn"
+		return levelWarn
 	case slog.LevelError:
-		return "error"
+		return levelError
 	default:
 		return levelInfo
 	}
 }
 
 // ValidLevels are the accepted log level values.
-var ValidLevels = []string{"debug", "info", "warn", "error"}
+var ValidLevels = []string{levelDebug, levelInfo, levelWarn, levelError}
 
 // IsValidLevel returns true if the given level string is a valid log level.
 func IsValidLevel(level string) bool {

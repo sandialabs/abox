@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,15 @@ import (
 
 	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/rpc"
+)
+
+// pingResponse is the body of the Ping RPC response.
+const pingResponse = "pong"
+
+// Supported iptables protocols for DNS/HTTP redirect rules.
+const (
+	protoTCP = "tcp"
+	protoUDP = "udp"
 )
 
 // resolvedCommands holds absolute paths for external commands.
@@ -268,7 +278,7 @@ func auditInterceptor() grpc.UnaryServerInterceptor {
 
 // Ping handles the ping operation (health check).
 func (s *PrivilegeServer) Ping(ctx context.Context, req *rpc.Empty) (*rpc.StringMsg, error) {
-	return &rpc.StringMsg{Message: "pong"}, nil
+	return &rpc.StringMsg{Message: pingResponse}, nil
 }
 
 // shutdownState holds the gRPC server for coordinated shutdown.
@@ -537,7 +547,7 @@ func openNoFollow(path string) (*os.File, error) {
 		}
 		return nil, err
 	}
-	return os.NewFile(uintptr(fd), path), nil //nolint:gosec // fd comes from unix.Open, safe conversion
+	return os.NewFile(uintptr(fd), path), nil
 }
 
 // resolvePathNoFollow opens a file with O_NOFOLLOW and returns its real path.
@@ -669,7 +679,7 @@ func validateIptablesReq(req *rpc.IptablesReq) (string, error) {
 	if err := ValidateBridgeName(req.Bridge); err != nil {
 		return "", err
 	}
-	if req.Protocol != "udp" && req.Protocol != "tcp" {
+	if req.Protocol != protoUDP && req.Protocol != protoTCP {
 		return "", fmt.Errorf("protocol must be 'udp' or 'tcp', got: %s", req.Protocol)
 	}
 	port := int(req.DnsPort)
@@ -840,8 +850,7 @@ func (s *PrivilegeServer) flushNATRules(bridge string) {
 		}
 	}
 
-	for i := len(rulesToDelete) - 1; i >= 0; i-- {
-		rule := rulesToDelete[i]
+	for _, rule := range slices.Backward(rulesToDelete) {
 		rule = strings.TrimPrefix(rule, "-A ")
 		args := []string{"-w", "-t", "nat", "-D"}
 		// strings.Fields safely splits on whitespace; iptables -S output contains
@@ -882,8 +891,7 @@ func (s *PrivilegeServer) flushInputRules(bridge string) {
 		}
 	}
 
-	for i := len(rulesToDelete) - 1; i >= 0; i-- {
-		rule := rulesToDelete[i]
+	for _, rule := range slices.Backward(rulesToDelete) {
 		rule = strings.TrimPrefix(rule, "-A ")
 		args := []string{"-w", "-D"}
 		args = append(args, strings.Fields(rule)...)

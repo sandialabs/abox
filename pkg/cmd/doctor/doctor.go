@@ -152,7 +152,7 @@ func runDoctor(w io.Writer, name string) error {
 	fmt.Fprintln(w, "\n[VM Connectivity]")
 
 	// Check 7: SSH connection
-	result = CheckResult{Name: "SSH connection"}
+	result = CheckResult{Name: CheckNameSSH}
 	if vmRunning && vmIP != "" {
 		if testSSH(paths, inst.GetUser(), vmIP) {
 			result.Passed = true
@@ -192,7 +192,7 @@ func runHostChecks(w io.Writer, name string) (results []CheckResult, inst *confi
 	// Check 1: Instance configuration
 	var err error
 	inst, paths, err = instance.LoadRequired(name)
-	result := CheckResult{Name: "Instance configuration valid", Passed: err == nil}
+	result := CheckResult{Name: CheckNameConfig, Passed: err == nil}
 	if err != nil {
 		result.Details = err.Error()
 		result.Hint = "Check that the instance exists with 'abox list'"
@@ -219,7 +219,7 @@ func runHostChecks(w io.Writer, name string) (results []CheckResult, inst *confi
 	// Check 2: VM running
 	state := be.VM().State(name)
 	result = CheckResult{
-		Name:    "VM running",
+		Name:    CheckNameVMRunning,
 		Passed:  state == backend.VMStateRunning,
 		Details: fmt.Sprintf("state: %s", state),
 	}
@@ -233,7 +233,7 @@ func runHostChecks(w io.Writer, name string) (results []CheckResult, inst *confi
 
 	// Check 3: Network bridge active
 	networkActive := be.Network().IsActive(inst.Bridge)
-	result = CheckResult{Name: "Network bridge active", Passed: networkActive}
+	result = CheckResult{Name: CheckNameBridge, Passed: networkActive}
 	if networkActive {
 		result.Details = inst.Bridge
 	} else {
@@ -244,7 +244,7 @@ func runHostChecks(w io.Writer, name string) (results []CheckResult, inst *confi
 	results = append(results, result)
 
 	// Check 4: VM IP address
-	result = CheckResult{Name: "VM IP address"}
+	result = CheckResult{Name: CheckNameVMIP}
 	if !vmRunning {
 		result.Skipped = true
 	} else {
@@ -272,7 +272,7 @@ func runInVMChecks(w io.Writer, paths *config.Paths, inst *config.Instance, vmIP
 	var results []CheckResult
 
 	// Gateway ping
-	result := CheckResult{Name: "Gateway reachable"}
+	result := CheckResult{Name: CheckNameGateway}
 	switch {
 	case !sshWorks:
 		result.Skipped = true
@@ -301,11 +301,11 @@ func runInVMChecks(w io.Writer, paths *config.Paths, inst *config.Instance, vmIP
 		name string
 		fn   func() CheckResult
 	}{
-		{"Guest disk space", func() CheckResult { return checkGuestDiskSpace(paths, inst.GetUser(), vmIP) }},
-		{"Proxy environment variables", func() CheckResult {
+		{CheckNameGuestDisk, func() CheckResult { return checkGuestDiskSpace(paths, inst.GetUser(), vmIP) }},
+		{CheckNameProxyEnv, func() CheckResult {
 			return checkProxyEnvVars(paths, inst.GetUser(), vmIP, inst.Gateway, inst.HTTP.Port)
 		}},
-		{"DNS configuration", func() CheckResult { return checkDNSConfig(paths, inst.GetUser(), vmIP, inst.Gateway) }},
+		{CheckNameDNSConfig, func() CheckResult { return checkDNSConfig(paths, inst.GetUser(), vmIP, inst.Gateway) }},
 	} {
 		result = CheckResult{Name: check.name}
 		if sshWorks {
@@ -321,7 +321,7 @@ func runInVMChecks(w io.Writer, paths *config.Paths, inst *config.Instance, vmIP
 }
 
 func checkInVMDNS(paths *config.Paths, inst *config.Instance, vmIP string, sshWorks bool, dnsResult CheckResult) CheckResult {
-	result := CheckResult{Name: "DNS resolution working"}
+	result := CheckResult{Name: CheckNameDNSResolve}
 	if !sshWorks || !dnsResult.Passed {
 		result.Skipped = true
 		return result
@@ -340,7 +340,7 @@ func checkInVMDNS(paths *config.Paths, inst *config.Instance, vmIP string, sshWo
 }
 
 func checkInVMHTTP(paths *config.Paths, inst *config.Instance, vmIP string, sshWorks bool, httpResult CheckResult) CheckResult {
-	result := CheckResult{Name: "HTTP proxy reachable"}
+	result := CheckResult{Name: CheckNameHTTPProxy}
 	if !sshWorks || !httpResult.Passed {
 		result.Skipped = true
 		return result
@@ -467,7 +467,7 @@ func testHTTPProxy(paths *config.Paths, user, ip, gateway string, httpPort int) 
 
 // checkHostDiskSpace checks if there's enough disk space in the abox data directory.
 func checkHostDiskSpace(paths *config.Paths) CheckResult {
-	result := CheckResult{Name: "Host disk space"}
+	result := CheckResult{Name: CheckNameHostDisk}
 
 	// Check the instances directory which is under ~/.local/share/abox/
 	dataDir := paths.Instances
@@ -495,7 +495,7 @@ func checkHostDiskSpace(paths *config.Paths) CheckResult {
 
 // checkGuestDiskSpace checks if the guest has sufficient disk space.
 func checkGuestDiskSpace(paths *config.Paths, user, ip string) CheckResult {
-	result := CheckResult{Name: "Guest disk space"}
+	result := CheckResult{Name: CheckNameGuestDisk}
 
 	output, err := runSSHCommandOutput(paths, user, ip, "df", "-h", "/")
 	if err != nil {
@@ -541,7 +541,7 @@ func checkGuestDiskSpace(paths *config.Paths, user, ip string) CheckResult {
 
 // checkDNSUpstream tests if the upstream DNS server is reachable from the host.
 func checkDNSUpstream(inst *config.Instance) CheckResult {
-	result := CheckResult{Name: "DNS upstream reachable"}
+	result := CheckResult{Name: CheckNameDNSUpstream}
 
 	upstream := inst.DNS.Upstream
 	if upstream == "" {
@@ -572,7 +572,7 @@ func checkDNSUpstream(inst *config.Instance) CheckResult {
 
 // checkHTTPUpstream tests if the host can reach external HTTPS endpoints.
 func checkHTTPUpstream() CheckResult {
-	result := CheckResult{Name: "HTTP upstream reachable"}
+	result := CheckResult{Name: CheckNameHTTPUpstream}
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get("https://www.google.com/robots.txt") //nolint:noctx // diagnostic check with timeout
@@ -597,7 +597,7 @@ func checkHTTPUpstream() CheckResult {
 
 // checkProxyEnvVars verifies HTTP_PROXY and HTTPS_PROXY are set in the guest.
 func checkProxyEnvVars(paths *config.Paths, user, ip, gateway string, httpPort int) CheckResult {
-	result := CheckResult{Name: "Proxy environment variables"}
+	result := CheckResult{Name: CheckNameProxyEnv}
 
 	expectedProxy := "http://" + net.JoinHostPort(gateway, strconv.Itoa(httpPort))
 
@@ -645,7 +645,7 @@ func checkProxyEnvVars(paths *config.Paths, user, ip, gateway string, httpPort i
 
 // checkDNSConfig verifies systemd-resolved is configured correctly in the guest.
 func checkDNSConfig(paths *config.Paths, user, ip, gateway string) CheckResult {
-	result := CheckResult{Name: "DNS configuration"}
+	result := CheckResult{Name: CheckNameDNSConfig}
 
 	// Check if the abox DNS config file exists
 	output, err := runSSHCommandOutput(paths, user, ip, "cat", "/etc/systemd/resolved.conf.d/00-abox.conf")

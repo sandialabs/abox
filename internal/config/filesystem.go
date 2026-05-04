@@ -87,6 +87,9 @@ func SetFileSystem(f FileSystem) FileSystem {
 	return prev
 }
 
+// mockHomeDir is the default HomeDir used by MockFileSystem and tests.
+const mockHomeDir = "/home/testuser"
+
 // MockFileSystem is a FileSystem implementation for testing.
 type MockFileSystem struct {
 	Files      map[string][]byte        // path -> content
@@ -113,7 +116,7 @@ func NewMockFileSystem() *MockFileSystem {
 		Dirs:       make(map[string]bool),
 		DirEntries: make(map[string][]os.DirEntry),
 		EnvVars:    make(map[string]string),
-		HomeDir:    "/home/testuser",
+		HomeDir:    mockHomeDir,
 	}
 }
 

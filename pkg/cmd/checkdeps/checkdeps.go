@@ -205,13 +205,14 @@ func checkExecutable(name string) error {
 }
 
 func installHint(name string) string {
+	const hintOpenSSHClient = "install openssh-client"
 	hints := map[string]string{
 		"virsh":       "install libvirt-clients (Debian/Ubuntu) or libvirt (Fedora/Arch)",
 		"qemu-img":    "install qemu-utils (Debian/Ubuntu) or qemu-img (Fedora/Arch)",
-		"ssh":         "install openssh-client",
-		"scp":         "install openssh-client",
+		"ssh":         hintOpenSSHClient,
+		"scp":         hintOpenSSHClient,
 		"sshfs":       "install sshfs",
-		"ssh-keygen":  "install openssh-client",
+		"ssh-keygen":  hintOpenSSHClient,
 		"genisoimage": "install genisoimage (Debian/Ubuntu) or cdrkit (Fedora/Arch)",
 		"xorriso":     "install xorriso",
 		"pkexec":      "install polkit (usually pre-installed)",

@@ -21,8 +21,21 @@ import (
 // This location is accessible by the libvirt-qemu user, unlike user home directories.
 const LibvirtImagesDir = "/var/lib/libvirt/images/abox"
 
-// defaultUser is the default SSH username for Ubuntu and unknown base images.
-const defaultUser = "ubuntu"
+// Default values for new instances.
+const (
+	DefaultBase     = "ubuntu-24.04"
+	DefaultDisk     = "20G"
+	DefaultUpstream = "8.8.8.8:53"
+)
+
+// SSH usernames for supported distros.
+const (
+	defaultUser   = "ubuntu" // also used for unknown base images
+	userAlmaLinux = "almalinux"
+	userRocky     = "cloud-user"
+	userCentOS    = "centos"
+	userDebian    = "debian"
+)
 
 // lockFile holds the file descriptor for the global lock.
 // Note: This global is safe because abox is a single-threaded CLI tool.
@@ -64,7 +77,7 @@ func AcquireLock() error {
 	}
 
 	// Acquire exclusive lock (blocks until available)
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil { //nolint:gosec // fd from os.File, safe conversion
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		f.Close()
 		return fmt.Errorf("failed to acquire lock: %w", err)
 	}
@@ -80,7 +93,7 @@ func ReleaseLock() error {
 	}
 
 	// Release the lock
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil { //nolint:gosec // fd from os.File, safe conversion
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil {
 		lockFile.Close()
 		lockFile = nil
 		return fmt.Errorf("failed to release lock: %w", err)
@@ -148,13 +161,13 @@ type Instance struct {
 func DefaultUserForBase(base string) string {
 	switch {
 	case strings.HasPrefix(base, "almalinux-"):
-		return "almalinux"
+		return userAlmaLinux
 	case strings.HasPrefix(base, "rocky-"):
-		return "cloud-user"
+		return userRocky
 	case strings.HasPrefix(base, "centos-"):
-		return "centos"
+		return userCentOS
 	case strings.HasPrefix(base, "debian-"):
-		return "debian"
+		return userDebian
 	default:
 		return defaultUser
 	}
@@ -220,14 +233,14 @@ func DefaultInstance(name string) *Instance {
 		Name:    name,
 		CPUs:    2,
 		Memory:  4096,
-		Base:    "ubuntu-24.04",
+		Base:    DefaultBase,
 		DNS: DNSConfig{
-			Upstream: "8.8.8.8:53",
+			Upstream: DefaultUpstream,
 		},
 		HTTP: HTTPConfig{
 			MITM: true, // Default to enabled for security
 		},
-		Disk: "20G",
+		Disk: DefaultDisk,
 	}
 }
 

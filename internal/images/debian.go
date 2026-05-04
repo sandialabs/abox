@@ -29,7 +29,7 @@ func NewDebianProvider() *DebianProvider {
 
 // Name returns the provider name.
 func (p *DebianProvider) Name() string {
-	return "debian"
+	return providerDebian
 }
 
 // debianRelease holds parsed release info from debian.csv.
@@ -263,7 +263,7 @@ func (p *DebianProvider) fetchImageInfo(ctx context.Context, rel debianRelease) 
 		URL:         imageURL,
 		Hash:        hash,
 		HashAlgo:    "sha512",
-		Provider:    "debian",
+		Provider:    providerDebian,
 	}, nil
 }
 

@@ -23,7 +23,7 @@ func GetPeerCredentials(conn net.Conn) (pid int, uid int, err error) {
 	var cred *unix.Ucred
 	var credErr error
 	err = rawConn.Control(func(fd uintptr) {
-		cred, credErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED) //nolint:gosec // fd from rawConn, safe conversion
+		cred, credErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
 	})
 	if err != nil {
 		return 0, 0, err

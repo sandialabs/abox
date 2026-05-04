@@ -27,7 +27,7 @@ func NewUbuntuProvider() *UbuntuProvider {
 
 // Name returns the provider name.
 func (p *UbuntuProvider) Name() string {
-	return "ubuntu"
+	return providerUbuntu
 }
 
 // minUbuntuVersion is the minimum Ubuntu LTS version to offer.
@@ -87,7 +87,7 @@ func parseCatalog(catalog *ubuntuCatalog) ([]ImageInfo, error) {
 	var images []ImageInfo
 
 	for _, product := range catalog.Products {
-		if product.Arch != "amd64" {
+		if product.Arch != archAMD64 {
 			continue
 		}
 		if !product.Supported {
@@ -124,7 +124,7 @@ func parseCatalog(catalog *ubuntuCatalog) ([]ImageInfo, error) {
 			URL:         "https://cloud-images.ubuntu.com/" + disk.Path,
 			Hash:        disk.SHA256,
 			HashAlgo:    "sha256",
-			Provider:    "ubuntu",
+			Provider:    providerUbuntu,
 		})
 	}
 

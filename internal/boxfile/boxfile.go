@@ -63,11 +63,11 @@ func DefaultBoxfile() *Boxfile {
 		Version: CurrentBoxfileVersion,
 		CPUs:    2,
 		Memory:  4096,
-		Disk:    "20G",
-		Base:    "ubuntu-24.04",
+		Disk:    config.DefaultDisk,
+		Base:    config.DefaultBase,
 		User:    "ubuntu",
 		DNS: BoxfileDNS{
-			Upstream: "8.8.8.8:53",
+			Upstream: config.DefaultUpstream,
 		},
 		HTTP: BoxfileHTTP{
 			MITM: &mitmDefault,
