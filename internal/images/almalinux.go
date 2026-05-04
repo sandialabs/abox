@@ -28,7 +28,7 @@ func NewAlmaLinuxProvider() *AlmaLinuxProvider {
 
 // Name returns the provider name.
 func (p *AlmaLinuxProvider) Name() string {
-	return "almalinux"
+	return providerAlmaLinux
 }
 
 // almalinuxRelease holds release info for AlmaLinux.
@@ -105,7 +105,7 @@ func (p *AlmaLinuxProvider) fetchImageInfo(ctx context.Context, rel almalinuxRel
 		URL:         imageURL,
 		Hash:        hash,
 		HashAlgo:    "sha256",
-		Provider:    "almalinux",
+		Provider:    providerAlmaLinux,
 	}, nil
 }
 
