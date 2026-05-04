@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -840,8 +841,7 @@ func (s *PrivilegeServer) flushNATRules(bridge string) {
 		}
 	}
 
-	for i := len(rulesToDelete) - 1; i >= 0; i-- {
-		rule := rulesToDelete[i]
+	for _, rule := range slices.Backward(rulesToDelete) {
 		rule = strings.TrimPrefix(rule, "-A ")
 		args := []string{"-w", "-t", "nat", "-D"}
 		// strings.Fields safely splits on whitespace; iptables -S output contains
@@ -882,8 +882,7 @@ func (s *PrivilegeServer) flushInputRules(bridge string) {
 		}
 	}
 
-	for i := len(rulesToDelete) - 1; i >= 0; i-- {
-		rule := rulesToDelete[i]
+	for _, rule := range slices.Backward(rulesToDelete) {
 		rule = strings.TrimPrefix(rule, "-A ")
 		args := []string{"-w", "-D"}
 		args = append(args, strings.Fields(rule)...)
