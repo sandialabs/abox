@@ -16,6 +16,9 @@ import (
 	"time"
 )
 
+// hashAlgoSHA256 identifies the SHA-256 hash algorithm in ReleaseInfo.HashAlgo.
+const hashAlgoSHA256 = "sha256"
+
 // ReleaseInfo contains metadata for a downloadable Tetragon release.
 type ReleaseInfo struct {
 	Version  string `json:"version"`   // e.g., "v1.6.0"
@@ -251,7 +254,7 @@ func parseRelease(ctx context.Context, release *githubRelease) (*ReleaseInfo, er
 		Version:  version,
 		URL:      tarballURL,
 		Hash:     hash,
-		HashAlgo: "sha256",
+		HashAlgo: hashAlgoSHA256,
 	}, nil
 }
 

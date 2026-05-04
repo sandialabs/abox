@@ -9,9 +9,14 @@ import (
 	"strings"
 )
 
+// libvirtImagesDir is the privileged-helper-managed disk image storage root.
+// Mirrors config.LibvirtImagesDir; kept local to avoid importing config from
+// the privilege helper, which must be a leaf package for the setuid binary.
+const libvirtImagesDir = "/var/lib/libvirt/images/abox"
+
 // Allowed base paths for privileged operations.
 var allowedPaths = []string{
-	"/var/lib/libvirt/images/abox",
+	libvirtImagesDir,
 }
 
 // safePathChars matches strings containing ONLY safe path characters.

@@ -27,6 +27,15 @@ import (
 	"github.com/sandialabs/abox/internal/rpc"
 )
 
+// pingResponse is the body of the Ping RPC response.
+const pingResponse = "pong"
+
+// Supported iptables protocols for DNS/HTTP redirect rules.
+const (
+	protoTCP = "tcp"
+	protoUDP = "udp"
+)
+
 // resolvedCommands holds absolute paths for external commands.
 // These are resolved once at startup and cached for the process lifetime.
 var resolvedCommands struct {
@@ -269,7 +278,7 @@ func auditInterceptor() grpc.UnaryServerInterceptor {
 
 // Ping handles the ping operation (health check).
 func (s *PrivilegeServer) Ping(ctx context.Context, req *rpc.Empty) (*rpc.StringMsg, error) {
-	return &rpc.StringMsg{Message: "pong"}, nil
+	return &rpc.StringMsg{Message: pingResponse}, nil
 }
 
 // shutdownState holds the gRPC server for coordinated shutdown.
@@ -670,7 +679,7 @@ func validateIptablesReq(req *rpc.IptablesReq) (string, error) {
 	if err := ValidateBridgeName(req.Bridge); err != nil {
 		return "", err
 	}
-	if req.Protocol != "udp" && req.Protocol != "tcp" {
+	if req.Protocol != protoUDP && req.Protocol != protoTCP {
 		return "", fmt.Errorf("protocol must be 'udp' or 'tcp', got: %s", req.Protocol)
 	}
 	port := int(req.DnsPort)

@@ -16,12 +16,21 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Profile subcommand names (CLI argument values, also sent over the
+// privilege RPC as ProfileReq.Subcommand).
+const (
+	subShow   = "show"
+	subExport = "export"
+	subClear  = "clear"
+	subCount  = "count"
+)
+
 // validSubcommands are the allowed profile subcommands.
 var validSubcommands = map[string]bool{
-	"show":   true,
-	"export": true,
-	"clear":  true,
-	"count":  true,
+	subShow:   true,
+	subExport: true,
+	subClear:  true,
+	subCount:  true,
 }
 
 // Options holds the options for the profile command.
@@ -61,7 +70,7 @@ Usage flow:
 		ValidArgsFunction: completion.Sequence(completion.RunningInstances()),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.Name = args[0]
-			opts.Subcommand = "show" // default
+			opts.Subcommand = subShow // default
 			if len(args) > 1 {
 				opts.Subcommand = args[1]
 			}
@@ -90,13 +99,13 @@ func runProfile(opts *Options, name, subcommand string) error {
 	factory.Ensure(&opts.Factory)
 
 	switch subcommand {
-	case "show":
+	case subShow:
 		return runShow(opts.Factory, name)
-	case "export":
+	case subExport:
 		return runExport(opts.Factory, name)
-	case "clear":
+	case subClear:
 		return runClear(opts, name)
-	case "count":
+	case subCount:
 		return runCount(opts.Factory, name)
 	default:
 		return fmt.Errorf("unknown subcommand: %s", subcommand)
@@ -108,7 +117,7 @@ func runShow(f *factory.Factory, name string) error {
 	var dnsErr, httpErr error
 
 	dnsErr = f.WithDNSClient(name, func(ctx context.Context, client rpc.DNSFilterClient) error {
-		resp, err := client.Profile(ctx, &rpc.ProfileReq{Subcommand: "show"})
+		resp, err := client.Profile(ctx, &rpc.ProfileReq{Subcommand: subShow})
 		if err != nil {
 			return err
 		}
@@ -117,7 +126,7 @@ func runShow(f *factory.Factory, name string) error {
 	})
 
 	httpErr = f.WithHTTPClient(name, func(ctx context.Context, client rpc.HTTPFilterClient) error {
-		resp, err := client.Profile(ctx, &rpc.ProfileReq{Subcommand: "show"})
+		resp, err := client.Profile(ctx, &rpc.ProfileReq{Subcommand: subShow})
 		if err != nil {
 			return err
 		}
@@ -162,7 +171,7 @@ func runExport(f *factory.Factory, name string) error {
 	var dnsErr, httpErr error
 
 	dnsErr = f.WithDNSClient(name, func(ctx context.Context, client rpc.DNSFilterClient) error {
-		resp, err := client.Profile(ctx, &rpc.ProfileReq{Subcommand: "show"})
+		resp, err := client.Profile(ctx, &rpc.ProfileReq{Subcommand: subShow})
 		if err != nil {
 			return err
 		}
@@ -171,7 +180,7 @@ func runExport(f *factory.Factory, name string) error {
 	})
 
 	httpErr = f.WithHTTPClient(name, func(ctx context.Context, client rpc.HTTPFilterClient) error {
-		resp, err := client.Profile(ctx, &rpc.ProfileReq{Subcommand: "show"})
+		resp, err := client.Profile(ctx, &rpc.ProfileReq{Subcommand: subShow})
 		if err != nil {
 			return err
 		}
@@ -223,12 +232,12 @@ func runClear(opts *Options, name string) error {
 	var dnsErr, httpErr error
 
 	dnsErr = opts.Factory.WithDNSClient(name, func(ctx context.Context, client rpc.DNSFilterClient) error {
-		_, err := client.Profile(ctx, &rpc.ProfileReq{Subcommand: "clear"})
+		_, err := client.Profile(ctx, &rpc.ProfileReq{Subcommand: subClear})
 		return err
 	})
 
 	httpErr = opts.Factory.WithHTTPClient(name, func(ctx context.Context, client rpc.HTTPFilterClient) error {
-		_, err := client.Profile(ctx, &rpc.ProfileReq{Subcommand: "clear"})
+		_, err := client.Profile(ctx, &rpc.ProfileReq{Subcommand: subClear})
 		return err
 	})
 
@@ -260,7 +269,7 @@ func runCount(f *factory.Factory, name string) error {
 	var dnsErr, httpErr error
 
 	dnsErr = f.WithDNSClient(name, func(ctx context.Context, client rpc.DNSFilterClient) error {
-		resp, err := client.Profile(ctx, &rpc.ProfileReq{Subcommand: "count"})
+		resp, err := client.Profile(ctx, &rpc.ProfileReq{Subcommand: subCount})
 		if err != nil {
 			return err
 		}
@@ -269,7 +278,7 @@ func runCount(f *factory.Factory, name string) error {
 	})
 
 	httpErr = f.WithHTTPClient(name, func(ctx context.Context, client rpc.HTTPFilterClient) error {
-		resp, err := client.Profile(ctx, &rpc.ProfileReq{Subcommand: "count"})
+		resp, err := client.Profile(ctx, &rpc.ProfileReq{Subcommand: subCount})
 		if err != nil {
 			return err
 		}

@@ -21,13 +21,20 @@ import (
 // This protects against MITM attacks after first connection while allowing
 // ephemeral VMs to work smoothly. If a host key changes unexpectedly, SSH
 // will refuse to connect, alerting to a potential attack.
+// SSH options shared by all abox SSH/SCP invocations.
+const (
+	sshOptStrictHostKey = "StrictHostKeyChecking=accept-new"
+	sshOptControlPath   = "ControlPath=none"
+	sshOptLogLevel      = "LogLevel=ERROR"
+)
+
 func CommonOptions(paths *config.Paths) []string {
 	return []string{
 		"-i", paths.SSHKey,
-		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", sshOptStrictHostKey,
 		"-o", "UserKnownHostsFile=" + paths.KnownHosts,
-		"-o", "ControlPath=none",
-		"-o", "LogLevel=ERROR",
+		"-o", sshOptControlPath,
+		"-o", sshOptLogLevel,
 	}
 }
 
