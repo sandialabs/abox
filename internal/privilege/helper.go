@@ -537,7 +537,7 @@ func openNoFollow(path string) (*os.File, error) {
 		}
 		return nil, err
 	}
-	return os.NewFile(uintptr(fd), path), nil //nolint:gosec // fd comes from unix.Open, safe conversion
+	return os.NewFile(uintptr(fd), path), nil
 }
 
 // resolvePathNoFollow opens a file with O_NOFOLLOW and returns its real path.

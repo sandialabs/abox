@@ -64,7 +64,7 @@ func AcquireLock() error {
 	}
 
 	// Acquire exclusive lock (blocks until available)
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil { //nolint:gosec // fd from os.File, safe conversion
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		f.Close()
 		return fmt.Errorf("failed to acquire lock: %w", err)
 	}
@@ -80,7 +80,7 @@ func ReleaseLock() error {
 	}
 
 	// Release the lock
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil { //nolint:gosec // fd from os.File, safe conversion
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil {
 		lockFile.Close()
 		lockFile = nil
 		return fmt.Errorf("failed to release lock: %w", err)

@@ -16,7 +16,7 @@ type lockCloser struct {
 
 func (l *lockCloser) Close() error {
 	defer l.f.Close()
-	return syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN) //nolint:gosec // fd from os.File, safe conversion
+	return syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
 }
 
 // LockBaseImage acquires a flock on a base image file.
@@ -28,7 +28,7 @@ func LockBaseImage(path string, lockType int) (io.Closer, error) {
 		return nil, fmt.Errorf("failed to open base image for locking: %w", err)
 	}
 
-	if err := syscall.Flock(int(f.Fd()), lockType); err != nil { //nolint:gosec // fd from os.File, safe conversion
+	if err := syscall.Flock(int(f.Fd()), lockType); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("failed to acquire lock on base image: %w", err)
 	}
