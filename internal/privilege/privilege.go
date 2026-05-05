@@ -27,12 +27,7 @@ func InLibvirtGroup() bool {
 // InLibvirtQemuGroup checks if the current user is in a QEMU disk access group.
 // Returns true if the user is in any of the known QEMU disk access groups.
 func InLibvirtQemuGroup() bool {
-	for _, g := range qemuDiskGroups {
-		if InGroup(g) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(qemuDiskGroups, InGroup)
 }
 
 // InGroup checks if the current process is in the specified group.
