@@ -89,12 +89,17 @@ nfpms:
     description: Security-isolated VM environments for AI coding agents
     formats:
       - deb
+      - rpm
     bindir: /usr/bin
     contents:
       - src: completions/abox.bash
         dst: /usr/share/bash-completion/completions/abox
       - src: completions/_abox
         dst: /usr/share/zsh/vendor-completions/_abox
+        packager: deb
+      - src: completions/_abox
+        dst: /usr/share/zsh/site-functions/_abox
+        packager: rpm
       - src: completions/abox.fish
         dst: /usr/share/fish/vendor_completions.d/abox.fish
       - src: manpages/abox*.1.gz
