@@ -105,6 +105,7 @@ func runCheckDeps(opts *Options) error {
 	}
 
 	if !opts.Quiet {
+		warnFirewalld(w)
 		fmt.Fprintln(w, "All required dependencies are installed.")
 	}
 
@@ -154,7 +155,7 @@ func validateToolPairs(w io.Writer, quiet bool) error {
 			return &cmdutil.ErrSilent{}
 		}
 		fmt.Fprintln(w, "Error: no ISO creation tool available (need genisoimage or xorriso)")
-		fmt.Fprintln(w, "  Install: apt install genisoimage  (or: apt install xorriso)")
+		fmt.Fprintf(w, "  Install: %s  (or: %s)\n", installHint("genisoimage"), installHint("xorriso"))
 		return errors.New("no ISO creation tool available")
 	}
 	return nil
@@ -174,9 +175,9 @@ func validateLibvirtAccess(w io.Writer, quiet bool) error {
 	if !quiet {
 		fmt.Fprintln(w, "  libvirt group: member")
 		if privilege.InLibvirtQemuGroup() {
-			fmt.Fprintln(w, "  libvirt-qemu/kvm group: member")
+			fmt.Fprintln(w, "  qemu disk access group: member")
 		} else {
-			fmt.Fprintln(w, "  libvirt-qemu/kvm group: not a member")
+			fmt.Fprintln(w, "  qemu disk access group: not a member")
 		}
 		if err := privilege.CanAccessLibvirtImages(); err != nil {
 			fmt.Fprintf(w, "  libvirt images access: %v\n", err)
@@ -224,6 +225,25 @@ func installHint(name string) string {
 		return hint
 	}
 	return "check your package manager"
+}
+
+// warnFirewalld prints a warning if firewalld is active, since it can
+// interfere with the iptables NAT rules abox creates for DNS redirection.
+func warnFirewalld(w io.Writer) {
+	path, err := exec.LookPath("firewall-cmd")
+	if err != nil {
+		return
+	}
+	cmd := exec.Command(path, "--state")
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		return // not running
+	}
+	fmt.Fprintln(w, "  Warning: firewalld is active")
+	fmt.Fprintln(w, "  abox uses iptables NAT rules that may conflict with firewalld.")
+	fmt.Fprintln(w, "  See 'abox docs requirements' or docs/requirements.md for firewalld setup.")
+	fmt.Fprintln(w)
 }
 
 // RunQuiet runs dependency checks without output, returns true if all pass.
