@@ -3,9 +3,13 @@
 package e2e
 
 import (
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sandialabs/abox/internal/config"
 )
 
 // TestAllowlistManagement tests adding, removing, and listing allowlist entries.
@@ -130,6 +134,66 @@ func TestHTTPFilterStatus(t *testing.T) {
 	// Check for expected status fields
 	if !strings.Contains(result.Stdout, "Mode:") {
 		t.Error("HTTP status should contain Mode")
+	}
+}
+
+// TestFilterCrashRecovery verifies that `abox start` self-heals when a filter
+// daemon exited ungracefully (e.g. SIGKILL'd or panicked) and left its socket
+// and PID files behind. Before the fix, `abox start` checked only for socket
+// existence and reported "already running", leaving the user with no clean
+// recovery path.
+func TestFilterCrashRecovery(t *testing.T) {
+	skipIfNoLibvirt(t)
+	skipIfNoConfiguredBaseImage(t)
+	skipInShortMode(t)
+
+	env := newTestEnv(t)
+	inst := env.newTestInstance()
+	inst.create()
+	inst.start()
+
+	if !inst.waitForRunning(60 * time.Second) {
+		t.Fatal("Instance did not start")
+	}
+
+	_, paths, err := config.Load(inst.name)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	// Capture the original httpfilter PID, then SIGKILL it so it cannot clean up.
+	origPID := readPID(t, paths.HTTPPIDFile)
+	if err := syscall.Kill(origPID, syscall.SIGKILL); err != nil {
+		t.Fatalf("failed to kill httpfilter pid=%d: %v", origPID, err)
+	}
+	waitForDead(t, origPID)
+
+	// Stale socket should remain — this is the failure condition the fix targets.
+	if _, err := os.Stat(paths.HTTPSocket); err != nil {
+		t.Fatalf("expected stale httpfilter socket to remain after SIGKILL, got: %v", err)
+	}
+
+	// `abox start` must self-heal: detect the stale files, clean them up, start fresh.
+	result := env.run("start", inst.name)
+	if !result.Success() {
+		t.Fatalf("abox start after crash failed: %v\nstdout: %s\nstderr: %s",
+			result.Err, result.Stdout, result.Stderr)
+	}
+	if !strings.Contains(result.Stdout, "did not exit cleanly") {
+		t.Errorf("expected recovery notice in start output, got:\n%s", result.Stdout)
+	}
+
+	// The new httpfilter must be responsive.
+	statusResult := env.run("http", "status", inst.name)
+	if !statusResult.Success() || !strings.Contains(statusResult.Stdout, "Mode:") {
+		t.Fatalf("httpfilter not responsive after recovery: %v\n%s",
+			statusResult.Err, statusResult.Stdout)
+	}
+
+	// And it must be a different process from the one we killed.
+	newPID := readPID(t, paths.HTTPPIDFile)
+	if newPID == origPID {
+		t.Errorf("expected new httpfilter PID after recovery, still got %d", origPID)
 	}
 }
 

@@ -22,7 +22,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -505,4 +507,40 @@ func skipIfNoSSHFS(t *testing.T) {
 	if _, err := exec.LookPath("sshfs"); err != nil {
 		t.Skip("sshfs not found - install sshfs to run mount tests")
 	}
+}
+
+// readPID polls pidFile until it appears and contains a valid PID, then returns it.
+// Fails the test if the file never appears or contains an unparseable PID.
+func readPID(t *testing.T, pidFile string) int {
+	t.Helper()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(pidFile)
+		if err == nil {
+			pid, perr := strconv.Atoi(strings.TrimSpace(string(data)))
+			if perr == nil && pid > 0 {
+				return pid
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("PID file %s did not appear with a valid PID within 30s", pidFile)
+	return 0
+}
+
+// waitForDead waits until the process with the given PID is no longer running.
+// Fails the test if the process is still alive after the timeout.
+func waitForDead(t *testing.T, pid int) {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		// signal 0 checks existence without sending a signal
+		if err := syscall.Kill(pid, 0); err != nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("process %d did not die within 10s", pid)
 }
