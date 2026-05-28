@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"time"
 )
@@ -125,7 +126,11 @@ func SignHostCert(host string, caCert *x509.Certificate, caKey *ecdsa.PrivateKey
 		NotAfter:    time.Now().AddDate(1, 0, 0),     // 1 year
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:    []string{host},
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		template.IPAddresses = []net.IP{ip}
+	} else {
+		template.DNSNames = []string{host}
 	}
 
 	// Sign with CA

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"os"
 	"sort"
 	"strings"
@@ -18,7 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/elazarl/goproxy"
+	"golang.org/x/net/http2"
 
 	"github.com/sandialabs/abox/internal/allowlist"
 	"github.com/sandialabs/abox/internal/cert"
@@ -44,9 +45,24 @@ type Server struct {
 	filterbase.TrafficLoggerMixin // embedded traffic logger
 	filter                        *allowlist.Filter
 	stats                         Stats
-	proxy                         *goproxy.ProxyHttpServer
-	server                        *http.Server
-	listener                      net.Listener
+
+	// HTTP server + proxy plumbing
+	server       *http.Server
+	listener     net.Listener
+	proxyHandler http.Handler
+	transport    *http.Transport
+	reverseProxy *httputil.ReverseProxy
+	http1Server  *http.Server  // used as BaseConfig for h2 and as the per-conn http.Server template for h1
+	http2Server  *http2.Server // h2 server for intercepted MITM connections
+
+	// hijack lifecycle: outer http.Server.Shutdown does not track hijacked
+	// connections, so we manage MITM/tunnel session teardown ourselves.
+	// activeConns counts each trackedConn-wrapped session and decrements when
+	// the wrapper's Close fires (which happens whether the inner server, a
+	// ReverseProxy hijack handoff, or the watcher closes it).
+	activeConns  sync.WaitGroup
+	hijackCtx    context.Context
+	hijackCancel context.CancelFunc
 
 	// TLS MITM fields
 	caCert        *x509.Certificate
@@ -102,30 +118,79 @@ func NewServer(filter *allowlist.Filter, passive bool) *Server {
 	}
 	s.SetActive(!passive)
 
-	// Create goproxy instance
-	proxy := goproxy.NewProxyHttpServer()
-	proxy.Verbose = false
-
-	// Handle HTTP requests - check Host header
-	proxy.OnRequest().DoFunc(func(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-		return s.handleRequest(r, ctx)
-	})
-
-	// Handle HTTPS CONNECT - check hostname
-	proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-		return s.handleConnect(host, ctx)
-	})
-
-	s.proxy = proxy
+	s.transport = &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			NextProtos: []string{"h2", "http/1.1"},
+		},
+	}
+	// http2.ConfigureTransport wires up the h2 round-tripper so upstream h2
+	// responses (including trailers) are forwarded by ReverseProxy.
+	if err := http2.ConfigureTransport(s.transport); err != nil {
+		// Should not fail with our config; treat as programming error.
+		logging.Debug("http2.ConfigureTransport failed", "err", err)
+	}
+	s.reverseProxy = newReverseProxy(s.transport)
+	// http1Server is the config template for intercepted MITM h1 connections
+	// (proxy.go intercept clones the relevant fields per-call). ReadHeaderTimeout
+	// bounds slow-headers attacks; IdleTimeout bounds keepalive lingering. We
+	// deliberately omit WriteTimeout here — it would kill long-lived MITM
+	// flows (WebSockets, SSE, large downloads).
+	s.http1Server = &http.Server{
+		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	s.http2Server = &http2.Server{}
+	s.hijackCtx, s.hijackCancel = context.WithCancel(context.Background())
+	s.proxyHandler = newProxyHandler(s)
 	return s
 }
 
 // extractHost extracts the hostname from a host:port string.
+//
+// Handles three input shapes:
+//   - "example.com:443" or "1.2.3.4:443" — SplitHostPort returns the host.
+//   - "[::1]:443" — SplitHostPort returns "::1" without brackets.
+//   - "[::1]" or "example.com" or "1.2.3.4" — no port: bracket-strip IPv6
+//     literals, return the rest as-is. Without bracket stripping, a bare
+//     "[::1]" Host header would pass through to SSRF and allowlist checks
+//     with brackets included, silently bypassing both.
 func extractHost(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		return h
 	}
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		return host[1 : len(host)-1]
+	}
 	return host
+}
+
+// trackConn wraps conn so its eventual Close decrements activeConns. Caller
+// uses the returned trackedConn (its embedded net.Conn is the original) for
+// everything downstream — tls.Server, io.Copy, etc. — so any Close that flows
+// through the wrapper deregisters from Shutdown's drain.
+func (s *Server) trackConn(conn net.Conn) *trackedConn {
+	s.activeConns.Add(1)
+	return &trackedConn{
+		Conn:    conn,
+		onClose: s.activeConns.Done,
+		closed:  make(chan struct{}),
+	}
+}
+
+// urlString returns r.URL.String(), or "" if r or r.URL is nil.
+// Defensive even though stdlib h1/h2 servers guarantee non-nil URLs.
+func urlString(r *http.Request) string {
+	if r == nil || r.URL == nil {
+		return ""
+	}
+	return r.URL.String()
 }
 
 // checkHost performs common request checking logic.
@@ -154,19 +219,82 @@ func (s *Server) checkHost(host string) (allowed, blockedBySSRF bool) {
 	return allowed, false
 }
 
-// handleRequest handles HTTP (non-CONNECT) requests.
-// With MITM enabled, this also handles decrypted HTTPS requests and can detect
-// domain fronting attacks by checking the Host header against the allowlist.
-func (s *Server) handleRequest(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+// decideConnect is the policy callback invoked from proxy.go for every CONNECT
+// request. It runs the allowlist + SSRF check on the CONNECT target and
+// returns the proxy action.
+//
+// Stats: blocked-at-CONNECT increments TotalRequests + BlockedRequests here.
+// Allowed-with-intercept defers per-request counting to decideRequest.
+// Allowed-without-MITM (tunnel) counts as one allow here.
+func (s *Server) decideConnect(host string) connectAction {
+	allowed, blockedBySSRF := s.checkHost(host)
+
+	if blockedBySSRF {
+		atomic.AddUint64(&s.stats.TotalRequests, 1)
+		atomic.AddUint64(&s.stats.BlockedRequests, 1)
+		logging.Audit("https blocked private IP",
+			"action", logging.ActionHTTPBlockSSRF,
+			"host", host,
+		)
+		if logger := s.TrafficLogger(); logger != nil {
+			logger.LogBlock(host, "ssrf_private_ip", "")
+		}
+		return actionReject
+	}
+
+	if !allowed {
+		atomic.AddUint64(&s.stats.TotalRequests, 1)
+		atomic.AddUint64(&s.stats.BlockedRequests, 1)
+		logging.Audit("https blocked",
+			"action", logging.ActionHTTPBlock,
+			"host", host,
+		)
+		if logger := s.TrafficLogger(); logger != nil {
+			logger.LogBlock(host, "not_in_allowlist", "")
+		}
+		return actionReject
+	}
+
+	if !s.mitmReady {
+		// No MITM CA loaded: allow the already-checked CONNECT target through
+		// as a transparent tunnel. We cannot inspect inner traffic in this
+		// mode, so domain fronting cannot be detected. Enable MITM (LoadCA)
+		// for full protection.
+		atomic.AddUint64(&s.stats.TotalRequests, 1)
+		atomic.AddUint64(&s.stats.AllowedRequests, 1)
+		logging.Debug("https allowed without MITM inspection",
+			"host", host,
+		)
+		if logger := s.TrafficLogger(); logger != nil {
+			logger.LogAllow(host, "")
+		}
+		return actionTunnel
+	}
+
+	return actionIntercept
+}
+
+// decideRequest is the policy callback invoked from proxy.go for every
+// fully-parsed inbound request (forward proxy and post-MITM, h1 and h2 alike).
+// connectTarget is "" for forward-proxy requests and the CONNECT host for
+// post-MITM requests.
+func (s *Server) decideRequest(r *http.Request, connectTarget string) requestDecision {
+	if r == nil {
+		return requestDecision{forward: false, status: http.StatusBadRequest, body: "bad request\n"}
+	}
+
 	atomic.AddUint64(&s.stats.TotalRequests, 1)
 
 	host := extractHost(r.Host)
 
-	// Handle healthcheck domain - always responds regardless of mode or allowlist
+	// Healthcheck shortcut: always allow, regardless of mode or allowlist.
 	if strings.EqualFold(host, HealthcheckDomain) {
 		atomic.AddUint64(&s.stats.AllowedRequests, 1)
-		return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusOK,
-			"abox healthcheck OK\n")
+		return requestDecision{
+			forward: false,
+			status:  http.StatusOK,
+			body:    "abox healthcheck OK\n",
+		}
 	}
 
 	allowed, blockedBySSRF := s.checkHost(host)
@@ -179,121 +307,47 @@ func (s *Server) handleRequest(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Re
 		)
 		if logger := s.TrafficLogger(); logger != nil {
 			logger.LogBlock(host, "ssrf_private_ip", "",
-				logging.WithMethod(r.Method), logging.WithURL(r.URL.String()))
+				logging.WithMethod(r.Method), logging.WithURL(urlString(r)))
 		}
-		return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusForbidden,
-			"Access denied\n")
+		return requestDecision{forward: false, status: http.StatusForbidden, body: "Access denied\n"}
 	}
 
 	if !allowed {
 		atomic.AddUint64(&s.stats.BlockedRequests, 1)
 
-		if resp := s.checkDomainFronting(r, ctx, host); resp != nil {
-			return r, resp
+		// Domain fronting: HTTPS inner Host differs from CONNECT target.
+		// Only meaningful for MITM'd requests (connectTarget != "").
+		// connectTarget is "host:port"; compare bare hosts.
+		if connectTarget != "" && !strings.EqualFold(extractHost(connectTarget), host) {
+			logging.Audit("https blocked domain fronting",
+				"action", logging.ActionHTTPBlockFronting,
+				"connect_host", connectTarget,
+				"host_header", host,
+				"url", urlString(r),
+			)
+			if logger := s.TrafficLogger(); logger != nil {
+				logger.LogBlock(host, "domain_fronting", "",
+					logging.WithMethod(r.Method), logging.WithURL(urlString(r)))
+			}
+		} else {
+			logging.Audit("http blocked",
+				"action", logging.ActionHTTPBlock,
+				"host", host,
+			)
+			if logger := s.TrafficLogger(); logger != nil {
+				logger.LogBlock(host, "not_in_allowlist", "",
+					logging.WithMethod(r.Method), logging.WithURL(urlString(r)))
+			}
 		}
-
-		logging.Audit("http blocked",
-			"action", logging.ActionHTTPBlock,
-			"host", host,
-		)
-		if logger := s.TrafficLogger(); logger != nil {
-			logger.LogBlock(host, "not_in_allowlist", "",
-				logging.WithMethod(r.Method), logging.WithURL(r.URL.String()))
-		}
-		return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusForbidden,
-			"Access denied\n")
+		return requestDecision{forward: false, status: http.StatusForbidden, body: "Access denied\n"}
 	}
 
 	atomic.AddUint64(&s.stats.AllowedRequests, 1)
-	// Log allowed request
 	if logger := s.TrafficLogger(); logger != nil {
 		logger.LogAllow(host, "",
-			logging.WithMethod(r.Method), logging.WithURL(r.URL.String()))
+			logging.WithMethod(r.Method), logging.WithURL(urlString(r)))
 	}
-	return r, nil
-}
-
-// checkDomainFronting detects domain fronting (HTTPS Host header differs from CONNECT target).
-// Returns a forbidden response if fronting is detected, nil otherwise.
-func (s *Server) checkDomainFronting(r *http.Request, ctx *goproxy.ProxyCtx, host string) *http.Response {
-	if r.TLS == nil || ctx == nil || ctx.Req == nil {
-		return nil
-	}
-	connectHost := extractHost(ctx.Req.Host)
-	if connectHost == "" || strings.EqualFold(connectHost, host) {
-		return nil
-	}
-	logging.Audit("https blocked domain fronting",
-		"action", logging.ActionHTTPBlockFronting,
-		"connect_host", connectHost,
-		"host_header", host,
-		"url", r.URL.String(),
-	)
-	if logger := s.TrafficLogger(); logger != nil {
-		logger.LogBlock(host, "domain_fronting", "",
-			logging.WithMethod(r.Method), logging.WithURL(r.URL.String()))
-	}
-	return goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusForbidden, "Access denied\n")
-}
-
-// handleConnect handles HTTPS CONNECT requests.
-func (s *Server) handleConnect(host string, _ *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-	// Note: We don't increment stats here for MITM mode because the actual
-	// request will be counted in handleRequest after decryption.
-	// For non-MITM mode, we count here as before.
-
-	hostname := extractHost(host)
-	allowed, blockedBySSRF := s.checkHost(hostname)
-
-	if blockedBySSRF {
-		atomic.AddUint64(&s.stats.TotalRequests, 1)
-		atomic.AddUint64(&s.stats.BlockedRequests, 1)
-		logging.Audit("https blocked private IP",
-			"action", logging.ActionHTTPBlockSSRF,
-			"host", hostname,
-		)
-		if logger := s.TrafficLogger(); logger != nil {
-			logger.LogBlock(hostname, "ssrf_private_ip", "")
-		}
-		return goproxy.RejectConnect, host
-	}
-
-	if !allowed {
-		atomic.AddUint64(&s.stats.TotalRequests, 1)
-		atomic.AddUint64(&s.stats.BlockedRequests, 1)
-		logging.Audit("https blocked",
-			"action", logging.ActionHTTPBlock,
-			"host", hostname,
-		)
-		if logger := s.TrafficLogger(); logger != nil {
-			logger.LogBlock(hostname, "not_in_allowlist", "")
-		}
-		return goproxy.RejectConnect, host
-	}
-
-	// If MITM is not configured, allow the already-checked CONNECT target through.
-	// Note: Without MITM we cannot inspect the inner HTTP Host header, so domain
-	// fronting attacks (connecting to allowed-host but sending requests to a
-	// different Host) are not detected. Enable MITM (LoadCA) for full protection.
-	if !s.mitmReady {
-		atomic.AddUint64(&s.stats.TotalRequests, 1)
-		atomic.AddUint64(&s.stats.AllowedRequests, 1)
-		logging.Debug("https allowed without MITM inspection",
-			"host", hostname,
-		)
-		if logger := s.TrafficLogger(); logger != nil {
-			logger.LogAllow(hostname, "")
-		}
-		return goproxy.OkConnect, host
-	}
-
-	// Intercept the connection to validate Host header after decryption
-	return &goproxy.ConnectAction{
-		Action: goproxy.ConnectMitm,
-		TLSConfig: func(host string, ctx *goproxy.ProxyCtx) (*tls.Config, error) {
-			return s.generateCertForHost(extractHost(host), ctx)
-		},
-	}, host
+	return requestDecision{forward: true}
 }
 
 // Start starts the HTTP proxy server.
@@ -315,7 +369,7 @@ func (s *Server) Start(addr string) error {
 	s.SetListenPort(tcpAddr.Port)
 
 	s.server = &http.Server{
-		Handler:      s.proxy,
+		Handler:      s.proxyHandler,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -337,33 +391,69 @@ func (s *Server) StartErr() <-chan error {
 }
 
 // Shutdown gracefully shuts down the server.
+//
+// Order:
+//  1. Start the outer http.Server.Shutdown in a goroutine. It sets the
+//     server's shuttingDown flag synchronously, so by the time any subsequent
+//     work begins, the listener has stopped accepting new requests — this
+//     closes the (otherwise theoretical) window in which a fresh CONNECT
+//     would call activeConns.Add(1) concurrent with our Wait.
+//  2. Cancel the hijack context: watchers close their tracked conns, which
+//     cascades through the inner h2/h1 servers and any ReverseProxy hijack
+//     handoff, letting each trackedConn's Done fire.
+//  3. Drain the cert cleanup routine and the upstream connection pool.
+//  4. Wait for activeConns to drain (bounded by ctx).
+//  5. Wait for the outer server.Shutdown goroutine to return (also bounded).
 func (s *Server) Shutdown(ctx context.Context) error {
-	// Stop any active TLS key logging
 	s.StopKeyLog()
 
-	// Stop the certificate cleanup routine
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	serverDone := make(chan error, 1)
+	go func() {
+		if s.server != nil {
+			serverDone <- s.server.Shutdown(ctx)
+		} else {
+			serverDone <- nil
+		}
+	}()
+
+	if s.hijackCancel != nil {
+		s.hijackCancel()
+	}
+
 	if s.cleanupCancel != nil {
 		s.cleanupCancel()
-		// Wait for cleanup routine to finish (with timeout from context)
 		if s.cleanupDone != nil {
-			if ctx != nil {
-				select {
-				case <-s.cleanupDone:
-				case <-ctx.Done():
-				}
-			} else {
-				<-s.cleanupDone
+			select {
+			case <-s.cleanupDone:
+			case <-ctx.Done():
 			}
 		}
 	}
 
-	if s.server != nil {
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		return s.server.Shutdown(ctx)
+	if s.transport != nil {
+		s.transport.CloseIdleConnections()
 	}
-	return nil
+
+	connsDone := make(chan struct{})
+	go func() {
+		s.activeConns.Wait()
+		close(connsDone)
+	}()
+	select {
+	case <-connsDone:
+	case <-ctx.Done():
+	}
+
+	select {
+	case err := <-serverDone:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // StartKeyLog begins writing TLS session keys to the given file path.
@@ -447,8 +537,9 @@ func (s *Server) IsMITMEnabled() bool {
 }
 
 // generateCertForHost returns a TLS config with a certificate for the given host.
-// Certificates are cached to avoid regenerating for each request.
-func (s *Server) generateCertForHost(host string, _ *goproxy.ProxyCtx) (*tls.Config, error) {
+// Certificates are cached to avoid regenerating for each request. The proxy
+// intercept path clones the returned config before mutating NextProtos.
+func (s *Server) generateCertForHost(host string) (*tls.Config, error) {
 	now := time.Now()
 	nowNano := now.UnixNano()
 
@@ -463,8 +554,9 @@ func (s *Server) generateCertForHost(host string, _ *goproxy.ProxyCtx) (*tls.Con
 			entry.lastAccess.Store(nowNano)
 			return &tls.Config{
 				Certificates: []tls.Certificate{*entry.cert},
-				MinVersion:   tls.VersionTLS12, // Enforce TLS 1.2+ to prevent downgrade attacks
-				KeyLogWriter: s.keyLog,         // TLS session key export for abox tap
+				MinVersion:   tls.VersionTLS12,     // Enforce TLS 1.2+ to prevent downgrade attacks
+				NextProtos:   []string{"http/1.1"}, // Overridden to ["h2", "http/1.1"] by the proxy intercept path
+				KeyLogWriter: s.keyLog,             // TLS session key export for abox tap
 			}, nil
 		default:
 			// Certificate expired, remove from cache
@@ -490,8 +582,9 @@ func (s *Server) generateCertForHost(host string, _ *goproxy.ProxyCtx) (*tls.Con
 
 	return &tls.Config{
 		Certificates: []tls.Certificate{*hostCert},
-		MinVersion:   tls.VersionTLS12, // Enforce TLS 1.2+ to prevent downgrade attacks
-		KeyLogWriter: s.keyLog,         // TLS session key export for abox tap
+		MinVersion:   tls.VersionTLS12,     // Enforce TLS 1.2+ to prevent downgrade attacks
+		NextProtos:   []string{"http/1.1"}, // Overridden to ["h2", "http/1.1"] by the proxy intercept path
+		KeyLogWriter: s.keyLog,             // TLS session key export for abox tap
 	}, nil
 }
 

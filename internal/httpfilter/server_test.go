@@ -2,12 +2,15 @@ package httpfilter
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/sandialabs/abox/internal/allowlist"
@@ -104,6 +107,12 @@ func TestExtractHost(t *testing.T) {
 		{"ip-without-port", "192.168.1.1", "192.168.1.1"},
 		{"ipv6-with-port", "[::1]:443", "::1"},
 		{"ipv6-without-port", "::1", "::1"},
+		// Bare bracketed IPv6 — happens when an HTTP/2 :authority pseudo-header
+		// or a Host header is "[::1]" with no port. Without bracket stripping,
+		// downstream allowlist / SSRF checks would see "[::1]" literal and miss
+		// loopback. (SSRF gap pre-fix.)
+		{"ipv6-bracketed-no-port", "[::1]", "::1"},
+		{"ipv6-bracketed-link-local", "[fe80::1]", "fe80::1"},
 	}
 
 	for _, tt := range tests {
@@ -285,28 +294,7 @@ func TestServer_Stats(t *testing.T) {
 	}
 }
 
-func TestServer_HandleRequest_Healthcheck(t *testing.T) {
-	filter := allowlist.NewFilter()
-	// Empty allowlist - all domains should be blocked except healthcheck
-
-	server := NewServer(filter, false)
-
-	// Start the server on a random port
-	err := server.Start("127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Failed to start server: %v", err)
-	}
-	defer func() { _ = server.Shutdown(context.Background()) }()
-
-	// Create a test request via the proxy
-	// Note: This test verifies stats are updated, not full proxy behavior
-	// (full proxy testing would require more complex setup)
-
-	// Verify stats are tracking
-	_ = server.GetStats()
-}
-
-func TestServer_HandleRequest_Integration(t *testing.T) {
+func TestServer_ProxyEndToEnd_HTTP1(t *testing.T) {
 	filter := allowlist.NewFilter()
 	filter.Add("allowed.com")
 
@@ -490,7 +478,7 @@ func TestServer_GenerateCertForHost(t *testing.T) {
 	}
 
 	// Generate cert for a host
-	tlsConfig, err := server.generateCertForHost("example.com", nil)
+	tlsConfig, err := server.generateCertForHost("example.com")
 	if err != nil {
 		t.Fatalf("generateCertForHost failed: %v", err)
 	}
@@ -510,7 +498,7 @@ func TestServer_GenerateCertForHost(t *testing.T) {
 	}
 
 	// Test caching - second call should return cached cert
-	tlsConfig2, err := server.generateCertForHost("example.com", nil)
+	tlsConfig2, err := server.generateCertForHost("example.com")
 	if err != nil {
 		t.Fatalf("second generateCertForHost failed: %v", err)
 	}
@@ -518,6 +506,16 @@ func TestServer_GenerateCertForHost(t *testing.T) {
 	// Both should have the same certificate (cached)
 	if tlsConfig.Certificates[0].Leaf != tlsConfig2.Certificates[0].Leaf {
 		t.Error("expected cached certificate to be returned")
+	}
+
+	// Both paths (cache miss and cache hit) must advertise only "http/1.1" in
+	// ALPN, so strict-HTTP/2 clients fail with a clean no_application_protocol
+	// alert instead of negotiating empty ALPN and then failing inside the
+	// HTTP/1-only proxy parser. See docs/troubleshooting.md.
+	for i, cfg := range []*tls.Config{tlsConfig, tlsConfig2} {
+		if want := []string{"http/1.1"}; !reflect.DeepEqual(cfg.NextProtos, want) {
+			t.Errorf("config %d NextProtos = %v, want %v", i, cfg.NextProtos, want)
+		}
 	}
 }
 
@@ -573,7 +571,7 @@ func TestServer_MITM_Integration(t *testing.T) {
 	defer func() { _ = server.Shutdown(context.Background()) }()
 
 	// Test that generateCertForHost works for an allowed domain
-	tlsConfig, err := server.generateCertForHost("allowed.example.com", nil)
+	tlsConfig, err := server.generateCertForHost("allowed.example.com")
 	if err != nil {
 		t.Fatalf("generateCertForHost failed: %v", err)
 	}
@@ -649,7 +647,7 @@ func TestServer_CertCacheExpiration(t *testing.T) {
 	}
 
 	// Generate cert for a host
-	tlsConfig, err := server.generateCertForHost("example.com", nil)
+	tlsConfig, err := server.generateCertForHost("example.com")
 	if err != nil {
 		t.Fatalf("generateCertForHost failed: %v", err)
 	}
@@ -671,7 +669,7 @@ func TestServer_CertCacheExpiration(t *testing.T) {
 	}
 
 	// Generate again - should get cached version
-	tlsConfig2, err := server.generateCertForHost("example.com", nil)
+	tlsConfig2, err := server.generateCertForHost("example.com")
 	if err != nil {
 		t.Fatalf("second generateCertForHost failed: %v", err)
 	}
@@ -714,7 +712,7 @@ func TestServer_CertCacheSizeLimit(t *testing.T) {
 	// Generate multiple certs
 	for i := range 5 {
 		host := "example" + string(rune('a'+i)) + ".com"
-		_, err := server.generateCertForHost(host, nil)
+		_, err := server.generateCertForHost(host)
 		if err != nil {
 			t.Fatalf("generateCertForHost failed for %s: %v", host, err)
 		}
@@ -778,5 +776,89 @@ func TestServer_MITM_BlocksNonAllowlisted(t *testing.T) {
 	_, err = client.Get("https://blocked.example.com/")
 	if err == nil {
 		t.Error("Expected error for blocked domain, got nil")
+	}
+}
+
+func TestServer_DecideConnect(t *testing.T) {
+	filter := allowlist.NewFilter()
+	filter.Add("allowed.example.com")
+	filter.Add("127.0.0.1") // explicit allowlist bypasses SSRF
+	server := NewServer(filter, false)
+
+	// Without MITM (no CA loaded): allowed host → tunnel.
+	if got := server.decideConnect("allowed.example.com"); got != actionTunnel {
+		t.Errorf("decideConnect(allowed, no MITM) = %v, want actionTunnel", got)
+	}
+
+	// Allowed host where IP would normally be blocked, but explicit allowlist
+	// skips the SSRF check.
+	if got := server.decideConnect("127.0.0.1"); got != actionTunnel {
+		t.Errorf("decideConnect(allowlisted private IP) = %v, want actionTunnel", got)
+	}
+
+	// Disallowed host → reject.
+	if got := server.decideConnect("blocked.example.com"); got != actionReject {
+		t.Errorf("decideConnect(blocked) = %v, want actionReject", got)
+	}
+
+	// Private IP (not allowlisted) → reject (SSRF).
+	if got := server.decideConnect("10.0.0.1"); got != actionReject {
+		t.Errorf("decideConnect(private IP) = %v, want actionReject", got)
+	}
+
+	// With MITM enabled, allowed host → intercept.
+	certPEM, keyPEM, err := cert.GenerateCA("test-ca")
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	tmpDir := t.TempDir()
+	cp := filepath.Join(tmpDir, "ca-cert.pem")
+	kp := filepath.Join(tmpDir, "ca-key.pem")
+	_ = os.WriteFile(cp, certPEM, 0o644)
+	_ = os.WriteFile(kp, keyPEM, 0o600)
+	if err := server.LoadCA(cp, kp); err != nil {
+		t.Fatalf("LoadCA: %v", err)
+	}
+	if got := server.decideConnect("allowed.example.com"); got != actionIntercept {
+		t.Errorf("decideConnect(allowed, MITM on) = %v, want actionIntercept", got)
+	}
+}
+
+func TestServer_DecideRequest_DomainFronting(t *testing.T) {
+	filter := allowlist.NewFilter()
+	filter.Add("allowed.example.com")
+	server := NewServer(filter, false)
+
+	// Inner Host differs from CONNECT target and is not allowlisted: fronting block.
+	// connectTarget is "host:port" form (what handleConnect passes).
+	req, _ := http.NewRequest("GET", "https://other.example.com/", nil)
+	req.Host = "other.example.com"
+	d := server.decideRequest(req, "allowed.example.com:443")
+	if d.forward || d.status != http.StatusForbidden {
+		t.Errorf("decideRequest(fronting) = %+v, want forward=false status=403", d)
+	}
+
+	// Inner Host matches CONNECT target and is allowed: forward.
+	req2, _ := http.NewRequest("GET", "https://allowed.example.com/", nil)
+	req2.Host = "allowed.example.com"
+	d2 := server.decideRequest(req2, "allowed.example.com:443")
+	if !d2.forward {
+		t.Errorf("decideRequest(matching allowed) = %+v, want forward=true", d2)
+	}
+}
+
+func TestServer_DecideRequest_Healthcheck(t *testing.T) {
+	filter := allowlist.NewFilter()
+	// Healthcheck must work with an empty allowlist.
+	server := NewServer(filter, false)
+
+	req, _ := http.NewRequest("GET", "http://"+HealthcheckDomain+"/", nil)
+	req.Host = HealthcheckDomain
+	d := server.decideRequest(req, "")
+	if d.forward || d.status != http.StatusOK {
+		t.Errorf("decideRequest(healthcheck) = %+v, want forward=false status=200", d)
+	}
+	if !strings.Contains(d.body, "healthcheck OK") {
+		t.Errorf("healthcheck body = %q, want to contain 'healthcheck OK'", d.body)
 	}
 }
