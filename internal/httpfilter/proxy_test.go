@@ -387,3 +387,74 @@ func TestProxy_ShutdownDrainsInFlightIntercept(t *testing.T) {
 		t.Errorf("Shutdown took %v, expected to drain quickly", elapsed)
 	}
 }
+
+func TestProxy_Intercept_SlowHandshakeTimesOut(t *testing.T) {
+	// A client that completes CONNECT but never sends the inner ClientHello must
+	// not pin the intercept goroutine + conn for the server's lifetime. The
+	// bounded handshake deadline aborts it, freeing the activeConns slot.
+	caCertPEM, caKeyPEM, err := cert.GenerateCA("test-ca")
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	tmpDir := t.TempDir()
+	cp := filepath.Join(tmpDir, "ca.pem")
+	kp := filepath.Join(tmpDir, "key.pem")
+	_ = os.WriteFile(cp, caCertPEM, 0o644)
+	_ = os.WriteFile(kp, caKeyPEM, 0o600)
+
+	filter := allowlist.NewFilter()
+	filter.Add("127.0.0.1")
+	server := NewServer(filter, false)
+	// Set the handshake timeout BEFORE Start so the serve goroutine observes the
+	// final value — setting it on an already-running server would be a data race.
+	server.handshakeTimeout = 100 * time.Millisecond
+	if err := server.LoadCA(cp, kp); err != nil {
+		t.Fatalf("LoadCA: %v", err)
+	}
+	if err := server.Start("127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// CONNECT to an allowed target, read the 200, then send NO TLS bytes.
+	proxyConn, err := net.DialTimeout("tcp", server.listener.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer proxyConn.Close()
+	target := "127.0.0.1:443"
+	connectReq := "CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n"
+	if _, err := proxyConn.Write([]byte(connectReq)); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	br := bufio.NewReader(proxyConn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT status = %d, want 200", resp.StatusCode)
+	}
+
+	// (1) The proxy aborts the stalled handshake and closes our conn ~100ms in.
+	// The 2s read deadline is only a safety net: it must be the *server* closing
+	// (EOF), not our deadline firing. Without the handshake timeout the server
+	// would hold the conn open and this Read would time out instead — which is
+	// what makes this assertion catch the regression rather than mask it.
+	_ = proxyConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, readErr := br.Read(make([]byte, 1))
+	if readErr == nil {
+		t.Fatal("expected proxy to close the conn after the handshake timeout, got data")
+	}
+	if ne, ok := readErr.(net.Error); ok && ne.Timeout() {
+		t.Fatalf("conn not closed within the handshake timeout (client read timed out instead): %v", readErr)
+	}
+
+	// (2) Shutdown must drain promptly. This proves the activeConns slot was
+	// released (trackedConn.Close→onClose→Done ran); a closed client conn alone
+	// doesn't prove that.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown returned error (activeConns not drained?): %v", err)
+	}
+}

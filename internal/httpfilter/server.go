@@ -64,14 +64,27 @@ type Server struct {
 	hijackCtx    context.Context
 	hijackCancel context.CancelFunc
 
-	// TLS MITM fields
+	// TLS MITM fields.
+	//
+	// mitmReady is the publish flag: it is Stored true (last) by LoadCA after
+	// caCert/caKey are written, so any goroutine that observes mitmReady==true is
+	// guaranteed to see those writes. Invariant: caCert/caKey must only be read on
+	// a path already gated by mitmReady.Load()==true (generateCertForHost is
+	// reached only via intercept→actionIntercept, which decideConnect returns only
+	// after mitmReady is true).
 	caCert        *x509.Certificate
 	caKey         *ecdsa.PrivateKey
 	certCache     sync.Map      // map[string]*certCacheEntry - cached host certificates
-	mitmReady     bool          // true if MITM is configured
+	mitmReady     atomic.Bool   // true once MITM CA is configured
+	loadOnce      sync.Once     // guards CA publish + cleanup-routine spawn against double LoadCA
 	cleanupDone   chan struct{} // closed when background cleanup routine exits
 	cleanupCancel func()        // cancels background cleanup
 	startErr      chan error    // receives non-fatal startup errors
+
+	// handshakeTimeout bounds the inner TLS handshake on an intercepted MITM
+	// connection. A client that completes CONNECT but stalls the ClientHello
+	// would otherwise pin a goroutine + conn for the server's lifetime.
+	handshakeTimeout time.Duration
 
 	// TLS key logging for packet capture (abox tap)
 	keyLog     *keyLogWriter // shared writer set on all MITM TLS configs
@@ -148,6 +161,8 @@ func NewServer(filter *allowlist.Filter, passive bool) *Server {
 	}
 	s.http2Server = &http2.Server{}
 	s.hijackCtx, s.hijackCancel = context.WithCancel(context.Background())
+	// Matches the upstream transport's TLSHandshakeTimeout above.
+	s.handshakeTimeout = 10 * time.Second
 	s.proxyHandler = newProxyHandler(s)
 	return s
 }
@@ -255,7 +270,7 @@ func (s *Server) decideConnect(host string) connectAction {
 		return actionReject
 	}
 
-	if !s.mitmReady {
+	if !s.mitmReady.Load() {
 		// No MITM CA loaded: allow the already-checked CONNECT target through
 		// as a transparent tunnel. We cannot inspect inner traffic in this
 		// mode, so domain fronting cannot be detected. Enable MITM (LoadCA)
@@ -424,13 +439,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.hijackCancel()
 	}
 
-	if s.cleanupCancel != nil {
+	// Gate on mitmReady so the cleanupCancel/cleanupDone reads carry the same
+	// publish guarantee as caCert/caKey: both are written before mitmReady.Store
+	// inside loadOnce, so observing mitmReady==true makes them visible without a
+	// separate lock. When MITM is disabled the Once never ran and both are nil.
+	if s.mitmReady.Load() && s.cleanupCancel != nil {
 		s.cleanupCancel()
-		if s.cleanupDone != nil {
-			select {
-			case <-s.cleanupDone:
-			case <-ctx.Done():
-			}
+		select {
+		case <-s.cleanupDone:
+		case <-ctx.Done():
 		}
 	}
 
@@ -511,21 +528,32 @@ func (s *Server) InitTrafficLogger(logPath string) error {
 // LoadCA loads a CA certificate and key for TLS MITM.
 // Once loaded, HTTPS connections will be intercepted and decrypted.
 // This also starts a background routine to clean expired certificates.
+//
+// A failed load (bad/missing files) returns an error and may be retried. The
+// first successful load is the one that takes effect: a later successful LoadCA
+// is a no-op for the active CA (the cleanup routine is spawned only once).
 func (s *Server) LoadCA(certPath, keyPath string) error {
 	caCert, caKey, err := cert.LoadCA(certPath, keyPath)
 	if err != nil {
 		return fmt.Errorf("failed to load CA: %w", err)
 	}
 
-	s.caCert = caCert
-	s.caKey = caKey
-	s.mitmReady = true
+	// cert.LoadCA stays outside loadOnce so the call remains retryable and its
+	// error is returned normally. loadOnce guards only the publish + cleanup-
+	// routine spawn, so a second LoadCA cannot orphan the first certCleanupRoutine.
+	// A second successful LoadCA is therefore a no-op for the active CA.
+	s.loadOnce.Do(func() {
+		s.caCert = caCert
+		s.caKey = caKey
 
-	// Start background certificate cleanup routine
-	ctx, cancel := context.WithCancel(context.Background())
-	s.cleanupCancel = cancel
-	s.cleanupDone = make(chan struct{})
-	go s.certCleanupRoutine(ctx)
+		// Start background certificate cleanup routine
+		ctx, cancel := context.WithCancel(context.Background())
+		s.cleanupCancel = cancel
+		s.cleanupDone = make(chan struct{})
+		go s.certCleanupRoutine(ctx)
+
+		s.mitmReady.Store(true) // publish LAST: see the mitmReady invariant above
+	})
 
 	logging.Debug("MITM CA loaded", "cert", certPath)
 	return nil
@@ -533,7 +561,7 @@ func (s *Server) LoadCA(certPath, keyPath string) error {
 
 // IsMITMEnabled returns true if TLS MITM is configured.
 func (s *Server) IsMITMEnabled() bool {
-	return s.mitmReady
+	return s.mitmReady.Load()
 }
 
 // generateCertForHost returns a TLS config with a certificate for the given host.

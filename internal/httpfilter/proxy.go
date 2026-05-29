@@ -137,10 +137,18 @@ func (h *handler) intercept(w http.ResponseWriter, r *http.Request, connectTarge
 	}()
 
 	tlsConn := tls.Server(conn, tlsCfg)
+	// Bound the handshake: a client that completes CONNECT but stalls the
+	// ClientHello would otherwise pin this goroutine + conn until Shutdown
+	// (hijackCtx only cancels then). SetDeadline passes through trackedConn to
+	// the underlying conn and covers both read and write.
+	_ = conn.SetDeadline(time.Now().Add(h.s.handshakeTimeout))
 	if err := tlsConn.HandshakeContext(h.s.hijackCtx); err != nil {
 		_ = conn.Close()
 		return
 	}
+	// Clear the deadline so long-lived MITM streams (WebSockets, SSE, large
+	// downloads) aren't killed. Must run before the h2/h1 dispatch below.
+	_ = conn.SetDeadline(time.Time{})
 
 	inner := h.requestHandler(connectTarget)
 	switch tlsConn.ConnectionState().NegotiatedProtocol {
@@ -229,7 +237,10 @@ func (h *handler) requestHandler(connectTarget string) http.Handler {
 // in-flight tunnels. The outer server's WriteTimeout is cleared after Hijack
 // for the same reason as intercept.
 func (h *handler) tunnel(w http.ResponseWriter, r *http.Request) {
-	upstream, err := net.DialTimeout("tcp", r.Host, 30*time.Second)
+	// DialContext (not DialTimeout) so Shutdown cancels a slow dial promptly via
+	// hijackCtx — the dial runs before trackConn, so it is otherwise uncounted.
+	dialer := &net.Dialer{Timeout: 30 * time.Second}
+	upstream, err := dialer.DialContext(h.s.hijackCtx, "tcp", r.Host)
 	if err != nil {
 		http.Error(w, "Bad gateway", http.StatusBadGateway)
 		return
