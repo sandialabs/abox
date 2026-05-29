@@ -104,25 +104,12 @@ func (h *handler) intercept(w http.ResponseWriter, r *http.Request, connectTarge
 	// (WebSockets, SSE, gRPC, large downloads) after 30s.
 	_ = rawConn.SetDeadline(time.Time{})
 
-	if _, err := rawConn.Write([]byte("HTTP/1.1 200 OK\r\n\r\n")); err != nil {
-		_ = rawConn.Close()
-		return
-	}
-
-	tlsCfg, err := h.s.generateCertForHost(extractHost(connectTarget))
-	if err != nil {
-		_ = rawConn.Close()
-		return
-	}
-	// Clone before mutating NextProtos so the per-call config doesn't leak
-	// state through the cached cert sharing.
-	tlsCfg = tlsCfg.Clone()
-	tlsCfg.NextProtos = []string{"h2", "http/1.1"}
-
 	// Wrap the conn so any Close (inner server, ReverseProxy hijack handoff,
 	// our shutdown watcher) deregisters from s.activeConns exactly once. This
 	// is what makes Shutdown able to drain MITM sessions whose lifetime
-	// outlives intercept's stack frame.
+	// outlives intercept's stack frame. Track BEFORE writing 200 OK so the
+	// activeConns.Add happens-before the client can observe the connection is
+	// up (and thus before any client-driven Shutdown can Wait on it).
 	conn := h.s.trackConn(rawConn)
 
 	// Watcher: close the conn when Shutdown is called. Exit when the conn
@@ -135,6 +122,21 @@ func (h *handler) intercept(w http.ResponseWriter, r *http.Request, connectTarge
 		case <-conn.closed:
 		}
 	}()
+
+	if _, err := conn.Write([]byte("HTTP/1.1 200 OK\r\n\r\n")); err != nil {
+		_ = conn.Close()
+		return
+	}
+
+	tlsCfg, err := h.s.generateCertForHost(extractHost(connectTarget))
+	if err != nil {
+		_ = conn.Close()
+		return
+	}
+	// Clone before mutating NextProtos so the per-call config doesn't leak
+	// state through the cached cert sharing.
+	tlsCfg = tlsCfg.Clone()
+	tlsCfg.NextProtos = []string{"h2", "http/1.1"}
 
 	tlsConn := tls.Server(conn, tlsCfg)
 	// Bound the handshake: a client that completes CONNECT but stalls the
@@ -258,11 +260,8 @@ func (h *handler) tunnel(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = rawConn.SetDeadline(time.Time{})
 
-	if _, err := rawConn.Write([]byte("HTTP/1.1 200 OK\r\n\r\n")); err != nil {
-		_ = rawConn.Close()
-		return
-	}
-
+	// Track BEFORE writing 200 OK so activeConns.Add happens-before the client
+	// can observe the tunnel is up (and thus before any client-driven Shutdown).
 	conn := h.s.trackConn(rawConn)
 	defer conn.Close()
 
@@ -277,9 +276,27 @@ func (h *handler) tunnel(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	if _, err := conn.Write([]byte("HTTP/1.1 200 OK\r\n\r\n")); err != nil {
+		return
+	}
+
+	// Copy both directions and wait for BOTH to finish. When one direction's
+	// source reaches EOF, half-close the destination's write side so its peer
+	// sees EOF and the other direction can drain — rather than returning on the
+	// first finished copy and tearing both down, which truncates an in-flight
+	// transfer in the other direction. A full-duplex tunnel where neither side
+	// closes stays open until peer-close or Shutdown (bounded by maxConns).
 	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(upstream, conn); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(conn, upstream); done <- struct{}{} }()
+	copyHalf := func(dst, src net.Conn) {
+		_, _ = io.Copy(dst, src)
+		if cw, ok := dst.(halfCloser); ok {
+			_ = cw.CloseWrite()
+		}
+		done <- struct{}{}
+	}
+	go copyHalf(upstream, conn)
+	go copyHalf(conn, upstream)
+	<-done
 	<-done
 }
 
@@ -330,6 +347,67 @@ func (c *trackedConn) Close() error {
 		c.onClose()
 	})
 	return err
+}
+
+// CloseWrite forwards to the embedded conn's half-close when it supports one
+// (e.g. *net.TCPConn), so the tunnel can signal EOF to a peer without a full
+// Close. net.Conn doesn't declare CloseWrite, so embedding alone won't promote
+// it; this delegate makes a trackedConn satisfy the half-closer interface.
+// Returns nil when the underlying conn can't half-close (e.g. wrapped by a
+// connection limiter), leaving the eventual Close to deliver FIN.
+func (c *trackedConn) CloseWrite() error {
+	if cw, ok := c.Conn.(halfCloser); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
+// halfCloser is implemented by conns that support a write-side half-close
+// (e.g. *net.TCPConn). Used by the tunnel to signal EOF to a peer.
+type halfCloser interface{ CloseWrite() error }
+
+// limitedListener bounds concurrent accepted connections via a semaphore.
+// Unlike golang.org/x/net/netutil.LimitListener, its conn wrapper forwards
+// CloseWrite to the underlying socket — netutil's wrapper only overrides Close,
+// which would silently break the tunnel's half-close through the wrapper.
+type limitedListener struct {
+	net.Listener
+	sem chan struct{}
+}
+
+func newLimitedListener(l net.Listener, n int) *limitedListener {
+	return &limitedListener{Listener: l, sem: make(chan struct{}, n)}
+}
+
+func (l *limitedListener) Accept() (net.Conn, error) {
+	l.sem <- struct{}{}
+	c, err := l.Listener.Accept()
+	if err != nil {
+		<-l.sem
+		return nil, err
+	}
+	return &limitedConn{Conn: c, release: func() { <-l.sem }}, nil
+}
+
+// limitedConn releases its listener slot on the first Close and forwards
+// CloseWrite to the underlying conn so half-close survives the wrapper.
+type limitedConn struct {
+	net.Conn
+	once    sync.Once
+	release func()
+}
+
+func (c *limitedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.release)
+	return err
+}
+
+func (c *limitedConn) CloseWrite() error {
+	if cw, ok := c.Conn.(halfCloser); ok {
+		return cw.CloseWrite()
+	}
+	return nil
 }
 
 // oneShotListener implements net.Listener, returning a single net.Conn on the

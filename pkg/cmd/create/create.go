@@ -43,6 +43,7 @@ type Options struct {
 	MonitorPolicies    []string // Absolute paths to custom TracingPolicy YAML files
 	MITM               bool     // Enable TLS MITM for domain fronting protection
 	NoMITM             bool     // Disable TLS MITM (inverted to MITM in runCreate)
+	MaxConnections     int      // HTTP proxy concurrent-connection cap (0/unset = default)
 	Brief              bool     // Suppress final summary/next-steps output
 	TemplateContent    string   // Custom domain XML template content (from overrides.<backend>.template)
 	Name               string   // Instance name (positional arg)
@@ -51,8 +52,9 @@ type Options struct {
 // NewCmdCreate creates a new create command.
 func NewCmdCreate(f *factory.Factory, runF func(*Options) error) *cobra.Command {
 	opts := &Options{
-		Factory: f,
-		MITM:    true, // Default to enabled for security
+		Factory:        f,
+		MITM:           true, // Default to enabled for security
+		MaxConnections: config.DefaultHTTPMaxConnections,
 	}
 
 	cmd := &cobra.Command{
@@ -396,6 +398,7 @@ func loadFromBoxfile(opts *Options, name string) (*boxfile.Boxfile, string, stri
 		opts.MonitorPolicies = resolved
 	}
 	opts.MITM = box.GetMITM()
+	opts.MaxConnections = box.GetMaxConnections()
 
 	return box, boxDir, name, nil
 }
@@ -501,7 +504,8 @@ func buildInstanceConfig(opts *Options, name string, paths *config.Paths, be bac
 			Upstream: opts.Upstream,
 		},
 		HTTP: config.HTTPConfig{
-			MITM: opts.MITM,
+			MITM:           opts.MITM,
+			MaxConnections: opts.MaxConnections,
 		},
 		Monitor: config.MonitorConfig{
 			Enabled:     opts.MonitorEnabled,

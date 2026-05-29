@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sandialabs/abox/internal/config"
 )
 
 func TestDefaultBoxfile(t *testing.T) {
@@ -30,6 +32,35 @@ func TestDefaultBoxfile(t *testing.T) {
 	}
 	if box.DNS.Upstream != "8.8.8.8:53" {
 		t.Errorf("DefaultBoxfile().DNS.Upstream = %q, want %q", box.DNS.Upstream, "8.8.8.8:53")
+	}
+}
+
+func TestGetMaxConnections(t *testing.T) {
+	// Unset → default.
+	var b Boxfile
+	if got := b.GetMaxConnections(); got != config.DefaultHTTPMaxConnections {
+		t.Errorf("unset GetMaxConnections() = %d, want %d", got, config.DefaultHTTPMaxConnections)
+	}
+	// Explicit value passes through.
+	n := 4096
+	b.HTTP.MaxConnections = &n
+	if got := b.GetMaxConnections(); got != 4096 {
+		t.Errorf("explicit GetMaxConnections() = %d, want 4096", got)
+	}
+}
+
+func TestValidate_MaxConnections(t *testing.T) {
+	bad := 0
+	b := DefaultBoxfile()
+	b.Name = "ok"
+	b.HTTP.MaxConnections = &bad
+	if err := b.Validate(""); err == nil {
+		t.Fatal("expected error for http.max_connections = 0, got nil")
+	}
+	good := 1024
+	b.HTTP.MaxConnections = &good
+	if err := b.Validate(""); err != nil {
+		t.Fatalf("unexpected error for valid max_connections: %v", err)
 	}
 }
 

@@ -113,6 +113,7 @@ monitor:
 | `dns.upstream` | string | "8.8.8.8:53" | Upstream DNS server for allowed queries. Port defaults to 53 if not specified (e.g., "8.8.8.8" is valid). |
 | `http` | object | {} | HTTP proxy configuration (see below) |
 | `http.mitm` | bool | true | Enable TLS MITM for HTTPS inspection and domain fronting protection |
+| `http.max_connections` | int | 512 | Cap on concurrent client connections to the HTTP proxy, bounding host fd/goroutine use against a runaway or hostile VM. Raise for heavy parallel workloads; keep below the host's `ulimit -n`. Existing instances without this key use the default automatically. |
 | `monitor` | object | {} | Agent monitoring configuration (see below) |
 | `monitor.enabled` | bool | false | Enable Tetragon monitoring via virtio-serial |
 | `monitor.version` | string | "" | Tetragon version to use (empty = latest, e.g., "v1.3.0") |

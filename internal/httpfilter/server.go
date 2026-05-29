@@ -86,6 +86,10 @@ type Server struct {
 	// would otherwise pin a goroutine + conn for the server's lifetime.
 	handshakeTimeout time.Duration
 
+	// maxConns caps concurrent client connections (0 = unlimited). Bounds host
+	// fd/goroutine use against a hostile VM. Read once in Start.
+	maxConns int
+
 	// TLS key logging for packet capture (abox tap)
 	keyLog     *keyLogWriter // shared writer set on all MITM TLS configs
 	keyLogFile *os.File      // backing file, nil when not logging
@@ -163,6 +167,9 @@ func NewServer(filter *allowlist.Filter, passive bool) *Server {
 	s.hijackCtx, s.hijackCancel = context.WithCancel(context.Background())
 	// Matches the upstream transport's TLSHandshakeTimeout above.
 	s.handshakeTimeout = 10 * time.Second
+	// Default connection cap; serve.go overrides from instance config. A
+	// concrete default here keeps the cap on even for legacy configs.
+	s.maxConns = 512
 	s.proxyHandler = newProxyHandler(s)
 	return s
 }
@@ -358,11 +365,35 @@ func (s *Server) decideRequest(r *http.Request, connectTarget string) requestDec
 	}
 
 	atomic.AddUint64(&s.stats.AllowedRequests, 1)
+
+	// Cross-origin allow: MITM'd request whose inner Host differs from the
+	// CONNECT target, but both are allowlisted. Not a block (no unallowed
+	// traffic), yet the request is delivered to the pinned CONNECT target while
+	// claiming a different Host — audit it so the mismatch is visible.
+	allowOpts := []logging.EventOption{logging.WithMethod(r.Method), logging.WithURL(urlString(r))}
+	if connectTarget != "" && !strings.EqualFold(extractHost(connectTarget), host) {
+		logging.Audit("https allowed cross-origin host",
+			"action", logging.ActionHTTPAllowFronting,
+			"connect_host", connectTarget,
+			"host_header", host,
+			"url", urlString(r),
+		)
+		allowOpts = append(allowOpts, logging.WithReason("cross_origin_allowed"))
+	}
+
 	if logger := s.TrafficLogger(); logger != nil {
-		logger.LogAllow(host, "",
-			logging.WithMethod(r.Method), logging.WithURL(urlString(r)))
+		logger.LogAllow(host, "", allowOpts...)
 	}
 	return requestDecision{forward: true}
+}
+
+// SetMaxConns sets the concurrent client-connection cap. n <= 0 means
+// unlimited. Must be called before Start (read once there).
+func (s *Server) SetMaxConns(n int) {
+	if n < 0 {
+		n = 0
+	}
+	s.maxConns = n
 }
 
 // Start starts the HTTP proxy server.
@@ -383,6 +414,16 @@ func (s *Server) Start(addr string) error {
 
 	s.SetListenPort(tcpAddr.Port)
 
+	// Cap concurrent connections to bound host fd/goroutine use against a
+	// hostile VM. LimitListener queues excess Accepts; it covers hijacked
+	// MITM/tunnel conns too because the limit-wrapped conn's Close (reached via
+	// trackedConn) releases the semaphore. s.listener stays the raw listener so
+	// Shutdown/Addr operate on it.
+	served := net.Listener(listener)
+	if s.maxConns > 0 {
+		served = newLimitedListener(listener, s.maxConns)
+	}
+
 	s.server = &http.Server{
 		Handler:      s.proxyHandler,
 		ReadTimeout:  30 * time.Second,
@@ -392,7 +433,7 @@ func (s *Server) Start(addr string) error {
 
 	s.startErr = make(chan error, 1)
 	go func() {
-		if err := s.server.Serve(listener); err != nil && err != http.ErrServerClosed {
+		if err := s.server.Serve(served); err != nil && err != http.ErrServerClosed {
 			s.startErr <- err
 		}
 	}()

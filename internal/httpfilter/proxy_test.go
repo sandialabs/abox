@@ -458,3 +458,268 @@ func TestProxy_Intercept_SlowHandshakeTimesOut(t *testing.T) {
 		t.Fatalf("Shutdown returned error (activeConns not drained?): %v", err)
 	}
 }
+
+// echoSinkListener accepts connections and discards everything read, used as a
+// throwaway tunnel upstream.
+func echoSinkListener(t *testing.T) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) { _, _ = io.Copy(io.Discard, c); _ = c.Close() }(c)
+		}
+	}()
+	return ln
+}
+
+func TestProxy_MaxConns_Queues(t *testing.T) {
+	// With a cap of 1, a second client connection must not be served until the
+	// first is released — LimitListener queues the second Accept.
+	upstream := echoSinkListener(t)
+	defer upstream.Close()
+	target := upstream.Addr().String()
+
+	filter := allowlist.NewFilter()
+	filter.Add("127.0.0.1")
+	server := NewServer(filter, false) // no MITM → tunnel mode
+	server.maxConns = 1                // set before Start (avoids racing the serve goroutine)
+	if err := server.Start("127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = server.Shutdown(context.Background()) }()
+	addr := server.listener.Addr().String()
+
+	connect := func(c net.Conn) *bufio.Reader {
+		_, _ = c.Write([]byte("CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n"))
+		return bufio.NewReader(c)
+	}
+
+	// Conn 1 takes the only slot and holds it open.
+	c1, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial c1: %v", err)
+	}
+	defer c1.Close()
+	br1 := connect(c1)
+	if resp, err := http.ReadResponse(br1, nil); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("c1 CONNECT: err=%v resp=%v", err, resp)
+	}
+
+	// Conn 2 should NOT be served while c1 holds the slot.
+	c2, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial c2: %v", err)
+	}
+	defer c2.Close()
+	br2 := connect(c2)
+	_ = c2.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	if _, err := http.ReadResponse(br2, nil); err == nil {
+		t.Fatal("c2 was served while c1 held the only slot — cap not enforced")
+	}
+
+	// Release c1; the queued c2 must now be served.
+	_ = c1.Close()
+	_ = c2.SetReadDeadline(time.Now().Add(5 * time.Second))
+	resp, err := http.ReadResponse(br2, nil)
+	if err != nil {
+		t.Fatalf("c2 not served after c1 closed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("c2 status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestProxy_Tunnel_HalfClose_NoTruncation(t *testing.T) {
+	// Upstream replies only AFTER the client finishes uploading (client
+	// half-closes its send direction). The proxy must keep the response
+	// direction alive instead of tearing both down when the upload ends.
+	const payload = "FINAL-RESPONSE-PAYLOAD"
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _ = io.Copy(io.Discard, c) // drain until the client half-closes (EOF)
+		_, _ = c.Write([]byte(payload))
+	}()
+
+	filter := allowlist.NewFilter()
+	filter.Add("127.0.0.1")
+	server := NewServer(filter, false) // tunnel mode
+	if err := server.Start("127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = server.Shutdown(context.Background()) }()
+	target := ln.Addr().String()
+
+	c, err := net.DialTimeout("tcp", server.listener.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer c.Close()
+	_, _ = c.Write([]byte("CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n"))
+	br := bufio.NewReader(c)
+	if resp, err := http.ReadResponse(br, nil); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT: err=%v resp=%v", err, resp)
+	}
+
+	// Upload, then half-close client→proxy so the upstream's read returns EOF.
+	if _, err := c.Write([]byte("client upload")); err != nil {
+		t.Fatalf("write upload: %v", err)
+	}
+	if err := c.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+
+	// The response is sent by the upstream only after our upload finished. It
+	// must arrive in full — not be truncated by the proxy closing both halves.
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got, _ := io.ReadAll(br)
+	if string(got) != payload {
+		t.Errorf("got %q, want %q (response truncated when upload direction ended)", got, payload)
+	}
+}
+
+func TestProxy_Tunnel_HalfClose_ClientGetsEOF(t *testing.T) {
+	// Upstream sends a response then half-closes its write side, but the client
+	// never closes its upload side (read-until-close client). The proxy must
+	// propagate the upstream's FIN to the client — even through the connection
+	// limiter wrapper (default cap is on), which netutil's wrapper would not.
+	const payload = "RESPONSE-THEN-HALF-CLOSE"
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _ = c.Write([]byte(payload))
+		_ = c.(*net.TCPConn).CloseWrite() // half-close upstream→proxy
+		_, _ = io.Copy(io.Discard, c)     // keep reading until the client goes away
+	}()
+
+	filter := allowlist.NewFilter()
+	filter.Add("127.0.0.1")
+	server := NewServer(filter, false) // default cap (512) → client conn is wrapped
+	if err := server.Start("127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = server.Shutdown(context.Background()) }()
+	target := ln.Addr().String()
+
+	c, err := net.DialTimeout("tcp", server.listener.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer c.Close()
+	_, _ = c.Write([]byte("CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n"))
+	br := bufio.NewReader(c)
+	if resp, err := http.ReadResponse(br, nil); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT: err=%v resp=%v", err, resp)
+	}
+
+	// Read until EOF WITHOUT half-closing our upload side. The download FIN must
+	// arrive via the proxy forwarding the upstream's CloseWrite; if it doesn't
+	// propagate through the limiter wrapper, this read times out (hang).
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	got, err := io.ReadAll(br)
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Fatalf("client never received EOF — upstream half-close did not propagate through the limiter wrapper")
+	}
+	if string(got) != payload {
+		t.Errorf("got %q, want %q", got, payload)
+	}
+}
+
+func TestProxy_Intercept_HTTP2_FrontingAllowedLogged(t *testing.T) {
+	// CONNECT to an allowlisted host, inner :authority a *different* but also
+	// allowlisted host. The request is allowed (forwarded to the CONNECT
+	// target) but the cross-origin mismatch must be recorded in the traffic log.
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "hello")
+	}))
+	ts.EnableHTTP2 = true
+	ts.StartTLS()
+	defer ts.Close()
+
+	caCertPEM, caKeyPEM, err := cert.GenerateCA("test-ca")
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	tmp := t.TempDir()
+	cp := filepath.Join(tmp, "ca.pem")
+	kp := filepath.Join(tmp, "key.pem")
+	_ = os.WriteFile(cp, caCertPEM, 0o644)
+	_ = os.WriteFile(kp, caKeyPEM, 0o600)
+
+	filter := allowlist.NewFilter()
+	filter.Add("127.0.0.1")        // CONNECT target
+	filter.Add("alt.allowed.test") // inner :authority (also allowed)
+	server := NewServer(filter, false)
+	if err := server.LoadCA(cp, kp); err != nil {
+		t.Fatalf("LoadCA: %v", err)
+	}
+	server.transport.TLSClientConfig.RootCAs = originCAPool(ts)
+	trafficLog := filepath.Join(tmp, "traffic.log")
+	if err := server.InitTrafficLogger(trafficLog); err != nil {
+		t.Fatalf("InitTrafficLogger: %v", err)
+	}
+	if err := server.Start("127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = server.Shutdown(context.Background()) }()
+	proxyURL := &url.URL{Scheme: "http", Host: server.listener.Addr().String()}
+
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(caCertPEM)
+	tr := &http.Transport{
+		Proxy:             http.ProxyURL(proxyURL),
+		ForceAttemptHTTP2: true,
+		TLSClientConfig: &tls.Config{
+			RootCAs:    pool,
+			NextProtos: []string{"h2", "http/1.1"},
+			ServerName: "127.0.0.1", // CONNECT target SNI
+		},
+	}
+	if err := http2.ConfigureTransport(tr); err != nil {
+		t.Fatalf("ConfigureTransport: %v", err)
+	}
+	client := &http.Client{Transport: tr}
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "alt.allowed.test" // sets :authority, != CONNECT target
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (cross-origin allow)", resp.StatusCode)
+	}
+
+	// Flush the traffic log and assert the allowed cross-origin mismatch is recorded.
+	server.CloseTrafficLogger()
+	data, err := os.ReadFile(trafficLog)
+	if err != nil {
+		t.Fatalf("read traffic log: %v", err)
+	}
+	if !strings.Contains(string(data), "cross_origin_allowed") {
+		t.Errorf("traffic log missing cross_origin_allowed reason:\n%s", data)
+	}
+}
