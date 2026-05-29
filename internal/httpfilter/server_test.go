@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sandialabs/abox/internal/allowlist"
 	"github.com/sandialabs/abox/internal/cert"
@@ -447,6 +449,64 @@ func TestServer_LoadCA_NotFound(t *testing.T) {
 
 	if server.IsMITMEnabled() {
 		t.Error("MITM should not be enabled after failed LoadCA")
+	}
+}
+
+// TestServer_LoadCA_Concurrent exercises the loadOnce guard added in 5e2a59c.
+// Concurrent LoadCA calls must publish the CA and spawn the cert-cleanup routine
+// exactly once; without the guard each call rewrites cleanupCancel/cleanupDone and
+// starts another routine, and the racing writes to those fields (plus the cleanup
+// routine reading the shared cleanupDone in its deferred close) are a data race.
+// The teeth of this test are therefore the race detector — run via `make test`
+// (-race). The bounded Shutdown below is a secondary guard against a teardown hang.
+func TestServer_LoadCA_Concurrent(t *testing.T) {
+	certPEM, keyPEM, err := cert.GenerateCA("test-ca")
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	tmpDir := t.TempDir()
+	certPath := filepath.Join(tmpDir, "ca.pem")
+	keyPath := filepath.Join(tmpDir, "key.pem")
+	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	server := NewServer(allowlist.NewFilter(), false)
+
+	const n = 16
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // line up all goroutines so the calls actually overlap
+			errs <- server.LoadCA(certPath, keyPath)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		if e != nil {
+			t.Fatalf("concurrent LoadCA returned error: %v", e)
+		}
+	}
+
+	if !server.mitmReady.Load() {
+		t.Fatal("mitmReady should be true after concurrent LoadCA")
+	}
+
+	// A deadlock here is the symptom of an orphaned cleanup routine: Shutdown
+	// cancels one routine's context but blocks forever on the other's cleanupDone.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown after concurrent LoadCA: %v", err)
 	}
 }
 

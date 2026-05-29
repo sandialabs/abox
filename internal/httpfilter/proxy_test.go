@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -258,6 +260,33 @@ func TestProxy_Intercept_HTTP2_DomainFronting(t *testing.T) {
 	}
 }
 
+func TestProxy_Intercept_HTTP1_DomainFronting(t *testing.T) {
+	// Same fronting block as the h2 case, over HTTP/1.1: CONNECT to an allowed
+	// host (127.0.0.1), inner Host header pointing at a non-allowlisted host.
+	// The post-MITM handler is shared across h1/h2, so this proves the verdict
+	// holds on the h1 wire path too, not just at the decideRequest unit level.
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "hello")
+	}))
+	defer ts.Close()
+
+	caPEM, _, proxyURL, cleanup := testProxy(t, originCAPool(ts))
+	defer cleanup()
+
+	client := clientTrustingAboxCA(t, caPEM, proxyURL, false) // h1 only
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "notallowed.example.com" // inner Host != CONNECT target
+	resp, err := client.Do(req)
+	if err != nil {
+		// Blocked at the proxy layer rather than a 403 body is also acceptable.
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 (domain fronting block over h1)", resp.StatusCode)
+	}
+}
+
 func TestProxy_NilURLGuard(t *testing.T) {
 	// Exercise the public ServeHTTP entry point with a synthetic nil-URL
 	// request. Stdlib h1/h2 servers don't deliver nil URLs in practice, but
@@ -456,6 +485,170 @@ func TestProxy_Intercept_SlowHandshakeTimesOut(t *testing.T) {
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		t.Fatalf("Shutdown returned error (activeConns not drained?): %v", err)
+	}
+}
+
+func TestProxy_Intercept_SlowHeadersTimesOut(t *testing.T) {
+	// After the inner TLS handshake completes, a client that opens an h1 request
+	// but never finishes sending headers must not pin the intercept goroutine +
+	// conn. The inner h1 server's ReadHeaderTimeout (server.go:163) bounds it.
+	// Without that timeout the server would block reading headers until Shutdown,
+	// and the assertion below (client read must not be what times out) would fail.
+	caCertPEM, caKeyPEM, err := cert.GenerateCA("test-ca")
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	tmpDir := t.TempDir()
+	cp := filepath.Join(tmpDir, "ca.pem")
+	kp := filepath.Join(tmpDir, "key.pem")
+	_ = os.WriteFile(cp, caCertPEM, 0o644)
+	_ = os.WriteFile(kp, caKeyPEM, 0o600)
+
+	filter := allowlist.NewFilter()
+	filter.Add("127.0.0.1")
+	server := NewServer(filter, false)
+	// Shrink the header-read deadline BEFORE Start so the intercept goroutine
+	// (which reads http1Server.ReadHeaderTimeout per-call) observes the final
+	// value without a data race.
+	server.http1Server.ReadHeaderTimeout = 150 * time.Millisecond
+	if err := server.LoadCA(cp, kp); err != nil {
+		t.Fatalf("LoadCA: %v", err)
+	}
+	if err := server.Start("127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = server.Shutdown(context.Background()) }()
+
+	// CONNECT to an allowed target and read the 200.
+	proxyConn, err := net.DialTimeout("tcp", server.listener.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer proxyConn.Close()
+	target := "127.0.0.1:443"
+	connectReq := "CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n"
+	if _, err := proxyConn.Write([]byte(connectReq)); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	br := bufio.NewReader(proxyConn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT status = %d, want 200", resp.StatusCode)
+	}
+
+	// Complete the inner TLS handshake, forcing the h1 path via ALPN. The CONNECT
+	// 200 has no body, so the bufio.Reader buffered nothing past the headers and
+	// proxyConn is safe to hand to tls.Client.
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caCertPEM) {
+		t.Fatal("append abox CA")
+	}
+	tlsConn := tls.Client(proxyConn, &tls.Config{
+		RootCAs:    pool,
+		ServerName: "127.0.0.1",
+		NextProtos: []string{"http/1.1"},
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("inner TLS handshake: %v", err)
+	}
+
+	// Send a request line + one header but never the terminating blank line, then
+	// stall. The server's ReadHeaderTimeout should fire and tear the conn down.
+	if _, err := tlsConn.Write([]byte("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n")); err != nil {
+		t.Fatalf("write partial headers: %v", err)
+	}
+
+	// The 2s deadline is a safety net only: it must be the *server* ending the
+	// read (EOF on close, or a 408 it writes back), not our deadline firing.
+	_ = tlsConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, readErr := tlsConn.Read(make([]byte, 1))
+	if ne, ok := readErr.(net.Error); ok && ne.Timeout() {
+		t.Fatalf("inner h1 conn not closed within ReadHeaderTimeout (client read timed out instead): %v", readErr)
+	}
+}
+
+func TestProxy_StalledConnects_NoLeak(t *testing.T) {
+	// A burst of clients that complete CONNECT but never send the inner
+	// ClientHello must not permanently pin goroutines/conns. The handshake
+	// deadline aborts each stalled intercept; afterwards the goroutine count must
+	// return to baseline. This extends the single-conn SlowHandshake case to the
+	// DoS-burst scenario the bounded handshake was added (5e2a59c) to defend.
+	caCertPEM, caKeyPEM, err := cert.GenerateCA("test-ca")
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	tmpDir := t.TempDir()
+	cp := filepath.Join(tmpDir, "ca.pem")
+	kp := filepath.Join(tmpDir, "key.pem")
+	_ = os.WriteFile(cp, caCertPEM, 0o644)
+	_ = os.WriteFile(kp, caKeyPEM, 0o600)
+
+	filter := allowlist.NewFilter()
+	filter.Add("127.0.0.1")
+	server := NewServer(filter, false)
+	server.handshakeTimeout = 200 * time.Millisecond
+	if err := server.LoadCA(cp, kp); err != nil {
+		t.Fatalf("LoadCA: %v", err)
+	}
+	if err := server.Start("127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = server.Shutdown(context.Background()) }()
+
+	// Let the server's accept/serve goroutines settle, then take the baseline.
+	time.Sleep(100 * time.Millisecond)
+	runtime.GC()
+	baseline := runtime.NumGoroutine()
+
+	const burst = 200
+	conns := make([]net.Conn, 0, burst)
+	defer func() {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}()
+	addr := server.listener.Addr().String()
+	connectReq := "CONNECT 127.0.0.1:443 HTTP/1.1\r\nHost: 127.0.0.1:443\r\n\r\n"
+	for i := 0; i < burst; i++ {
+		c, err := net.DialTimeout("tcp", addr, 5*time.Second)
+		if err != nil {
+			t.Fatalf("dial %d: %v", i, err)
+		}
+		conns = append(conns, c)
+		if _, err := c.Write([]byte(connectReq)); err != nil {
+			t.Fatalf("write CONNECT %d: %v", i, err)
+		}
+		// Read the 200 so we know the conn reached intercept (and is now blocked
+		// on the inner handshake), then send NO TLS bytes.
+		resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+		if err != nil {
+			t.Fatalf("read CONNECT response %d: %v", i, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("CONNECT %d status = %d, want 200", i, resp.StatusCode)
+		}
+	}
+
+	// After the handshake deadline elapses, every stalled intercept must tear
+	// down. Poll (the timeout fires asynchronously) until goroutines drain back
+	// near baseline. slack absorbs scheduler/GC goroutines and any not-yet-reaped
+	// serve goroutines; the leak (≈2 goroutines/conn × 200) is far larger.
+	const slack = 30
+	deadline := time.Now().Add(5 * time.Second)
+	var got int
+	for time.Now().Before(deadline) {
+		runtime.GC()
+		got = runtime.NumGoroutine()
+		if got <= baseline+slack {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got > baseline+slack {
+		t.Fatalf("goroutines did not drain after stalled CONNECT burst: baseline=%d, got=%d (leak suspected)", baseline, got)
 	}
 }
 
@@ -721,5 +914,93 @@ func TestProxy_Intercept_HTTP2_FrontingAllowedLogged(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "cross_origin_allowed") {
 		t.Errorf("traffic log missing cross_origin_allowed reason:\n%s", data)
+	}
+}
+
+func TestProxy_TrafficLog_HTTP1(t *testing.T) {
+	// Allow and block decisions on the HTTP/1.1 path must be recorded in the
+	// traffic log with method/URL/reason — today only the h2 cross-origin line is
+	// asserted. One allowed HTTPS request (CONNECT to 127.0.0.1) and one blocked
+	// forward-proxy request (off-allowlist http host) should each produce an entry.
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer ts.Close()
+
+	caCertPEM, caKeyPEM, err := cert.GenerateCA("test-ca")
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	tmp := t.TempDir()
+	cp := filepath.Join(tmp, "ca.pem")
+	kp := filepath.Join(tmp, "key.pem")
+	_ = os.WriteFile(cp, caCertPEM, 0o644)
+	_ = os.WriteFile(kp, caKeyPEM, 0o600)
+
+	filter := allowlist.NewFilter()
+	filter.Add("127.0.0.1")
+	server := NewServer(filter, false)
+	if err := server.LoadCA(cp, kp); err != nil {
+		t.Fatalf("LoadCA: %v", err)
+	}
+	server.transport.TLSClientConfig.RootCAs = originCAPool(ts)
+	trafficLog := filepath.Join(tmp, "traffic.log")
+	if err := server.InitTrafficLogger(trafficLog); err != nil {
+		t.Fatalf("InitTrafficLogger: %v", err)
+	}
+	if err := server.Start("127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = server.Shutdown(context.Background()) }()
+	proxyURL := &url.URL{Scheme: "http", Host: server.listener.Addr().String()}
+
+	// Allowed: HTTPS GET to the allowlisted CONNECT target.
+	client := clientTrustingAboxCA(t, caCertPEM, proxyURL, false)
+	if resp, err := client.Get(ts.URL + "/allowed-path"); err != nil {
+		t.Fatalf("allowed GET: %v", err)
+	} else {
+		_ = resp.Body.Close()
+	}
+
+	// Blocked: forward-proxy GET to an off-allowlist http host (rejected before
+	// any upstream dial, so no real origin is needed).
+	if resp, err := client.Get("http://notallowed.example.com/blocked-path"); err != nil {
+		t.Fatalf("blocked GET (transport error, want 403 body): %v", err)
+	} else {
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("blocked request status = %d, want 403", resp.StatusCode)
+		}
+	}
+
+	server.CloseTrafficLogger()
+	data, err := os.ReadFile(trafficLog)
+	if err != nil {
+		t.Fatalf("read traffic log: %v", err)
+	}
+
+	var sawAllow, sawBlock bool
+	for _, line := range bytes.Split(bytes.TrimSpace(data), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var e struct {
+			Action, Domain, Reason, Method, URL string
+		}
+		if err := json.Unmarshal(line, &e); err != nil {
+			t.Fatalf("unmarshal traffic line %q: %v", line, err)
+		}
+		if e.Action == "allow" && e.Domain == "127.0.0.1" && e.Method == "GET" && strings.Contains(e.URL, "allowed-path") {
+			sawAllow = true
+		}
+		if e.Action == "block" && e.Domain == "notallowed.example.com" && e.Reason == "not_in_allowlist" && e.Method == "GET" && strings.Contains(e.URL, "blocked-path") {
+			sawBlock = true
+		}
+	}
+	if !sawAllow {
+		t.Errorf("traffic log missing h1 allow entry (domain/method/url):\n%s", data)
+	}
+	if !sawBlock {
+		t.Errorf("traffic log missing h1 block entry (not_in_allowlist + method/url):\n%s", data)
 	}
 }
