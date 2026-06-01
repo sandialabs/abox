@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -309,7 +310,7 @@ func TestProxy_ConnectTunnel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	go func() {
 		c, err := ln.Accept()
 		if err != nil {
@@ -392,7 +393,7 @@ func TestProxy_ShutdownDrainsInFlightIntercept(t *testing.T) {
 	client := clientTrustingAboxCA(t, caPEM, proxyURL, true)
 
 	// Fire a request that the origin handler will not return from.
-	reqCtx, cancelReq := context.WithCancel(context.Background())
+	reqCtx, cancelReq := context.WithCancel(t.Context())
 	defer cancelReq()
 	go func() {
 		req, _ := http.NewRequestWithContext(reqCtx, "GET", ts.URL+"/", nil)
@@ -474,7 +475,8 @@ func TestProxy_Intercept_SlowHandshakeTimesOut(t *testing.T) {
 	if readErr == nil {
 		t.Fatal("expected proxy to close the conn after the handshake timeout, got data")
 	}
-	if ne, ok := readErr.(net.Error); ok && ne.Timeout() {
+	var ne net.Error
+	if errors.As(readErr, &ne) && ne.Timeout() {
 		t.Fatalf("conn not closed within the handshake timeout (client read timed out instead): %v", readErr)
 	}
 
@@ -565,7 +567,8 @@ func TestProxy_Intercept_SlowHeadersTimesOut(t *testing.T) {
 	// read (EOF on close, or a 408 it writes back), not our deadline firing.
 	_ = tlsConn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, readErr := tlsConn.Read(make([]byte, 1))
-	if ne, ok := readErr.(net.Error); ok && ne.Timeout() {
+	var ne net.Error
+	if errors.As(readErr, &ne) && ne.Timeout() {
 		t.Fatalf("inner h1 conn not closed within ReadHeaderTimeout (client read timed out instead): %v", readErr)
 	}
 }
@@ -612,7 +615,7 @@ func TestProxy_StalledConnects_NoLeak(t *testing.T) {
 	}()
 	addr := server.listener.Addr().String()
 	connectReq := "CONNECT 127.0.0.1:443 HTTP/1.1\r\nHost: 127.0.0.1:443\r\n\r\n"
-	for i := 0; i < burst; i++ {
+	for i := range burst {
 		c, err := net.DialTimeout("tcp", addr, 5*time.Second)
 		if err != nil {
 			t.Fatalf("dial %d: %v", i, err)
@@ -676,7 +679,7 @@ func TestProxy_MaxConns_Queues(t *testing.T) {
 	// With a cap of 1, a second client connection must not be served until the
 	// first is released — LimitListener queues the second Accept.
 	upstream := echoSinkListener(t)
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 	target := upstream.Addr().String()
 
 	filter := allowlist.NewFilter()
@@ -738,7 +741,7 @@ func TestProxy_Tunnel_HalfClose_NoTruncation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	go func() {
 		c, err := ln.Accept()
 		if err != nil {
@@ -796,7 +799,7 @@ func TestProxy_Tunnel_HalfClose_ClientGetsEOF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	go func() {
 		c, err := ln.Accept()
 		if err != nil {
@@ -833,7 +836,8 @@ func TestProxy_Tunnel_HalfClose_ClientGetsEOF(t *testing.T) {
 	// propagate through the limiter wrapper, this read times out (hang).
 	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
 	got, err := io.ReadAll(br)
-	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
 		t.Fatalf("client never received EOF — upstream half-close did not propagate through the limiter wrapper")
 	}
 	if string(got) != payload {
@@ -980,7 +984,7 @@ func TestProxy_TrafficLog_HTTP1(t *testing.T) {
 	}
 
 	var sawAllow, sawBlock bool
-	for _, line := range bytes.Split(bytes.TrimSpace(data), []byte("\n")) {
+	for line := range bytes.SplitSeq(bytes.TrimSpace(data), []byte("\n")) {
 		if len(line) == 0 {
 			continue
 		}

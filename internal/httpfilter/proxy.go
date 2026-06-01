@@ -78,7 +78,7 @@ func (h *handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		// Pass r.Host (with port) so the requestHandler can preserve the
 		// upstream port — h2 servers strip the port from :authority before
 		// dispatching to the handler.
-		h.intercept(w, r, r.Host)
+		h.intercept(w, r.Host)
 	}
 }
 
@@ -89,7 +89,7 @@ func (h *handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 // wrapped in a trackedConn so the abox Shutdown path can drain in-flight MITM
 // sessions including streams that ReverseProxy hijacks (e.g. WebSocket) and
 // continues using after this function returns.
-func (h *handler) intercept(w http.ResponseWriter, r *http.Request, connectTarget string) {
+func (h *handler) intercept(w http.ResponseWriter, connectTarget string) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "hijack not supported", http.StatusInternalServerError)
@@ -263,7 +263,7 @@ func (h *handler) tunnel(w http.ResponseWriter, r *http.Request) {
 	// Track BEFORE writing 200 OK so activeConns.Add happens-before the client
 	// can observe the tunnel is up (and thus before any client-driven Shutdown).
 	conn := h.s.trackConn(rawConn)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Watcher closes the client conn on Shutdown so the io.Copy from upstream
 	// errors out and the function returns. The watcher itself exits when conn

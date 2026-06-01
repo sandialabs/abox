@@ -164,7 +164,7 @@ func NewServer(filter *allowlist.Filter, passive bool) *Server {
 		IdleTimeout:       60 * time.Second,
 	}
 	s.http2Server = &http2.Server{}
-	s.hijackCtx, s.hijackCancel = context.WithCancel(context.Background())
+	s.hijackCtx, s.hijackCancel = context.WithCancel(context.Background()) //nolint:gosec // cancel stored in s.hijackCancel, called in Shutdown
 	// Matches the upstream transport's TLSHandshakeTimeout above.
 	s.handshakeTimeout = 10 * time.Second
 	// Default connection cap; serve.go overrides from instance config. A
@@ -419,7 +419,7 @@ func (s *Server) Start(addr string) error {
 	// MITM/tunnel conns too because the limit-wrapped conn's Close (reached via
 	// trackedConn) releases the semaphore. s.listener stays the raw listener so
 	// Shutdown/Addr operate on it.
-	served := net.Listener(listener)
+	served := listener
 	if s.maxConns > 0 {
 		served = newLimitedListener(listener, s.maxConns)
 	}
@@ -588,7 +588,7 @@ func (s *Server) LoadCA(certPath, keyPath string) error {
 		s.caKey = caKey
 
 		// Start background certificate cleanup routine
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // cancel stored in s.cleanupCancel, called in Shutdown
 		s.cleanupCancel = cancel
 		s.cleanupDone = make(chan struct{})
 		go s.certCleanupRoutine(ctx)

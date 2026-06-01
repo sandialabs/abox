@@ -78,7 +78,7 @@ func TestProxy_gRPC_Roundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer lis.Close()
+	defer func() { _ = lis.Close() }()
 	serverCreds := credentials.NewTLS(&tls.Config{
 		Certificates: []tls.Certificate{originCert},
 		NextProtos:   []string{"h2"},
@@ -126,7 +126,7 @@ func TestProxy_gRPC_Roundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("grpc.NewClient: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := healthpb.NewHealthClient(conn)
 

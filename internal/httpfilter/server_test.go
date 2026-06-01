@@ -480,13 +480,11 @@ func TestServer_LoadCA_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	errs := make(chan error, n)
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range n {
+		wg.Go(func() {
 			<-start // line up all goroutines so the calls actually overlap
 			errs <- server.LoadCA(certPath, keyPath)
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

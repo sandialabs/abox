@@ -96,7 +96,7 @@ func TestProxy_WebSocket_Upgrade(t *testing.T) {
 	if err := tlsConn.Handshake(); err != nil {
 		t.Fatalf("TLS handshake to MITM cert: %v", err)
 	}
-	defer tlsConn.Close()
+	defer func() { _ = tlsConn.Close() }()
 
 	// Send the Upgrade request.
 	upgradeReq := "GET /ws HTTP/1.1\r\n" +
@@ -193,7 +193,7 @@ func TestProxy_WebSocket_ShutdownDrainsActiveStream(t *testing.T) {
 	if err := tlsConn.Handshake(); err != nil {
 		t.Fatalf("inner TLS handshake: %v", err)
 	}
-	defer tlsConn.Close()
+	defer func() { _ = tlsConn.Close() }()
 	if _, err := io.WriteString(tlsConn,
 		"GET /ws HTTP/1.1\r\nHost: "+tsHost+"\r\n"+
 			"Upgrade: websocket\r\nConnection: Upgrade\r\n"+
