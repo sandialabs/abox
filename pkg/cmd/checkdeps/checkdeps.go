@@ -24,20 +24,39 @@ type dependency struct {
 	usedBy   string
 }
 
+// External command names, referenced from the dependency table, the
+// installHint map, and the validation logic. Named constants keep these in
+// sync — a mismatch between any two would otherwise be a silent bug.
+const (
+	depVirsh       = "virsh"
+	depQemuImg     = "qemu-img"
+	depSSH         = "ssh"
+	depSCP         = "scp"
+	depSSHFS       = "sshfs"
+	depSSHKeygen   = "ssh-keygen"
+	depGenisoimage = "genisoimage"
+	depXorriso     = "xorriso"
+	depPkexec      = "pkexec"
+	depSudo        = "sudo"
+	depIptables    = "iptables"
+	depFusermount  = "fusermount"
+	depTCPdump     = "tcpdump"
+)
+
 var dependencies = []dependency{
-	{name: "virsh", required: true, usedBy: "all VM/network operations"},
-	{name: "qemu-img", required: true, usedBy: "create, base pull"},
-	{name: "ssh", required: true, usedBy: "ssh, provision, scp"},
-	{name: "scp", required: true, usedBy: "scp command"},
-	{name: "sshfs", required: true, usedBy: "mount command"},
-	{name: "ssh-keygen", required: true, usedBy: "create (key generation)"},
-	{name: "genisoimage", required: false, usedBy: "create (cloud-init ISO, required if xorriso not installed)"},
-	{name: "xorriso", required: false, usedBy: "create (cloud-init ISO, required if genisoimage not installed)"},
-	{name: "pkexec", required: false, usedBy: "iptables rules (preferred)"},
-	{name: "sudo", required: false, usedBy: "iptables rules (fallback)"},
-	{name: "iptables", required: true, usedBy: "DNS redirect"},
-	{name: "fusermount", required: true, usedBy: "unmount command"},
-	{name: "tcpdump", required: false, usedBy: "tap (packet capture)"},
+	{name: depVirsh, required: true, usedBy: "all VM/network operations"},
+	{name: depQemuImg, required: true, usedBy: "create, base pull"},
+	{name: depSSH, required: true, usedBy: "ssh, provision, scp"},
+	{name: depSCP, required: true, usedBy: "scp command"},
+	{name: depSSHFS, required: true, usedBy: "mount command"},
+	{name: depSSHKeygen, required: true, usedBy: "create (key generation)"},
+	{name: depGenisoimage, required: false, usedBy: "create (cloud-init ISO, required if xorriso not installed)"},
+	{name: depXorriso, required: false, usedBy: "create (cloud-init ISO, required if genisoimage not installed)"},
+	{name: depPkexec, required: false, usedBy: "iptables rules (preferred)"},
+	{name: depSudo, required: false, usedBy: "iptables rules (fallback)"},
+	{name: depIptables, required: true, usedBy: "DNS redirect"},
+	{name: depFusermount, required: true, usedBy: "unmount command"},
+	{name: depTCPdump, required: false, usedBy: "tap (packet capture)"},
 }
 
 // Options holds the options for the check-deps command.
@@ -141,7 +160,7 @@ func checkAllDependencies(w io.Writer, quiet bool) []string {
 
 func validateToolPairs(w io.Writer, quiet bool) error {
 	// Check that at least one privilege escalation method is available
-	if checkExecutable("pkexec") != nil && checkExecutable("sudo") != nil {
+	if checkExecutable(depPkexec) != nil && checkExecutable(depSudo) != nil {
 		if quiet {
 			return &cmdutil.ErrSilent{}
 		}
@@ -150,12 +169,12 @@ func validateToolPairs(w io.Writer, quiet bool) error {
 	}
 
 	// Check that at least one ISO creation tool is available
-	if checkExecutable("genisoimage") != nil && checkExecutable("xorriso") != nil {
+	if checkExecutable(depGenisoimage) != nil && checkExecutable(depXorriso) != nil {
 		if quiet {
 			return &cmdutil.ErrSilent{}
 		}
 		fmt.Fprintln(w, "Error: no ISO creation tool available (need genisoimage or xorriso)")
-		fmt.Fprintf(w, "  Install: %s  (or: %s)\n", installHint("genisoimage"), installHint("xorriso"))
+		fmt.Fprintf(w, "  Install: %s  (or: %s)\n", installHint(depGenisoimage), installHint(depXorriso))
 		return errors.New("no ISO creation tool available")
 	}
 	return nil
@@ -208,22 +227,22 @@ func checkExecutable(name string) error {
 func installHint(name string) string {
 	const hintOpenSSH = "install openssh-client (Debian/Ubuntu) or openssh-clients (Fedora/RHEL)"
 	hints := map[string]string{
-		"virsh":    "install libvirt-clients (Debian/Ubuntu) or libvirt-client (Fedora/RHEL/Arch)",
-		"qemu-img": "install qemu-utils (Debian/Ubuntu) or qemu-img (Fedora/RHEL/Arch)",
-		"ssh":      hintOpenSSH,
-		"scp":      hintOpenSSH,
+		depVirsh:   "install libvirt-clients (Debian/Ubuntu) or libvirt-client (Fedora/RHEL/Arch)",
+		depQemuImg: "install qemu-utils (Debian/Ubuntu) or qemu-img (Fedora/RHEL/Arch)",
+		depSSH:     hintOpenSSH,
+		depSCP:     hintOpenSSH,
 		// On Fedora/RHEL the package is fuse-sshfs, and on RHEL/AlmaLinux/Rocky it
 		// lives in EPEL rather than the base repos.
-		"sshfs":      "install sshfs (Debian/Ubuntu) or fuse-sshfs (Fedora; needs EPEL on RHEL/AlmaLinux/Rocky)",
-		"ssh-keygen": hintOpenSSH,
+		depSSHFS:     "install sshfs (Debian/Ubuntu) or fuse-sshfs (Fedora; needs EPEL on RHEL/AlmaLinux/Rocky)",
+		depSSHKeygen: hintOpenSSH,
 		// genisoimage is EPEL-only on RHEL; xorriso is in the base repos everywhere,
 		// so prefer it when EPEL is unavailable.
-		"genisoimage": "install genisoimage (Debian/Ubuntu/Fedora; EPEL on RHEL) or install xorriso instead",
-		"xorriso":     "install xorriso",
-		"pkexec":      "install polkit (usually pre-installed)",
-		"sudo":        "install sudo",
-		"iptables":    "install iptables",
-		"fusermount":  "install fuse or fuse3",
+		depGenisoimage: "install genisoimage (Debian/Ubuntu/Fedora; EPEL on RHEL) or install xorriso instead",
+		depXorriso:     "install xorriso",
+		depPkexec:      "install polkit (usually pre-installed)",
+		depSudo:        "install sudo",
+		depIptables:    "install iptables",
+		depFusermount:  "install fuse or fuse3",
 	}
 	if hint, ok := hints[name]; ok {
 		return hint
@@ -262,15 +281,15 @@ func RunQuiet() bool {
 	}
 
 	// Check that at least one privilege escalation method is available
-	pkexecErr := checkExecutable("pkexec")
-	sudoErr := checkExecutable("sudo")
+	pkexecErr := checkExecutable(depPkexec)
+	sudoErr := checkExecutable(depSudo)
 	if pkexecErr != nil && sudoErr != nil {
 		return false
 	}
 
 	// Check that at least one ISO creation tool is available
-	genisoimageErr := checkExecutable("genisoimage")
-	xorrisoErr := checkExecutable("xorriso")
+	genisoimageErr := checkExecutable(depGenisoimage)
+	xorrisoErr := checkExecutable(depXorriso)
 	if genisoimageErr != nil && xorrisoErr != nil {
 		return false
 	}
