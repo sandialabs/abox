@@ -31,6 +31,11 @@ const (
 	actionIntercept                      // hijack + TLS + h2/h1 dispatch
 )
 
+const (
+	protoHTTP11 = "http/1.1" // ALPN protocol id for HTTP/1.1
+	schemeHTTP  = "http"     // URL scheme and traffic-logger label
+)
+
 // requestDecision is the verdict for a fully-parsed inbound request (forward
 // proxy or post-MITM, h1 or h2).
 //
@@ -136,7 +141,7 @@ func (h *handler) intercept(w http.ResponseWriter, connectTarget string) {
 	// Clone before mutating NextProtos so the per-call config doesn't leak
 	// state through the cached cert sharing.
 	tlsCfg = tlsCfg.Clone()
-	tlsCfg.NextProtos = []string{"h2", "http/1.1"}
+	tlsCfg.NextProtos = []string{"h2", protoHTTP11}
 
 	tlsConn := tls.Server(conn, tlsCfg)
 	// Bound the handshake: a client that completes CONNECT but stalls the
@@ -212,7 +217,7 @@ func (h *handler) requestHandler(connectTarget string) http.Handler {
 			if connectTarget != "" {
 				r.URL.Scheme = "https"
 			} else {
-				r.URL.Scheme = "http"
+				r.URL.Scheme = schemeHTTP
 			}
 		}
 		if connectTarget != "" {

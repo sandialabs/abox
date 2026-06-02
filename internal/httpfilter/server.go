@@ -144,7 +144,7 @@ func NewServer(filter *allowlist.Filter, passive bool) *Server {
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
-			NextProtos: []string{"h2", "http/1.1"},
+			NextProtos: []string{"h2", protoHTTP11},
 		},
 	}
 	// http2.ConfigureTransport wires up the h2 round-tripper so upstream h2
@@ -164,7 +164,7 @@ func NewServer(filter *allowlist.Filter, passive bool) *Server {
 		IdleTimeout:       60 * time.Second,
 	}
 	s.http2Server = &http2.Server{}
-	s.hijackCtx, s.hijackCancel = context.WithCancel(context.Background()) //nolint:gosec // cancel stored in s.hijackCancel, called in Shutdown
+	s.hijackCtx, s.hijackCancel = context.WithCancel(context.Background())
 	// Matches the upstream transport's TLSHandshakeTimeout above.
 	s.handshakeTimeout = 10 * time.Second
 	// Default connection cap; serve.go overrides from instance config. A
@@ -563,7 +563,7 @@ func (s *Server) GetStats() Stats {
 
 // InitTrafficLogger initializes the traffic logger for this server.
 func (s *Server) InitTrafficLogger(logPath string) error {
-	return s.TrafficLoggerMixin.InitTrafficLogger(logPath, "http")
+	return s.TrafficLoggerMixin.InitTrafficLogger(logPath, schemeHTTP)
 }
 
 // LoadCA loads a CA certificate and key for TLS MITM.
@@ -588,7 +588,7 @@ func (s *Server) LoadCA(certPath, keyPath string) error {
 		s.caKey = caKey
 
 		// Start background certificate cleanup routine
-		ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // cancel stored in s.cleanupCancel, called in Shutdown
+		ctx, cancel := context.WithCancel(context.Background())
 		s.cleanupCancel = cancel
 		s.cleanupDone = make(chan struct{})
 		go s.certCleanupRoutine(ctx)
@@ -623,9 +623,9 @@ func (s *Server) generateCertForHost(host string) (*tls.Config, error) {
 			entry.lastAccess.Store(nowNano)
 			return &tls.Config{
 				Certificates: []tls.Certificate{*entry.cert},
-				MinVersion:   tls.VersionTLS12,     // Enforce TLS 1.2+ to prevent downgrade attacks
-				NextProtos:   []string{"http/1.1"}, // Overridden to ["h2", "http/1.1"] by the proxy intercept path
-				KeyLogWriter: s.keyLog,             // TLS session key export for abox tap
+				MinVersion:   tls.VersionTLS12,      // Enforce TLS 1.2+ to prevent downgrade attacks
+				NextProtos:   []string{protoHTTP11}, // Overridden to ["h2", "http/1.1"] by the proxy intercept path
+				KeyLogWriter: s.keyLog,              // TLS session key export for abox tap
 			}, nil
 		default:
 			// Certificate expired, remove from cache
@@ -651,9 +651,9 @@ func (s *Server) generateCertForHost(host string) (*tls.Config, error) {
 
 	return &tls.Config{
 		Certificates: []tls.Certificate{*hostCert},
-		MinVersion:   tls.VersionTLS12,     // Enforce TLS 1.2+ to prevent downgrade attacks
-		NextProtos:   []string{"http/1.1"}, // Overridden to ["h2", "http/1.1"] by the proxy intercept path
-		KeyLogWriter: s.keyLog,             // TLS session key export for abox tap
+		MinVersion:   tls.VersionTLS12,      // Enforce TLS 1.2+ to prevent downgrade attacks
+		NextProtos:   []string{protoHTTP11}, // Overridden to ["h2", "http/1.1"] by the proxy intercept path
+		KeyLogWriter: s.keyLog,              // TLS session key export for abox tap
 	}, nil
 }
 
