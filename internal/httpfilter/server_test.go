@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -788,6 +789,124 @@ func TestServer_CertCacheSizeLimit(t *testing.T) {
 	}
 }
 
+// TestServer_CertCacheEviction verifies that evictOldestIfNeeded actually
+// removes the oldest 10% of entries once the cache reaches maxCertCacheSize.
+// Entries are inserted synthetically (no signing) since the eviction path only
+// reads each entry's key and lastAccess time.
+func TestServer_CertCacheEviction(t *testing.T) {
+	filter := allowlist.NewFilter()
+	server := NewServer(filter, false)
+
+	for i := range maxCertCacheSize {
+		entry := &certCacheEntry{cert: &tls.Certificate{}}
+		entry.lastAccess.Store(int64(i)) // i == 0 is the oldest
+		server.certCache.Store(fmt.Sprintf("host-%05d.example.com", i), entry)
+	}
+
+	server.evictOldestIfNeeded()
+
+	evicted := max(maxCertCacheSize/10, 1)
+	wantRemaining := maxCertCacheSize - evicted
+
+	count := 0
+	server.certCache.Range(func(_, _ any) bool {
+		count++
+		return true
+	})
+	if count != wantRemaining {
+		t.Fatalf("expected %d entries after eviction, got %d", wantRemaining, count)
+	}
+
+	// The oldest `evicted` entries (lowest lastAccess) must be the ones removed.
+	for i := range evicted {
+		key := fmt.Sprintf("host-%05d.example.com", i)
+		if _, ok := server.certCache.Load(key); ok {
+			t.Errorf("expected oldest entry %q to be evicted", key)
+		}
+	}
+	// The most-recently-accessed entry must survive.
+	newest := fmt.Sprintf("host-%05d.example.com", maxCertCacheSize-1)
+	if _, ok := server.certCache.Load(newest); !ok {
+		t.Errorf("expected newest entry %q to survive eviction", newest)
+	}
+}
+
+// TestServer_CleanExpiredCerts verifies the periodic cleaner removes expired
+// cache entries and retains valid ones.
+func TestServer_CleanExpiredCerts(t *testing.T) {
+	filter := allowlist.NewFilter()
+	server := NewServer(filter, false)
+
+	now := time.Now()
+	storeEntry := func(host string, notAfter time.Time) {
+		entry := &certCacheEntry{cert: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: notAfter}}}
+		entry.lastAccess.Store(now.UnixNano())
+		server.certCache.Store(host, entry)
+	}
+	storeEntry("expired.example.com", now.Add(-time.Hour))
+	storeEntry("valid.example.com", now.Add(time.Hour))
+
+	server.cleanExpiredCerts()
+
+	if _, ok := server.certCache.Load("expired.example.com"); ok {
+		t.Error("expected expired cert to be removed by cleanExpiredCerts")
+	}
+	if _, ok := server.certCache.Load("valid.example.com"); !ok {
+		t.Error("expected valid cert to be retained by cleanExpiredCerts")
+	}
+}
+
+// TestServer_CertCacheExpiredEntryRegenerated verifies that an expired cache
+// entry is discarded and re-signed on the next generateCertForHost call (the
+// on-access expiry branch).
+func TestServer_CertCacheExpiredEntryRegenerated(t *testing.T) {
+	certPEM, keyPEM, err := cert.GenerateCA("test-ca")
+	if err != nil {
+		t.Fatalf("GenerateCA failed: %v", err)
+	}
+	tmpDir := t.TempDir()
+	certPath := filepath.Join(tmpDir, "ca-cert.pem")
+	keyPath := filepath.Join(tmpDir, "ca-key.pem")
+	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+		t.Fatalf("failed to write cert: %v", err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatalf("failed to write key: %v", err)
+	}
+
+	filter := allowlist.NewFilter()
+	server := NewServer(filter, false)
+	if err := server.LoadCA(certPath, keyPath); err != nil {
+		t.Fatalf("LoadCA failed: %v", err)
+	}
+
+	// Seed the cache with an already-expired entry for the host.
+	expired := &certCacheEntry{cert: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: time.Now().Add(-time.Hour)}}}
+	expired.lastAccess.Store(time.Now().UnixNano())
+	server.certCache.Store("example.com", expired)
+
+	tlsConfig, err := server.generateCertForHost("example.com")
+	if err != nil {
+		t.Fatalf("generateCertForHost failed: %v", err)
+	}
+
+	got := tlsConfig.Certificates[0].Leaf
+	if got == nil {
+		t.Fatal("expected a freshly signed leaf certificate")
+	}
+	if !got.NotAfter.After(time.Now()) {
+		t.Error("expected regenerated certificate to be unexpired")
+	}
+	// The cache must now hold the fresh entry, not the expired one.
+	cached, ok := server.certCache.Load("example.com")
+	if !ok {
+		t.Fatal("expected regenerated cert to be cached")
+	}
+	if cached.(*certCacheEntry).cert.Leaf != got {
+		t.Error("cache should hold the regenerated certificate")
+	}
+}
+
 func TestServer_MITM_BlocksNonAllowlisted(t *testing.T) {
 	// Generate CA
 	certPEM, keyPEM, err := cert.GenerateCA("test-ca")
@@ -918,5 +1037,22 @@ func TestServer_DecideRequest_Healthcheck(t *testing.T) {
 	}
 	if !strings.Contains(d.body, "healthcheck OK") {
 		t.Errorf("healthcheck body = %q, want to contain 'healthcheck OK'", d.body)
+	}
+
+	// A MITM'd request whose inner Host spoofs the healthcheck domain but whose
+	// CONNECT target is a different host must NOT get the healthcheck shortcut;
+	// it falls through to normal policy (here: a domain-fronting block).
+	spoof, _ := http.NewRequest("GET", "https://"+HealthcheckDomain+"/", nil)
+	spoof.Host = HealthcheckDomain
+	if ds := server.decideRequest(spoof, "allowed.example.com:443"); ds.forward || ds.status != http.StatusForbidden {
+		t.Errorf("decideRequest(spoofed healthcheck under CONNECT) = %+v, want forward=false status=403", ds)
+	}
+
+	// A genuine CONNECT to the healthcheck domain (inner Host == CONNECT target)
+	// still gets the shortcut.
+	direct, _ := http.NewRequest("GET", "https://"+HealthcheckDomain+"/", nil)
+	direct.Host = HealthcheckDomain
+	if dd := server.decideRequest(direct, HealthcheckDomain+":443"); dd.forward || dd.status != http.StatusOK {
+		t.Errorf("decideRequest(healthcheck via CONNECT) = %+v, want forward=false status=200", dd)
 	}
 }
