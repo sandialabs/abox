@@ -206,15 +206,19 @@ func checkExecutable(name string) error {
 }
 
 func installHint(name string) string {
-	const hintOpenSSHClient = "install openssh-client"
+	const hintOpenSSH = "install openssh-client (Debian/Ubuntu) or openssh-clients (Fedora/RHEL)"
 	hints := map[string]string{
-		"virsh":       "install libvirt-clients (Debian/Ubuntu) or libvirt (Fedora/Arch)",
-		"qemu-img":    "install qemu-utils (Debian/Ubuntu) or qemu-img (Fedora/Arch)",
-		"ssh":         hintOpenSSHClient,
-		"scp":         hintOpenSSHClient,
-		"sshfs":       "install sshfs",
-		"ssh-keygen":  hintOpenSSHClient,
-		"genisoimage": "install genisoimage (Debian/Ubuntu) or cdrkit (Fedora/Arch)",
+		"virsh":    "install libvirt-clients (Debian/Ubuntu) or libvirt-client (Fedora/RHEL/Arch)",
+		"qemu-img": "install qemu-utils (Debian/Ubuntu) or qemu-img (Fedora/RHEL/Arch)",
+		"ssh":      hintOpenSSH,
+		"scp":      hintOpenSSH,
+		// On Fedora/RHEL the package is fuse-sshfs, and on RHEL/AlmaLinux/Rocky it
+		// lives in EPEL rather than the base repos.
+		"sshfs":      "install sshfs (Debian/Ubuntu) or fuse-sshfs (Fedora; needs EPEL on RHEL/AlmaLinux/Rocky)",
+		"ssh-keygen": hintOpenSSH,
+		// genisoimage is EPEL-only on RHEL; xorriso is in the base repos everywhere,
+		// so prefer it when EPEL is unavailable.
+		"genisoimage": "install genisoimage (Debian/Ubuntu/Fedora; EPEL on RHEL) or install xorriso instead",
 		"xorriso":     "install xorriso",
 		"pkexec":      "install polkit (usually pre-installed)",
 		"sudo":        "install sudo",
