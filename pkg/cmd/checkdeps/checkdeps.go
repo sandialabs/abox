@@ -22,11 +22,15 @@ type dependency struct {
 	name     string
 	required bool
 	usedBy   string
+	hint     string // install instructions; empty falls back to a generic message
 }
 
-// External command names, referenced from the dependency table, the
-// installHint map, and the validation logic. Named constants keep these in
-// sync — a mismatch between any two would otherwise be a silent bug.
+// hintOpenSSH is shared by the OpenSSH client tools (ssh, scp, ssh-keygen).
+const hintOpenSSH = "install openssh-client (Debian/Ubuntu) or openssh-clients (Fedora/RHEL)"
+
+// External command names, referenced from the dependency table and the
+// validation logic. Named constants keep these in sync — a mismatch between
+// any two would otherwise be a silent bug.
 const (
 	depVirsh       = "virsh"
 	depQemuImg     = "qemu-img"
@@ -44,19 +48,87 @@ const (
 )
 
 var dependencies = []dependency{
-	{name: depVirsh, required: true, usedBy: "all VM/network operations"},
-	{name: depQemuImg, required: true, usedBy: "create, base pull"},
-	{name: depSSH, required: true, usedBy: "ssh, provision, scp"},
-	{name: depSCP, required: true, usedBy: "scp command"},
-	{name: depSSHFS, required: true, usedBy: "mount command"},
-	{name: depSSHKeygen, required: true, usedBy: "create (key generation)"},
-	{name: depGenisoimage, required: false, usedBy: "create (cloud-init ISO, required if xorriso not installed)"},
-	{name: depXorriso, required: false, usedBy: "create (cloud-init ISO, required if genisoimage not installed)"},
-	{name: depPkexec, required: false, usedBy: "iptables rules (preferred)"},
-	{name: depSudo, required: false, usedBy: "iptables rules (fallback)"},
-	{name: depIptables, required: true, usedBy: "DNS redirect"},
-	{name: depFusermount, required: true, usedBy: "unmount command"},
-	{name: depTCPdump, required: false, usedBy: "tap (packet capture)"},
+	{
+		name:     depVirsh,
+		required: true,
+		usedBy:   "all VM/network operations",
+		hint:     "install libvirt-clients (Debian/Ubuntu) or libvirt-client (Fedora/RHEL/Arch)",
+	},
+	{
+		name:     depQemuImg,
+		required: true,
+		usedBy:   "create, base pull",
+		hint:     "install qemu-utils (Debian/Ubuntu) or qemu-img (Fedora/RHEL/Arch)",
+	},
+	{
+		name:     depSSH,
+		required: true,
+		usedBy:   "ssh, provision, scp",
+		hint:     hintOpenSSH,
+	},
+	{
+		name:     depSCP,
+		required: true,
+		usedBy:   "scp command",
+		hint:     hintOpenSSH,
+	},
+	{
+		name:     depSSHFS,
+		required: true,
+		usedBy:   "mount command",
+		// On Fedora/RHEL the package is fuse-sshfs, and on RHEL/AlmaLinux/Rocky it
+		// lives in EPEL rather than the base repos.
+		hint: "install sshfs (Debian/Ubuntu) or fuse-sshfs (Fedora; needs EPEL on RHEL/AlmaLinux/Rocky)",
+	},
+	{
+		name:     depSSHKeygen,
+		required: true,
+		usedBy:   "create (key generation)",
+		hint:     hintOpenSSH,
+	},
+	{
+		name:     depGenisoimage,
+		required: false,
+		usedBy:   "create (cloud-init ISO, required if xorriso not installed)",
+		// genisoimage is EPEL-only on RHEL; xorriso is in the base repos everywhere,
+		// so prefer it when EPEL is unavailable.
+		hint: "install genisoimage (Debian/Ubuntu/Fedora; EPEL on RHEL) or install xorriso instead",
+	},
+	{
+		name:     depXorriso,
+		required: false,
+		usedBy:   "create (cloud-init ISO, required if genisoimage not installed)",
+		hint:     "install xorriso",
+	},
+	{
+		name:     depPkexec,
+		required: false,
+		usedBy:   "iptables rules (preferred)",
+		hint:     "install polkit (usually pre-installed)",
+	},
+	{
+		name:     depSudo,
+		required: false,
+		usedBy:   "iptables rules (fallback)",
+		hint:     "install sudo",
+	},
+	{
+		name:     depIptables,
+		required: true,
+		usedBy:   "DNS redirect",
+		hint:     "install iptables",
+	},
+	{
+		name:     depFusermount,
+		required: true,
+		usedBy:   "unmount command",
+		hint:     "install fuse or fuse3",
+	},
+	{
+		name:     depTCPdump,
+		required: false,
+		usedBy:   "tap (packet capture)",
+	},
 }
 
 // Options holds the options for the check-deps command.
@@ -225,27 +297,10 @@ func checkExecutable(name string) error {
 }
 
 func installHint(name string) string {
-	const hintOpenSSH = "install openssh-client (Debian/Ubuntu) or openssh-clients (Fedora/RHEL)"
-	hints := map[string]string{
-		depVirsh:   "install libvirt-clients (Debian/Ubuntu) or libvirt-client (Fedora/RHEL/Arch)",
-		depQemuImg: "install qemu-utils (Debian/Ubuntu) or qemu-img (Fedora/RHEL/Arch)",
-		depSSH:     hintOpenSSH,
-		depSCP:     hintOpenSSH,
-		// On Fedora/RHEL the package is fuse-sshfs, and on RHEL/AlmaLinux/Rocky it
-		// lives in EPEL rather than the base repos.
-		depSSHFS:     "install sshfs (Debian/Ubuntu) or fuse-sshfs (Fedora; needs EPEL on RHEL/AlmaLinux/Rocky)",
-		depSSHKeygen: hintOpenSSH,
-		// genisoimage is EPEL-only on RHEL; xorriso is in the base repos everywhere,
-		// so prefer it when EPEL is unavailable.
-		depGenisoimage: "install genisoimage (Debian/Ubuntu/Fedora; EPEL on RHEL) or install xorriso instead",
-		depXorriso:     "install xorriso",
-		depPkexec:      "install polkit (usually pre-installed)",
-		depSudo:        "install sudo",
-		depIptables:    "install iptables",
-		depFusermount:  "install fuse or fuse3",
-	}
-	if hint, ok := hints[name]; ok {
-		return hint
+	for _, dep := range dependencies {
+		if dep.name == name && dep.hint != "" {
+			return dep.hint
+		}
 	}
 	return "check your package manager"
 }
