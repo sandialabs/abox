@@ -310,7 +310,11 @@ func (s *Server) decideRequest(r *http.Request, connectTarget string) requestDec
 	host := extractHost(r.Host)
 
 	// Healthcheck shortcut: always allow, regardless of mode or allowlist.
-	if strings.EqualFold(host, HealthcheckDomain) {
+	// Skip it for MITM'd requests whose inner Host differs from the CONNECT
+	// target, so a spoofed inner Host can't claim healthcheck status (and
+	// dodge the cross-origin audit) while tunneled to a different target.
+	if strings.EqualFold(host, HealthcheckDomain) &&
+		(connectTarget == "" || strings.EqualFold(extractHost(connectTarget), host)) {
 		atomic.AddUint64(&s.stats.AllowedRequests, 1)
 		return requestDecision{
 			forward: false,
