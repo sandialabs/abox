@@ -96,6 +96,11 @@ The HTTP/HTTPS proxy provides additional security:
 - **SSRF protection** - Blocks requests to private IPs (10.x, 172.16.x, 192.168.x), loopback, and link-local addresses
 - **DoH bypass mitigation** - Validates domains even if DNS was bypassed
 
+The proxy speaks both **HTTP/1.1 and HTTP/2** to the client and to upstream
+origins. Per-request filtering (allowlist, SSRF, domain fronting) applies
+identically to both protocols, so gRPC-based tools (including
+[dolt](https://github.com/dolthub/dolt)) work through the proxy.
+
 ### HTTP/HTTPS Request Flow
 
 ```mermaid

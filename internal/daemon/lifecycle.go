@@ -53,9 +53,9 @@ func cleanupDaemonFiles(daemonName, pidFile, socketPath string) error {
 	return errors.Join(errs...)
 }
 
-// isAboxProcess verifies that a PID belongs to an abox process.
+// IsAboxProcess verifies that a PID belongs to an abox process.
 // This prevents signaling unrelated processes if the PID was reused.
-func isAboxProcess(pid int) bool {
+func IsAboxProcess(pid int) bool {
 	// Check /proc/{pid}/exe symlink to verify the process is running our executable.
 	// This is more secure than checking cmdline, which could match any process
 	// that happens to have "abox" in its arguments (e.g., "cat /home/abox/file").
@@ -82,7 +82,7 @@ func signalFallback(pidFile string) {
 	if err != nil || pid <= 0 {
 		return
 	}
-	if !isAboxProcess(pid) {
+	if !IsAboxProcess(pid) {
 		logging.Warn("PID is not an abox process, skipping signal", "pid", pid)
 		return
 	}

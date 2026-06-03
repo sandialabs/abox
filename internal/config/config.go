@@ -26,6 +26,11 @@ const (
 	DefaultBase     = "ubuntu-24.04"
 	DefaultDisk     = "20G"
 	DefaultUpstream = "8.8.8.8:53"
+
+	// DefaultHTTPMaxConnections caps concurrent client connections to the HTTP
+	// filter proxy, bounding host fd/goroutine use against a hostile VM. A
+	// zero/unset value in a saved config resolves to this default at startup.
+	DefaultHTTPMaxConnections = 512
 )
 
 // SSH usernames for supported distros.
@@ -113,9 +118,10 @@ type DNSConfig struct {
 
 // HTTPConfig holds HTTP proxy-related configuration for an instance.
 type HTTPConfig struct {
-	Port     int    `yaml:"port"`                // httpfilter proxy port
-	LogLevel string `yaml:"log_level,omitempty"` // "debug", "info", "warn", "error" (default: info)
-	MITM     bool   `yaml:"mitm"`                // Enable TLS MITM for domain fronting protection
+	Port           int    `yaml:"port"`                      // httpfilter proxy port
+	LogLevel       string `yaml:"log_level,omitempty"`       // "debug", "info", "warn", "error" (default: info)
+	MITM           bool   `yaml:"mitm"`                      // Enable TLS MITM for domain fronting protection
+	MaxConnections int    `yaml:"max_connections,omitempty"` // cap on concurrent client connections (0/unset = DefaultHTTPMaxConnections)
 }
 
 // MonitorConfig holds monitoring-related configuration for an instance.
@@ -238,7 +244,8 @@ func DefaultInstance(name string) *Instance {
 			Upstream: DefaultUpstream,
 		},
 		HTTP: HTTPConfig{
-			MITM: true, // Default to enabled for security
+			MITM:           true, // Default to enabled for security
+			MaxConnections: DefaultHTTPMaxConnections,
 		},
 		Disk: DefaultDisk,
 	}
@@ -466,6 +473,11 @@ func (i *Instance) Validate() error {
 	// Validate HTTP log level
 	if err := validation.ValidateLogLevel(i.HTTP.LogLevel); err != nil {
 		return fmt.Errorf("http: %w", err)
+	}
+
+	// Validate HTTP max connections (0 = unset, resolved to the default at startup).
+	if i.HTTP.MaxConnections < 0 {
+		return fmt.Errorf("http: max_connections must be >= 0 (got %d)", i.HTTP.MaxConnections)
 	}
 
 	// Validate resource limits

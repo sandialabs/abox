@@ -2,13 +2,19 @@ package httpfilter
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sandialabs/abox/internal/allowlist"
 	"github.com/sandialabs/abox/internal/cert"
@@ -104,6 +110,12 @@ func TestExtractHost(t *testing.T) {
 		{"ip-without-port", "192.168.1.1", "192.168.1.1"},
 		{"ipv6-with-port", "[::1]:443", "::1"},
 		{"ipv6-without-port", "::1", "::1"},
+		// Bare bracketed IPv6 — happens when an HTTP/2 :authority pseudo-header
+		// or a Host header is "[::1]" with no port. Without bracket stripping,
+		// downstream allowlist / SSRF checks would see "[::1]" literal and miss
+		// loopback. (SSRF gap pre-fix.)
+		{"ipv6-bracketed-no-port", "[::1]", "::1"},
+		{"ipv6-bracketed-link-local", "[fe80::1]", "fe80::1"},
 	}
 
 	for _, tt := range tests {
@@ -285,28 +297,7 @@ func TestServer_Stats(t *testing.T) {
 	}
 }
 
-func TestServer_HandleRequest_Healthcheck(t *testing.T) {
-	filter := allowlist.NewFilter()
-	// Empty allowlist - all domains should be blocked except healthcheck
-
-	server := NewServer(filter, false)
-
-	// Start the server on a random port
-	err := server.Start("127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Failed to start server: %v", err)
-	}
-	defer func() { _ = server.Shutdown(context.Background()) }()
-
-	// Create a test request via the proxy
-	// Note: This test verifies stats are updated, not full proxy behavior
-	// (full proxy testing would require more complex setup)
-
-	// Verify stats are tracking
-	_ = server.GetStats()
-}
-
-func TestServer_HandleRequest_Integration(t *testing.T) {
+func TestServer_ProxyEndToEnd_HTTP1(t *testing.T) {
 	filter := allowlist.NewFilter()
 	filter.Add("allowed.com")
 
@@ -462,6 +453,62 @@ func TestServer_LoadCA_NotFound(t *testing.T) {
 	}
 }
 
+// TestServer_LoadCA_Concurrent exercises the loadOnce guard added in 5e2a59c.
+// Concurrent LoadCA calls must publish the CA and spawn the cert-cleanup routine
+// exactly once; without the guard each call rewrites cleanupCancel/cleanupDone and
+// starts another routine, and the racing writes to those fields (plus the cleanup
+// routine reading the shared cleanupDone in its deferred close) are a data race.
+// The teeth of this test are therefore the race detector — run via `make test`
+// (-race). The bounded Shutdown below is a secondary guard against a teardown hang.
+func TestServer_LoadCA_Concurrent(t *testing.T) {
+	certPEM, keyPEM, err := cert.GenerateCA("test-ca")
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	tmpDir := t.TempDir()
+	certPath := filepath.Join(tmpDir, "ca.pem")
+	keyPath := filepath.Join(tmpDir, "key.pem")
+	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	server := NewServer(allowlist.NewFilter(), false)
+
+	const n = 16
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make(chan error, n)
+	for range n {
+		wg.Go(func() {
+			<-start // line up all goroutines so the calls actually overlap
+			errs <- server.LoadCA(certPath, keyPath)
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		if e != nil {
+			t.Fatalf("concurrent LoadCA returned error: %v", e)
+		}
+	}
+
+	if !server.mitmReady.Load() {
+		t.Fatal("mitmReady should be true after concurrent LoadCA")
+	}
+
+	// A deadlock here is the symptom of an orphaned cleanup routine: Shutdown
+	// cancels one routine's context but blocks forever on the other's cleanupDone.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown after concurrent LoadCA: %v", err)
+	}
+}
+
 func TestServer_GenerateCertForHost(t *testing.T) {
 	// Generate CA
 	certPEM, keyPEM, err := cert.GenerateCA("test-ca")
@@ -490,7 +537,7 @@ func TestServer_GenerateCertForHost(t *testing.T) {
 	}
 
 	// Generate cert for a host
-	tlsConfig, err := server.generateCertForHost("example.com", nil)
+	tlsConfig, err := server.generateCertForHost("example.com")
 	if err != nil {
 		t.Fatalf("generateCertForHost failed: %v", err)
 	}
@@ -510,7 +557,7 @@ func TestServer_GenerateCertForHost(t *testing.T) {
 	}
 
 	// Test caching - second call should return cached cert
-	tlsConfig2, err := server.generateCertForHost("example.com", nil)
+	tlsConfig2, err := server.generateCertForHost("example.com")
 	if err != nil {
 		t.Fatalf("second generateCertForHost failed: %v", err)
 	}
@@ -518,6 +565,16 @@ func TestServer_GenerateCertForHost(t *testing.T) {
 	// Both should have the same certificate (cached)
 	if tlsConfig.Certificates[0].Leaf != tlsConfig2.Certificates[0].Leaf {
 		t.Error("expected cached certificate to be returned")
+	}
+
+	// Both paths (cache miss and cache hit) must advertise only "http/1.1" in
+	// ALPN, so strict-HTTP/2 clients fail with a clean no_application_protocol
+	// alert instead of negotiating empty ALPN and then failing inside the
+	// HTTP/1-only proxy parser. See docs/troubleshooting.md.
+	for i, cfg := range []*tls.Config{tlsConfig, tlsConfig2} {
+		if want := []string{"http/1.1"}; !reflect.DeepEqual(cfg.NextProtos, want) {
+			t.Errorf("config %d NextProtos = %v, want %v", i, cfg.NextProtos, want)
+		}
 	}
 }
 
@@ -573,7 +630,7 @@ func TestServer_MITM_Integration(t *testing.T) {
 	defer func() { _ = server.Shutdown(context.Background()) }()
 
 	// Test that generateCertForHost works for an allowed domain
-	tlsConfig, err := server.generateCertForHost("allowed.example.com", nil)
+	tlsConfig, err := server.generateCertForHost("allowed.example.com")
 	if err != nil {
 		t.Fatalf("generateCertForHost failed: %v", err)
 	}
@@ -649,7 +706,7 @@ func TestServer_CertCacheExpiration(t *testing.T) {
 	}
 
 	// Generate cert for a host
-	tlsConfig, err := server.generateCertForHost("example.com", nil)
+	tlsConfig, err := server.generateCertForHost("example.com")
 	if err != nil {
 		t.Fatalf("generateCertForHost failed: %v", err)
 	}
@@ -671,7 +728,7 @@ func TestServer_CertCacheExpiration(t *testing.T) {
 	}
 
 	// Generate again - should get cached version
-	tlsConfig2, err := server.generateCertForHost("example.com", nil)
+	tlsConfig2, err := server.generateCertForHost("example.com")
 	if err != nil {
 		t.Fatalf("second generateCertForHost failed: %v", err)
 	}
@@ -714,7 +771,7 @@ func TestServer_CertCacheSizeLimit(t *testing.T) {
 	// Generate multiple certs
 	for i := range 5 {
 		host := "example" + string(rune('a'+i)) + ".com"
-		_, err := server.generateCertForHost(host, nil)
+		_, err := server.generateCertForHost(host)
 		if err != nil {
 			t.Fatalf("generateCertForHost failed for %s: %v", host, err)
 		}
@@ -729,6 +786,124 @@ func TestServer_CertCacheSizeLimit(t *testing.T) {
 
 	if count != 5 {
 		t.Errorf("expected 5 cached entries, got %d", count)
+	}
+}
+
+// TestServer_CertCacheEviction verifies that evictOldestIfNeeded actually
+// removes the oldest 10% of entries once the cache reaches maxCertCacheSize.
+// Entries are inserted synthetically (no signing) since the eviction path only
+// reads each entry's key and lastAccess time.
+func TestServer_CertCacheEviction(t *testing.T) {
+	filter := allowlist.NewFilter()
+	server := NewServer(filter, false)
+
+	for i := range maxCertCacheSize {
+		entry := &certCacheEntry{cert: &tls.Certificate{}}
+		entry.lastAccess.Store(int64(i)) // i == 0 is the oldest
+		server.certCache.Store(fmt.Sprintf("host-%05d.example.com", i), entry)
+	}
+
+	server.evictOldestIfNeeded()
+
+	evicted := max(maxCertCacheSize/10, 1)
+	wantRemaining := maxCertCacheSize - evicted
+
+	count := 0
+	server.certCache.Range(func(_, _ any) bool {
+		count++
+		return true
+	})
+	if count != wantRemaining {
+		t.Fatalf("expected %d entries after eviction, got %d", wantRemaining, count)
+	}
+
+	// The oldest `evicted` entries (lowest lastAccess) must be the ones removed.
+	for i := range evicted {
+		key := fmt.Sprintf("host-%05d.example.com", i)
+		if _, ok := server.certCache.Load(key); ok {
+			t.Errorf("expected oldest entry %q to be evicted", key)
+		}
+	}
+	// The most-recently-accessed entry must survive.
+	newest := fmt.Sprintf("host-%05d.example.com", maxCertCacheSize-1)
+	if _, ok := server.certCache.Load(newest); !ok {
+		t.Errorf("expected newest entry %q to survive eviction", newest)
+	}
+}
+
+// TestServer_CleanExpiredCerts verifies the periodic cleaner removes expired
+// cache entries and retains valid ones.
+func TestServer_CleanExpiredCerts(t *testing.T) {
+	filter := allowlist.NewFilter()
+	server := NewServer(filter, false)
+
+	now := time.Now()
+	storeEntry := func(host string, notAfter time.Time) {
+		entry := &certCacheEntry{cert: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: notAfter}}}
+		entry.lastAccess.Store(now.UnixNano())
+		server.certCache.Store(host, entry)
+	}
+	storeEntry("expired.example.com", now.Add(-time.Hour))
+	storeEntry("valid.example.com", now.Add(time.Hour))
+
+	server.cleanExpiredCerts()
+
+	if _, ok := server.certCache.Load("expired.example.com"); ok {
+		t.Error("expected expired cert to be removed by cleanExpiredCerts")
+	}
+	if _, ok := server.certCache.Load("valid.example.com"); !ok {
+		t.Error("expected valid cert to be retained by cleanExpiredCerts")
+	}
+}
+
+// TestServer_CertCacheExpiredEntryRegenerated verifies that an expired cache
+// entry is discarded and re-signed on the next generateCertForHost call (the
+// on-access expiry branch).
+func TestServer_CertCacheExpiredEntryRegenerated(t *testing.T) {
+	certPEM, keyPEM, err := cert.GenerateCA("test-ca")
+	if err != nil {
+		t.Fatalf("GenerateCA failed: %v", err)
+	}
+	tmpDir := t.TempDir()
+	certPath := filepath.Join(tmpDir, "ca-cert.pem")
+	keyPath := filepath.Join(tmpDir, "ca-key.pem")
+	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+		t.Fatalf("failed to write cert: %v", err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatalf("failed to write key: %v", err)
+	}
+
+	filter := allowlist.NewFilter()
+	server := NewServer(filter, false)
+	if err := server.LoadCA(certPath, keyPath); err != nil {
+		t.Fatalf("LoadCA failed: %v", err)
+	}
+
+	// Seed the cache with an already-expired entry for the host.
+	expired := &certCacheEntry{cert: &tls.Certificate{Leaf: &x509.Certificate{NotAfter: time.Now().Add(-time.Hour)}}}
+	expired.lastAccess.Store(time.Now().UnixNano())
+	server.certCache.Store("example.com", expired)
+
+	tlsConfig, err := server.generateCertForHost("example.com")
+	if err != nil {
+		t.Fatalf("generateCertForHost failed: %v", err)
+	}
+
+	got := tlsConfig.Certificates[0].Leaf
+	if got == nil {
+		t.Fatal("expected a freshly signed leaf certificate")
+	}
+	if !got.NotAfter.After(time.Now()) {
+		t.Error("expected regenerated certificate to be unexpired")
+	}
+	// The cache must now hold the fresh entry, not the expired one.
+	cached, ok := server.certCache.Load("example.com")
+	if !ok {
+		t.Fatal("expected regenerated cert to be cached")
+	}
+	if cached.(*certCacheEntry).cert.Leaf != got {
+		t.Error("cache should hold the regenerated certificate")
 	}
 }
 
@@ -778,5 +953,106 @@ func TestServer_MITM_BlocksNonAllowlisted(t *testing.T) {
 	_, err = client.Get("https://blocked.example.com/")
 	if err == nil {
 		t.Error("Expected error for blocked domain, got nil")
+	}
+}
+
+func TestServer_DecideConnect(t *testing.T) {
+	filter := allowlist.NewFilter()
+	filter.Add("allowed.example.com")
+	filter.Add("127.0.0.1") // explicit allowlist bypasses SSRF
+	server := NewServer(filter, false)
+
+	// Without MITM (no CA loaded): allowed host → tunnel.
+	if got := server.decideConnect("allowed.example.com"); got != actionTunnel {
+		t.Errorf("decideConnect(allowed, no MITM) = %v, want actionTunnel", got)
+	}
+
+	// Allowed host where IP would normally be blocked, but explicit allowlist
+	// skips the SSRF check.
+	if got := server.decideConnect("127.0.0.1"); got != actionTunnel {
+		t.Errorf("decideConnect(allowlisted private IP) = %v, want actionTunnel", got)
+	}
+
+	// Disallowed host → reject.
+	if got := server.decideConnect("blocked.example.com"); got != actionReject {
+		t.Errorf("decideConnect(blocked) = %v, want actionReject", got)
+	}
+
+	// Private IP (not allowlisted) → reject (SSRF).
+	if got := server.decideConnect("10.0.0.1"); got != actionReject {
+		t.Errorf("decideConnect(private IP) = %v, want actionReject", got)
+	}
+
+	// With MITM enabled, allowed host → intercept.
+	certPEM, keyPEM, err := cert.GenerateCA("test-ca")
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	tmpDir := t.TempDir()
+	cp := filepath.Join(tmpDir, "ca-cert.pem")
+	kp := filepath.Join(tmpDir, "ca-key.pem")
+	_ = os.WriteFile(cp, certPEM, 0o644)
+	_ = os.WriteFile(kp, keyPEM, 0o600)
+	if err := server.LoadCA(cp, kp); err != nil {
+		t.Fatalf("LoadCA: %v", err)
+	}
+	if got := server.decideConnect("allowed.example.com"); got != actionIntercept {
+		t.Errorf("decideConnect(allowed, MITM on) = %v, want actionIntercept", got)
+	}
+}
+
+func TestServer_DecideRequest_DomainFronting(t *testing.T) {
+	filter := allowlist.NewFilter()
+	filter.Add("allowed.example.com")
+	server := NewServer(filter, false)
+
+	// Inner Host differs from CONNECT target and is not allowlisted: fronting block.
+	// connectTarget is "host:port" form (what handleConnect passes).
+	req, _ := http.NewRequest("GET", "https://other.example.com/", nil)
+	req.Host = "other.example.com"
+	d := server.decideRequest(req, "allowed.example.com:443")
+	if d.forward || d.status != http.StatusForbidden {
+		t.Errorf("decideRequest(fronting) = %+v, want forward=false status=403", d)
+	}
+
+	// Inner Host matches CONNECT target and is allowed: forward.
+	req2, _ := http.NewRequest("GET", "https://allowed.example.com/", nil)
+	req2.Host = "allowed.example.com"
+	d2 := server.decideRequest(req2, "allowed.example.com:443")
+	if !d2.forward {
+		t.Errorf("decideRequest(matching allowed) = %+v, want forward=true", d2)
+	}
+}
+
+func TestServer_DecideRequest_Healthcheck(t *testing.T) {
+	filter := allowlist.NewFilter()
+	// Healthcheck must work with an empty allowlist.
+	server := NewServer(filter, false)
+
+	req, _ := http.NewRequest("GET", "http://"+HealthcheckDomain+"/", nil)
+	req.Host = HealthcheckDomain
+	d := server.decideRequest(req, "")
+	if d.forward || d.status != http.StatusOK {
+		t.Errorf("decideRequest(healthcheck) = %+v, want forward=false status=200", d)
+	}
+	if !strings.Contains(d.body, "healthcheck OK") {
+		t.Errorf("healthcheck body = %q, want to contain 'healthcheck OK'", d.body)
+	}
+
+	// A MITM'd request whose inner Host spoofs the healthcheck domain but whose
+	// CONNECT target is a different host must NOT get the healthcheck shortcut;
+	// it falls through to normal policy (here: a domain-fronting block).
+	spoof, _ := http.NewRequest("GET", "https://"+HealthcheckDomain+"/", nil)
+	spoof.Host = HealthcheckDomain
+	if ds := server.decideRequest(spoof, "allowed.example.com:443"); ds.forward || ds.status != http.StatusForbidden {
+		t.Errorf("decideRequest(spoofed healthcheck under CONNECT) = %+v, want forward=false status=403", ds)
+	}
+
+	// A genuine CONNECT to the healthcheck domain (inner Host == CONNECT target)
+	// still gets the shortcut.
+	direct, _ := http.NewRequest("GET", "https://"+HealthcheckDomain+"/", nil)
+	direct.Host = HealthcheckDomain
+	if dd := server.decideRequest(direct, HealthcheckDomain+":443"); dd.forward || dd.status != http.StatusOK {
+		t.Errorf("decideRequest(healthcheck via CONNECT) = %+v, want forward=false status=200", dd)
 	}
 }

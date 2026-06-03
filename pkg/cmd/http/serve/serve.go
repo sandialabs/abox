@@ -65,6 +65,11 @@ func runServe(opts *Options, name string) error {
 	// Create HTTP proxy server
 	server := httpfilter.NewServer(setup.Filter, opts.Passive)
 
+	// Apply the connection cap from config. 0/unset keeps NewServer's default.
+	if n := setup.Inst.HTTP.MaxConnections; n > 0 {
+		server.SetMaxConns(n)
+	}
+
 	// Load CA certificate for TLS MITM if enabled
 	if setup.Inst.HTTP.MITM {
 		if err := server.LoadCA(setup.Paths.CACert, setup.Paths.CAKey); err != nil {

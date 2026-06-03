@@ -88,7 +88,11 @@ func runStart(ctx context.Context, opts *Options, name string) error {
 	// Check if already running
 	if be.VM().IsRunning(name) {
 		fmt.Fprintf(w, "Instance %q is already running.\n", name)
-		return nil
+		// Filter and monitor daemons can crash independently of the VM
+		// (panic, OOM, kill -9). Recover any that died so the user doesn't
+		// have to abox stop && abox start to get filtering back. Each
+		// start* call is a no-op when its daemon is alive.
+		return recoverDaemons(w, name, inst, paths)
 	}
 
 	if err := ensureNetwork(ctx, w, be, inst); err != nil {
@@ -142,11 +146,32 @@ func ensureNetwork(ctx context.Context, w io.Writer, be backend.Backend, inst *c
 	return nil
 }
 
+// recoverDaemons restarts any filter or monitor daemons that died while the VM
+// was still running. It calls each startXxx wrapper, which is idempotent: alive
+// daemons are detected via PID-based liveness and left alone; dead ones have
+// their stale socket/PID files cleaned up and a fresh daemon spawned. Resource
+// setup (port reconciliation, cloud-init, VM redefine, nwfilter) is intentionally
+// skipped — those are baked into the running VM and must not be touched.
+func recoverDaemons(w io.Writer, name string, inst *config.Instance, paths *config.Paths) error {
+	if err := startDNSFilter(w, name, paths, inst.DNS.LogLevel); err != nil {
+		return fmt.Errorf("failed to recover DNS filter: %w", err)
+	}
+	if err := startHTTPFilter(w, name, paths, inst.HTTP.LogLevel); err != nil {
+		return fmt.Errorf("failed to recover HTTP filter: %w", err)
+	}
+	if inst.Monitor.Enabled {
+		if err := startMonitorDaemon(w, name, paths); err != nil {
+			return fmt.Errorf("failed to recover monitor daemon: %w", err)
+		}
+	}
+	return nil
+}
+
 // startFilters starts DNS and HTTP filter daemons and sets up their resources.
 func startFilters(ctx context.Context, w io.Writer, f *factory.Factory, be backend.Backend, name string, inst *config.Instance, paths *config.Paths) error {
 	// Start dnsfilter daemon
 	fmt.Fprintln(w, "Starting DNS filter...")
-	if err := startDNSFilter(name, paths, inst.DNS.LogLevel); err != nil {
+	if err := startDNSFilter(w, name, paths, inst.DNS.LogLevel); err != nil {
 		return fmt.Errorf("failed to start DNS filter: %w", err)
 	}
 
@@ -157,7 +182,7 @@ func startFilters(ctx context.Context, w io.Writer, f *factory.Factory, be backe
 
 	// Start httpfilter daemon
 	fmt.Fprintln(w, "Starting HTTP filter...")
-	if err := startHTTPFilter(name, paths, inst.HTTP.LogLevel); err != nil {
+	if err := startHTTPFilter(w, name, paths, inst.HTTP.LogLevel); err != nil {
 		return fmt.Errorf("failed to start HTTP filter: %w", err)
 	}
 
@@ -191,7 +216,7 @@ func startVMAndApplyFilter(ctx context.Context, w io.Writer, be backend.Backend,
 	// Start monitor daemon (if enabled)
 	if inst.Monitor.Enabled {
 		fmt.Fprintln(w, "Starting monitor daemon...")
-		if err := startMonitorDaemon(name, paths); err != nil {
+		if err := startMonitorDaemon(w, name, paths); err != nil {
 			// Monitor was explicitly enabled - failure should be fatal
 			// so the user knows their security monitoring isn't working
 			return fmt.Errorf("failed to start monitor daemon: %w", err)
@@ -234,16 +259,16 @@ func waitForIP(w io.Writer, be backend.Backend, name string) string {
 	return ip
 }
 
-func startDNSFilter(name string, paths *config.Paths, logLevel string) error {
-	return startFilter(name, FilterDNS, FilterPaths{
+func startDNSFilter(w io.Writer, name string, paths *config.Paths, logLevel string) error {
+	return startFilter(w, name, FilterDNS, FilterPaths{
 		Socket:  paths.DNSSocket,
 		Log:     paths.DNSServiceLog,
 		PIDFile: paths.DNSPIDFile,
 	}, logLevel)
 }
 
-func startHTTPFilter(name string, paths *config.Paths, logLevel string) error {
-	return startFilter(name, FilterHTTP, FilterPaths{
+func startHTTPFilter(w io.Writer, name string, paths *config.Paths, logLevel string) error {
+	return startFilter(w, name, FilterHTTP, FilterPaths{
 		Socket:  paths.HTTPSocket,
 		Log:     paths.HTTPServiceLog,
 		PIDFile: paths.HTTPPIDFile,
@@ -251,8 +276,8 @@ func startHTTPFilter(name string, paths *config.Paths, logLevel string) error {
 }
 
 // startMonitorDaemon starts the monitor daemon for an instance.
-func startMonitorDaemon(name string, paths *config.Paths) error {
-	return startDaemon(name, "monitor", DaemonPaths{
+func startMonitorDaemon(w io.Writer, name string, paths *config.Paths) error {
+	return startDaemon(w, name, "monitor", DaemonPaths{
 		Socket:  paths.MonitorRPCSocket,
 		PIDFile: paths.MonitorPIDFile,
 	})

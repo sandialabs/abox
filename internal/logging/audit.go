@@ -31,6 +31,9 @@ const (
 	ActionHTTPBlockSSRF     = "http.block.ssrf"
 	ActionHTTPBlockFronting = "http.block.domain_fronting"
 
+	// Filter allows worth auditing (permitted, but notable)
+	ActionHTTPAllowFronting = "http.allow.cross_origin"
+
 	// User commands
 	ActionSSH     = "access.ssh"
 	ActionSCP     = "access.scp"
