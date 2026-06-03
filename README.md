@@ -72,7 +72,7 @@ abox down --remove       # Stop and delete
 
 ## Installation
 
-**Requirements:** Linux with KVM/libvirt, Go 1.25+
+**Requirements:** Linux with KVM/libvirt, Go 1.26+
 
 ```bash
 # Debian/Ubuntu
