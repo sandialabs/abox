@@ -92,6 +92,43 @@ func TestBuildArgs_Full(t *testing.T) {
 	assertArgsEqual(t, got, want)
 }
 
+func TestBuildArgs_WithAddresses(t *testing.T) {
+	cfg := HelperConfig{
+		BinaryPath:    "/opt/vmnet-helper/bin/vmnet-helper",
+		OperationMode: ModeHost,
+		SocketFD:      3,
+		StartAddress:  "192.168.128.1",
+		EndAddress:    "192.168.128.254",
+		SubnetMask:    "255.255.255.0",
+	}
+	got := BuildArgs(cfg)
+	want := []string{
+		"/opt/vmnet-helper/bin/vmnet-helper",
+		"--fd=3",
+		"--operation-mode=host",
+		"--start-address=192.168.128.1",
+		"--end-address=192.168.128.254",
+		"--subnet-mask=255.255.255.0",
+	}
+	assertArgsEqual(t, got, want)
+}
+
+func TestBuildArgs_AddressesOmittedWhenEmpty(t *testing.T) {
+	cfg := HelperConfig{
+		BinaryPath:    "/opt/vmnet-helper/bin/vmnet-helper",
+		OperationMode: ModeHost,
+		SocketFD:      3,
+	}
+	got := BuildArgs(cfg)
+	for _, flag := range []string{"--start-address=", "--end-address=", "--subnet-mask="} {
+		for _, a := range got {
+			if strings.HasPrefix(a, flag) {
+				t.Errorf("unexpected %s in %v when addresses unset", flag, got)
+			}
+		}
+	}
+}
+
 func TestBuildArgs_FixedOrder(t *testing.T) {
 	// --fd must precede --operation-mode must precede conditional flags.
 	cfg := HelperConfig{

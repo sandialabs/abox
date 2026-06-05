@@ -5,18 +5,22 @@ package darwin
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/sandialabs/abox/internal/backend"
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/vfkit"
+	"github.com/sandialabs/abox/internal/vmnethelper"
 )
 
 // VMManager implements backend.VMManager for macOS via vfkit.
@@ -37,6 +41,63 @@ func loadInstanceState(name string) (*config.Instance, *config.Paths, error) {
 func vfkitPIDFile(name string) string {
 	runtimeDir := config.RuntimeDirOr(os.TempDir())
 	return filepath.Join(runtimeDir, fmt.Sprintf("abox-%s-vfkit.pid", name))
+}
+
+// vmnetHelperPIDFile returns the path to the vmnet-helper PID file for the
+// given instance. Each VM has its own helper process (= its own bridgeN).
+func vmnetHelperPIDFile(name string) string {
+	runtimeDir := config.RuntimeDirOr(os.TempDir())
+	return filepath.Join(runtimeDir, fmt.Sprintf("abox-%s-vmnethelper.pid", name))
+}
+
+// deriveVMNetAddresses computes the vmnet-helper --subnet-mask and
+// --end-address for the instance's allocated subnet. The DHCP pool's start
+// address is the gateway itself (the caller passes inst.Gateway to
+// vmnet-helper directly); the end address is the last usable host of the
+// subnet (broadcast − 1). The mask and end are derived from the actual CIDR,
+// so this works for any IPv4 prefix, not just /24.
+//
+// It rejects anything that couldn't host the VM: a non-IPv4 CIDR, a subnet
+// smaller than /30 (no room for both a gateway and a DHCP client), or a
+// gateway that isn't a usable host strictly below the pool's end address.
+func deriveVMNetAddresses(subnetCIDR, gateway string) (subnetMask, endAddress string, err error) {
+	_, ipNet, err := net.ParseCIDR(subnetCIDR)
+	if err != nil {
+		return "", "", fmt.Errorf("parse subnet %q: %w", subnetCIDR, err)
+	}
+	network := ipNet.IP.To4()
+	mask := net.IP(ipNet.Mask).To4()
+	if network == nil || mask == nil {
+		return "", "", fmt.Errorf("subnet %q is not IPv4", subnetCIDR)
+	}
+
+	gw := net.ParseIP(gateway).To4()
+	if gw == nil {
+		return "", "", fmt.Errorf("invalid IPv4 gateway %q", gateway)
+	}
+
+	netNum := binary.BigEndian.Uint32(network)
+	hostMask := ^binary.BigEndian.Uint32(mask) // 1s across the host bits
+	// hostMask is (number of addresses − 1). A /30 has hostMask 3 (network +
+	// gateway + one DHCP host + broadcast); anything smaller can't host a VM.
+	if hostMask < 3 {
+		return "", "", fmt.Errorf("subnet %s is too small (need at least a /30)", subnetCIDR)
+	}
+	broadcastNum := netNum | hostMask
+	endNum := broadcastNum - 1 // last usable host; broadcast is reserved
+
+	gwNum := binary.BigEndian.Uint32(gw)
+	// Gateway must be a host above the network address and strictly below the
+	// pool end, leaving at least one address for the VM's DHCP lease.
+	if gwNum <= netNum || gwNum >= endNum {
+		return "", "", fmt.Errorf(
+			"gateway %s is not a usable host below the end of subnet %s", gateway, subnetCIDR)
+	}
+
+	subnetMask = fmt.Sprintf("%d.%d.%d.%d", mask[0], mask[1], mask[2], mask[3])
+	endAddress = fmt.Sprintf("%d.%d.%d.%d",
+		byte(endNum>>24), byte(endNum>>16), byte(endNum>>8), byte(endNum))
+	return subnetMask, endAddress, nil
 }
 
 // backendUUID extracts the VM UUID from the instance's BackendConfig.
@@ -200,33 +261,125 @@ func (m *VMManager) Create(ctx context.Context, inst *config.Instance, paths *co
 	return nil
 }
 
-// Start launches the vfkit process for the instance.
-func (m *VMManager) Start(ctx context.Context, name string) error {
+// Start launches the vmnet-helper and vfkit processes for the instance,
+// connected by a datagram socketpair carrying raw L2 frames.
+//
+// The flow:
+//  1. Resolve the vmnet-helper binary and derive the per-VM addressing from
+//     the instance's allocated subnet.
+//  2. Create an AF_UNIX SOCK_DGRAM socketpair — vmnet-helper requires
+//     datagram framing (one raw ethernet frame per datagram).
+//  3. Launch vmnet-helper in host mode pinned to the instance's subnet; it
+//     consumes one socketpair end.
+//  4. Reconcile: the gateway vmnet hands out must equal the one already baked
+//     into cloud-init, else the subnet is contended — fail loudly.
+//  5. Launch vfkit with virtio-net on the other socketpair end.
+//  6. Persist the resolved bridge so post-boot pf rules can scope to it.
+func (m *VMManager) Start(_ context.Context, name string) error {
 	inst, paths, err := loadInstanceState(name)
 	if err != nil {
 		return err
 	}
 
 	pidFile := vfkitPIDFile(name)
+	helperPID := vmnetHelperPIDFile(name)
 
 	if vfkit.IsRunning(pidFile) {
 		return fmt.Errorf("VM %q is already running", name)
 	}
 
-	// Clean up stale PID file from a previous crash.
+	// Clean up stale PID files from a previous crash.
 	_ = vfkit.CleanupPIDFile(pidFile)
+	_ = vmnethelper.CleanupPIDFile(helperPID)
 
-	cfg := buildVMConfig(inst, paths)
-
-	// TODO(phase-11.3): replace nil with the caller-side socketpair end
-	// that is connected to a vmnet-helper process. Currently fails fast
-	// with "vfkit: netFD is required" — expected until 11.3 lands.
-	pid, err := vfkit.StartVM(cfg, nil)
+	binPath, err := vmnethelper.ResolveBinaryPath()
 	if err != nil {
-		return fmt.Errorf("failed to start VM: %w", err)
+		return fmt.Errorf("failed to locate vmnet-helper: %w", err)
 	}
 
-	logging.Debug("VM started", "name", name, "pid", pid)
+	subnetMask, endAddress, err := deriveVMNetAddresses(inst.Subnet, inst.Gateway)
+	if err != nil {
+		return err
+	}
+
+	// Datagram socketpair: vmnetEnd → vmnet-helper, vfkitEnd → vfkit virtio-net.
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
+	if err != nil {
+		return fmt.Errorf("create socketpair: %w", err)
+	}
+	vmnetEnd := os.NewFile(uintptr(fds[0]), "vmnet")
+	vfkitEnd := os.NewFile(uintptr(fds[1]), "vfkit")
+
+	// Defensive cleanup: vmnethelper.Start and vfkit.StartVM each close their
+	// own end once launched, but not on every early-return path. *os.File.Close
+	// is idempotent, so closing an already-consumed end is a harmless no-op.
+	// Once both have launched (launched=true) we leave the fds to the children.
+	launched := false
+	defer func() {
+		if !launched {
+			_ = vmnetEnd.Close()
+			_ = vfkitEnd.Close()
+		}
+	}()
+
+	helperCfg := vmnethelper.HelperConfig{
+		Name:          name,
+		InterfaceID:   backendUUID(inst),
+		OperationMode: vmnethelper.ModeHost,
+		SocketFD:      vmnethelper.ChildSocketFD, // ExtraFiles[0] → fd 3 in the child
+		UseSudo:       vmnethelper.NeedsSudo(),
+		BinaryPath:    binPath,
+		PIDFile:       helperPID,
+		LogFile:       filepath.Join(paths.LogsDir, "vmnet-helper.log"),
+		StartAddress:  inst.Gateway,
+		EndAddress:    endAddress,
+		SubnetMask:    subnetMask,
+	}
+
+	res, err := vmnethelper.Start(helperCfg, vmnetEnd)
+	if err != nil {
+		return fmt.Errorf("failed to start vmnet-helper: %w", err)
+	}
+
+	// Determinism guard (option A): cloud-init baked in inst.Gateway pre-boot.
+	// If vmnet handed out a different subnet, someone else holds ours and the
+	// VM's networking would be misconfigured — fail rather than boot broken.
+	if res.StartAddress != inst.Gateway {
+		_ = vmnethelper.ForceStop(helperPID)
+		return fmt.Errorf(
+			"vmnet-helper assigned gateway %s but instance %q expects %s "+
+				"(subnet %s may be in use by another process)",
+			res.StartAddress, name, inst.Gateway, inst.Subnet)
+	}
+
+	cfg := buildVMConfig(inst, paths)
+	cfg.NetFD = vfkit.NetFDChild
+
+	pid, err := vfkit.StartVM(cfg, vfkitEnd)
+	if err != nil {
+		// Avoid an orphaned helper + bridge.
+		_ = vmnethelper.ForceStop(helperPID)
+		return fmt.Errorf("failed to start VM: %w", err)
+	}
+	launched = true
+
+	// Persist the resolved bridge so the post-boot pf step can scope the
+	// per-VM IPv6 block to this interface.
+	if inst.BackendConfig == nil {
+		inst.BackendConfig = make(map[string]any)
+	}
+	inst.BackendConfig["bridge"] = res.BridgeInterface
+	if err := config.Save(inst, paths); err != nil {
+		logging.Warn("failed to persist bridge interface", "instance", name, "error", err)
+	}
+
+	logging.Debug("VM started",
+		"name", name,
+		"pid", pid,
+		"helper_pid", res.PID,
+		"bridge", res.BridgeInterface,
+		"gateway", res.StartAddress,
+	)
 	return nil
 }
 
@@ -234,45 +387,58 @@ func (m *VMManager) Start(ctx context.Context, name string) error {
 // falling back to SIGTERM+SIGKILL if the API is unreachable.
 // The caller (stop command) polls IsRunning() until the process exits,
 // so we always fall through to StopVM which handles PID file cleanup.
-func (m *VMManager) Stop(ctx context.Context, name string) error {
+func (m *VMManager) Stop(_ context.Context, name string) error {
 	pidFile := vfkitPIDFile(name)
-
-	inst, _, err := loadInstanceState(name)
-	if err != nil {
-		return vfkit.StopVM(pidFile)
-	}
+	helperPID := vmnetHelperPIDFile(name)
 
 	// Try REST API graceful stop first (ACPI shutdown).
-	if uri := restfulURI(inst); uri != "" {
-		if err := vfkit.RequestStop(uri); err != nil {
-			logging.Debug("REST API stop failed, falling back to signal", "error", err)
-		} else {
-			// REST API accepted the stop request. Fall through to StopVM
-			// which will wait for the process to exit and clean up the PID file.
-			logging.Debug("REST API stop requested, waiting for process exit")
+	if inst, _, err := loadInstanceState(name); err == nil {
+		if uri := restfulURI(inst); uri != "" {
+			if rerr := vfkit.RequestStop(uri); rerr != nil {
+				logging.Debug("REST API stop failed, falling back to signal", "error", rerr)
+			} else {
+				logging.Debug("REST API stop requested, waiting for process exit")
+			}
 		}
 	}
 
-	return vfkit.StopVM(pidFile)
+	// Stop vfkit before the helper so the VM releases the socket first.
+	vmErr := vfkit.StopVM(pidFile)
+
+	// vmnet-helper does NOT auto-exit when vfkit closes the socket, so this
+	// teardown is mandatory — otherwise every stop leaks a helper + bridge.
+	if herr := vmnethelper.Stop(helperPID); herr != nil {
+		logging.Debug("failed to stop vmnet-helper", "instance", name, "error", herr)
+	}
+
+	return vmErr
 }
 
-// ForceStop forcefully stops a running VM via SIGKILL.
-func (m *VMManager) ForceStop(ctx context.Context, name string) error {
-	return vfkit.ForceStopVM(vfkitPIDFile(name))
+// ForceStop forcefully stops the VM and its vmnet-helper via SIGKILL.
+func (m *VMManager) ForceStop(_ context.Context, name string) error {
+	vmErr := vfkit.ForceStopVM(vfkitPIDFile(name))
+	if herr := vmnethelper.ForceStop(vmnetHelperPIDFile(name)); herr != nil {
+		logging.Debug("failed to force-stop vmnet-helper", "instance", name, "error", herr)
+	}
+	return vmErr
 }
 
 // Remove ensures the VM is stopped and clears backend state.
-func (m *VMManager) Remove(ctx context.Context, name string) error {
+func (m *VMManager) Remove(_ context.Context, name string) error {
 	pidFile := vfkitPIDFile(name)
+	helperPID := vmnetHelperPIDFile(name)
 
+	// Best-effort force-stop of both processes; tolerate either being absent.
 	if vfkit.IsRunning(pidFile) {
-		if err := m.ForceStop(ctx, name); err != nil {
-			return fmt.Errorf("failed to stop VM before removal: %w", err)
-		}
+		_ = vfkit.ForceStopVM(pidFile)
+	}
+	if vmnethelper.IsRunning(helperPID) {
+		_ = vmnethelper.ForceStop(helperPID)
 	}
 
-	// Clean up stale PID file.
+	// Clean up stale PID files.
 	_ = vfkit.CleanupPIDFile(pidFile)
+	_ = vmnethelper.CleanupPIDFile(helperPID)
 
 	// Clear backend state so Exists returns false.
 	inst, paths, err := loadInstanceState(name)
@@ -286,6 +452,7 @@ func (m *VMManager) Remove(ctx context.Context, name string) error {
 
 	delete(inst.BackendConfig, "uuid")
 	delete(inst.BackendConfig, "rest_port")
+	delete(inst.BackendConfig, "bridge")
 
 	if err := config.Save(inst, paths); err != nil {
 		return fmt.Errorf("failed to save config after removal: %w", err)

@@ -16,7 +16,6 @@ import (
 	"github.com/sandialabs/abox/internal/backend"
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/vfkit"
-	"github.com/sandialabs/abox/internal/vmnet"
 )
 
 const (
@@ -133,9 +132,11 @@ func (b *Backend) DiskFormat() string {
 	return "raw"
 }
 
-// NetworkDefaults returns the vmnet shared mode gateway and subnet.
-// This implements backend.SubnetProvider so the create flow uses
-// vmnet's managed network instead of allocating from the abox subnet pool.
+// NetworkDefaults allocates a deterministic per-instance /24 from the host-mode
+// vmnet pool (192.168.128.0/24, .129.0/24, …). This implements
+// backend.SubnetProvider so the create flow uses these values instead of the
+// shared abox subnet pool. The gateway (.1) is baked into cloud-init at create
+// time; VMManager.Start later pins vmnet-helper to exactly this subnet.
 func (b *Backend) NetworkDefaults() (gateway, subnet string) {
-	return vmnet.GatewayIP(), vmnet.Subnet()
+	return allocateHostSubnet()
 }

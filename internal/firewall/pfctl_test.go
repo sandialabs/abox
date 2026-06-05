@@ -70,7 +70,7 @@ func TestPfctlClient_ApplyInstanceRules_Success(t *testing.T) {
 	}
 
 	client := NewPfctlClient(mock)
-	if err := client.ApplyInstanceRules("dev", "192.168.64.5", "192.168.64.1", 5353, 8443); err != nil {
+	if err := client.ApplyInstanceRules("dev", "192.168.128.5", "192.168.128.1", "bridge101", 5353, 8443); err != nil {
 		t.Fatalf("ApplyInstanceRules() error = %v", err)
 	}
 
@@ -83,12 +83,13 @@ func TestPfctlClient_ApplyInstanceRules_Success(t *testing.T) {
 
 	content := loadedReq.RulesContent
 	for _, want := range []string{
-		"rdr pass proto udp from 192.168.64.5 to any port 53 -> 127.0.0.1 port 5353",
-		"rdr pass proto tcp from 192.168.64.5 to any port 53 -> 127.0.0.1 port 5353",
-		"pass quick proto udp from 192.168.64.5 port 68 to any port 67",
-		"pass quick proto tcp from 192.168.64.5 to 192.168.64.1 port 8443",
-		"pass quick proto icmp from 192.168.64.5 to 192.168.64.1",
-		"block drop quick from 192.168.64.5 to any",
+		"rdr pass proto udp from 192.168.128.5 to any port 53 -> 127.0.0.1 port 5353",
+		"rdr pass proto tcp from 192.168.128.5 to any port 53 -> 127.0.0.1 port 5353",
+		"block drop quick on bridge101 inet6 all",
+		"pass quick proto udp from 192.168.128.5 port 68 to any port 67",
+		"pass quick proto tcp from 192.168.128.5 to 192.168.128.1 port 8443",
+		"pass quick proto icmp from 192.168.128.5 to 192.168.128.1",
+		"block drop quick from 192.168.128.5 to any",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("missing rule %q in:\n%s", want, content)
@@ -109,7 +110,7 @@ func TestPfctlClient_ApplyInstanceRules_RPCError(t *testing.T) {
 	}
 
 	client := NewPfctlClient(mock)
-	if err := client.ApplyInstanceRules("dev", "192.168.64.5", "192.168.64.1", 5353, 8443); err == nil {
+	if err := client.ApplyInstanceRules("dev", "192.168.128.5", "192.168.128.1", "bridge101", 5353, 8443); err == nil {
 		t.Fatal("expected error when RPC fails")
 	}
 
@@ -175,19 +176,23 @@ func TestPfctlClient_Flush_ErrorHandled(t *testing.T) {
 }
 
 func TestBuildInstanceRules(t *testing.T) {
-	rules := buildInstanceRules("192.168.64.5", "192.168.64.1", 5353, 8443)
+	rules := buildInstanceRules("192.168.128.5", "192.168.128.1", "bridge101", 5353, 8443)
 
 	// Order matters: rdr rules must precede filter rules in a PF ruleset.
 	rdrIdx := strings.Index(rules, "rdr pass proto udp")
-	passIdx := strings.Index(rules, "pass quick proto udp from 192.168.64.5 port 68")
-	blockIdx := strings.Index(rules, "block drop quick from 192.168.64.5 to any")
+	v6Idx := strings.Index(rules, "block drop quick on bridge101 inet6 all")
+	passIdx := strings.Index(rules, "pass quick proto udp from 192.168.128.5 port 68")
+	blockIdx := strings.Index(rules, "block drop quick from 192.168.128.5 to any")
 
-	if rdrIdx < 0 || passIdx < 0 || blockIdx < 0 {
+	if rdrIdx < 0 || v6Idx < 0 || passIdx < 0 || blockIdx < 0 {
 		t.Fatalf("missing expected rule category in:\n%s", rules)
 	}
-	if rdrIdx >= passIdx || passIdx >= blockIdx {
-		t.Errorf("rules out of order (rdr=%d pass=%d block=%d):\n%s",
-			rdrIdx, passIdx, blockIdx, rules)
+	// rdr rules first; the inet6 block and pass rules are all filter rules
+	// (their relative order doesn't matter for correctness) but must come
+	// before the terminal default-deny.
+	if rdrIdx >= passIdx || passIdx >= blockIdx || v6Idx >= blockIdx {
+		t.Errorf("rules out of order (rdr=%d v6=%d pass=%d block=%d):\n%s",
+			rdrIdx, v6Idx, passIdx, blockIdx, rules)
 	}
 }
 
@@ -197,28 +202,32 @@ func TestValidatePfctlArgs(t *testing.T) {
 		inst     string
 		vmIP     string
 		gateway  string
+		bridge   string
 		dnsPort  int
 		httpPort int
 		wantErr  bool
 	}{
-		{name: "valid", inst: "dev", vmIP: "192.168.64.5", gateway: "192.168.64.1", dnsPort: 5353, httpPort: 8443},
-		{name: "empty name", inst: "", vmIP: "192.168.64.5", gateway: "192.168.64.1", dnsPort: 5353, httpPort: 8443, wantErr: true},
-		{name: "unsafe name", inst: "dev;rm", vmIP: "192.168.64.5", gateway: "192.168.64.1", dnsPort: 5353, httpPort: 8443, wantErr: true},
-		{name: "invalid vmIP", inst: "dev", vmIP: "not-ip", gateway: "192.168.64.1", dnsPort: 5353, httpPort: 8443, wantErr: true},
-		{name: "empty vmIP", inst: "dev", vmIP: "", gateway: "192.168.64.1", dnsPort: 5353, httpPort: 8443, wantErr: true},
-		{name: "IPv6 vmIP", inst: "dev", vmIP: "::1", gateway: "192.168.64.1", dnsPort: 5353, httpPort: 8443, wantErr: true},
-		{name: "invalid gateway", inst: "dev", vmIP: "192.168.64.5", gateway: "bad", dnsPort: 5353, httpPort: 8443, wantErr: true},
-		{name: "dns port too low", inst: "dev", vmIP: "192.168.64.5", gateway: "192.168.64.1", dnsPort: 53, httpPort: 8443, wantErr: true},
-		{name: "dns port too high", inst: "dev", vmIP: "192.168.64.5", gateway: "192.168.64.1", dnsPort: 70000, httpPort: 8443, wantErr: true},
-		{name: "http port too low", inst: "dev", vmIP: "192.168.64.5", gateway: "192.168.64.1", dnsPort: 5353, httpPort: 80, wantErr: true},
-		{name: "http port too high", inst: "dev", vmIP: "192.168.64.5", gateway: "192.168.64.1", dnsPort: 5353, httpPort: 70000, wantErr: true},
-		{name: "dns port lower bound", inst: "dev", vmIP: "192.168.64.5", gateway: "192.168.64.1", dnsPort: 1024, httpPort: 8443},
-		{name: "http port upper bound", inst: "dev", vmIP: "192.168.64.5", gateway: "192.168.64.1", dnsPort: 5353, httpPort: 65535},
+		{name: "valid", inst: "dev", vmIP: "192.168.128.5", gateway: "192.168.128.1", bridge: "bridge101", dnsPort: 5353, httpPort: 8443},
+		{name: "empty name", inst: "", vmIP: "192.168.128.5", gateway: "192.168.128.1", bridge: "bridge101", dnsPort: 5353, httpPort: 8443, wantErr: true},
+		{name: "unsafe name", inst: "dev;rm", vmIP: "192.168.128.5", gateway: "192.168.128.1", bridge: "bridge101", dnsPort: 5353, httpPort: 8443, wantErr: true},
+		{name: "invalid vmIP", inst: "dev", vmIP: "not-ip", gateway: "192.168.128.1", bridge: "bridge101", dnsPort: 5353, httpPort: 8443, wantErr: true},
+		{name: "empty vmIP", inst: "dev", vmIP: "", gateway: "192.168.128.1", bridge: "bridge101", dnsPort: 5353, httpPort: 8443, wantErr: true},
+		{name: "IPv6 vmIP", inst: "dev", vmIP: "::1", gateway: "192.168.128.1", bridge: "bridge101", dnsPort: 5353, httpPort: 8443, wantErr: true},
+		{name: "invalid gateway", inst: "dev", vmIP: "192.168.128.5", gateway: "bad", bridge: "bridge101", dnsPort: 5353, httpPort: 8443, wantErr: true},
+		{name: "empty bridge", inst: "dev", vmIP: "192.168.128.5", gateway: "192.168.128.1", bridge: "", dnsPort: 5353, httpPort: 8443, wantErr: true},
+		{name: "unsafe bridge", inst: "dev", vmIP: "192.168.128.5", gateway: "192.168.128.1", bridge: "bridge101; pass all", dnsPort: 5353, httpPort: 8443, wantErr: true},
+		{name: "non-bridge iface", inst: "dev", vmIP: "192.168.128.5", gateway: "192.168.128.1", bridge: "en0", dnsPort: 5353, httpPort: 8443, wantErr: true},
+		{name: "dns port too low", inst: "dev", vmIP: "192.168.128.5", gateway: "192.168.128.1", bridge: "bridge101", dnsPort: 53, httpPort: 8443, wantErr: true},
+		{name: "dns port too high", inst: "dev", vmIP: "192.168.128.5", gateway: "192.168.128.1", bridge: "bridge101", dnsPort: 70000, httpPort: 8443, wantErr: true},
+		{name: "http port too low", inst: "dev", vmIP: "192.168.128.5", gateway: "192.168.128.1", bridge: "bridge101", dnsPort: 5353, httpPort: 80, wantErr: true},
+		{name: "http port too high", inst: "dev", vmIP: "192.168.128.5", gateway: "192.168.128.1", bridge: "bridge101", dnsPort: 5353, httpPort: 70000, wantErr: true},
+		{name: "dns port lower bound", inst: "dev", vmIP: "192.168.128.5", gateway: "192.168.128.1", bridge: "bridge101", dnsPort: 1024, httpPort: 8443},
+		{name: "http port upper bound", inst: "dev", vmIP: "192.168.128.5", gateway: "192.168.128.1", bridge: "bridge101", dnsPort: 5353, httpPort: 65535},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validatePfctlArgs(tt.inst, tt.vmIP, tt.gateway, tt.dnsPort, tt.httpPort)
+			err := validatePfctlArgs(tt.inst, tt.vmIP, tt.gateway, tt.bridge, tt.dnsPort, tt.httpPort)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validatePfctlArgs() error = %v, wantErr %v", err, tt.wantErr)
 			}

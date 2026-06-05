@@ -199,6 +199,55 @@ func TestVfkitPIDFile(t *testing.T) {
 	}
 }
 
+func TestVMNetHelperPIDFile(t *testing.T) {
+	pidFile := vmnetHelperPIDFile("myvm")
+	if !filepath.IsAbs(pidFile) {
+		t.Errorf("vmnetHelperPIDFile() should return absolute path, got %q", pidFile)
+	}
+	if filepath.Base(pidFile) != "abox-myvm-vmnethelper.pid" {
+		t.Errorf("vmnetHelperPIDFile() basename = %q, want %q", filepath.Base(pidFile), "abox-myvm-vmnethelper.pid")
+	}
+}
+
+func TestDeriveVMNetAddresses(t *testing.T) {
+	tests := []struct {
+		name     string
+		subnet   string
+		gateway  string
+		wantMask string
+		wantEnd  string
+		wantErr  bool
+	}{
+		{name: "host pool base", subnet: "192.168.128.0/24", gateway: "192.168.128.1", wantMask: "255.255.255.0", wantEnd: "192.168.128.254"},
+		{name: "host pool next", subnet: "192.168.129.0/24", gateway: "192.168.129.1", wantMask: "255.255.255.0", wantEnd: "192.168.129.254"},
+		{name: "non-/24 prefix", subnet: "10.20.0.0/22", gateway: "10.20.0.1", wantMask: "255.255.252.0", wantEnd: "10.20.3.254"},
+		{name: "smallest usable /30", subnet: "192.168.130.0/30", gateway: "192.168.130.1", wantMask: "255.255.255.252", wantEnd: "192.168.130.2"},
+		{name: "bad subnet", subnet: "not-a-cidr", gateway: "192.168.128.1", wantErr: true},
+		{name: "bad gateway", subnet: "192.168.128.0/24", gateway: "nope", wantErr: true},
+		{name: "subnet too small /31", subnet: "10.0.0.0/31", gateway: "10.0.0.0", wantErr: true},
+		{name: "gateway is network address", subnet: "192.168.128.0/24", gateway: "192.168.128.0", wantErr: true},
+		{name: "gateway outside subnet", subnet: "192.168.128.0/24", gateway: "192.168.200.1", wantErr: true},
+		{name: "gateway at pool end leaves no room", subnet: "192.168.130.0/30", gateway: "192.168.130.2", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mask, end, err := deriveVMNetAddresses(tt.subnet, tt.gateway)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("deriveVMNetAddresses() err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if mask != tt.wantMask {
+				t.Errorf("mask = %q, want %q", mask, tt.wantMask)
+			}
+			if end != tt.wantEnd {
+				t.Errorf("end = %q, want %q", end, tt.wantEnd)
+			}
+		})
+	}
+}
+
 func TestBuildVMConfig(t *testing.T) {
 	inst := &config.Instance{
 		Name:          "testvm",

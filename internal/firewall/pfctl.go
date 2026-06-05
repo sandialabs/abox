@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -16,6 +17,11 @@ import (
 	"github.com/sandialabs/abox/internal/rpc"
 	"github.com/sandialabs/abox/internal/timeout"
 )
+
+// bridgeNameRE matches vmnet bridge interface names (bridge100, bridge101, …).
+// The bridge name is interpolated into a pfctl ruleset, so it must be strictly
+// validated to prevent rule injection.
+var bridgeNameRE = regexp.MustCompile(`^bridge[0-9]+$`)
 
 // PfctlClient manages macOS PF firewall rules for per-instance traffic
 // interception via the privilege helper RPC. Each instance gets its own
@@ -52,16 +58,16 @@ func (c *PfctlClient) EnsureEnabled() error {
 // proxy on the gateway, and ICMP to the gateway. Writes a marker file so
 // TrafficInterceptor.FilterExists can report accurate state without needing
 // its own privilege client.
-func (c *PfctlClient) ApplyInstanceRules(name, vmIP, gateway string, dnsPort, httpPort int) error {
-	if err := validatePfctlArgs(name, vmIP, gateway, dnsPort, httpPort); err != nil {
+func (c *PfctlClient) ApplyInstanceRules(name, vmIP, gateway, bridge string, dnsPort, httpPort int) error {
+	if err := validatePfctlArgs(name, vmIP, gateway, bridge, dnsPort, httpPort); err != nil {
 		return err
 	}
 
 	logging.Debug("applying PF instance rules",
-		"instance", name, "vm_ip", vmIP, "gateway", gateway,
+		"instance", name, "vm_ip", vmIP, "gateway", gateway, "bridge", bridge,
 		"dns_port", dnsPort, "http_port", httpPort)
 
-	rules := buildInstanceRules(vmIP, gateway, dnsPort, httpPort)
+	rules := buildInstanceRules(vmIP, gateway, bridge, dnsPort, httpPort)
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout.Default)
 	defer cancel()
@@ -137,16 +143,22 @@ func (c *PfctlClient) Flush(name string) {
 // buildInstanceRules generates the PF ruleset for a single instance:
 //   - rdr rules redirect VM DNS traffic (any :53) to 127.0.0.1:<dnsPort>
 //   - pass rules allow DHCP, HTTP proxy on the gateway, and ICMP to the gateway
+//   - an inet6 block on the VM's bridge kills all IPv6 (vmnet has no flag to
+//     disable NAT66/link-local v6, which would otherwise leak past the
+//     IPv4-only default-deny rule)
 //   - a terminal "block drop quick" drops everything else from the VM
 //
-// Rules are anchored by source IP rather than interface so they don't need
-// vmnet bridge name detection (bridge100/bridge101/...).
-func buildInstanceRules(vmIP, gateway string, dnsPort, httpPort int) string {
+// IPv4 rules are anchored by source IP rather than interface so they don't need
+// vmnet bridge name detection. The IPv6 block is scoped to the per-VM bridge so
+// it only affects this instance, never the host or other VMs.
+func buildInstanceRules(vmIP, gateway, bridge string, dnsPort, httpPort int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# abox instance traffic rules for %s\n", vmIP)
 	fmt.Fprintf(&b, "# DNS redirect (VM queries to any :53 -> local dnsfilter)\n")
 	fmt.Fprintf(&b, "rdr pass proto udp from %s to any port 53 -> 127.0.0.1 port %d\n", vmIP, dnsPort)
 	fmt.Fprintf(&b, "rdr pass proto tcp from %s to any port 53 -> 127.0.0.1 port %d\n", vmIP, dnsPort)
+	fmt.Fprintf(&b, "# Block all IPv6 on this VM's bridge (vmnet has no flag to disable NAT66)\n")
+	fmt.Fprintf(&b, "block drop quick on %s inet6 all\n", bridge)
 	fmt.Fprintf(&b, "# Allowlisted outbound\n")
 	fmt.Fprintf(&b, "pass quick proto udp from %s port 68 to any port 67\n", vmIP)
 	fmt.Fprintf(&b, "pass quick proto tcp from %s to %s port %d\n", vmIP, gateway, httpPort)
@@ -157,7 +169,7 @@ func buildInstanceRules(vmIP, gateway string, dnsPort, httpPort int) string {
 }
 
 // validatePfctlArgs validates the inputs for PF rule creation.
-func validatePfctlArgs(name, vmIP, gateway string, dnsPort, httpPort int) error {
+func validatePfctlArgs(name, vmIP, gateway, bridge string, dnsPort, httpPort int) error {
 	if name == "" {
 		return errors.New("instance name is required")
 	}
@@ -172,6 +184,9 @@ func validatePfctlArgs(name, vmIP, gateway string, dnsPort, httpPort int) error 
 	}
 	if ip := net.ParseIP(gateway); ip == nil || ip.To4() == nil {
 		return fmt.Errorf("invalid gateway IP address %q", gateway)
+	}
+	if !bridgeNameRE.MatchString(bridge) {
+		return fmt.Errorf("invalid bridge interface %q: must match bridge[0-9]+", bridge)
 	}
 
 	if dnsPort < 1024 || dnsPort > 65535 {

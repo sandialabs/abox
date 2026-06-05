@@ -22,10 +22,10 @@ import (
 // into UX bugs during `abox start`.
 const startJSONReadTimeout = 5 * time.Second
 
-// requiredChildFD is the fd number the vmnet-helper child sees the
-// socketpair end at. ExtraFiles[0] maps to fd 3 in the child; 11.1
-// enforces this, 11.3 revisits if necessary.
-const requiredChildFD = 3
+// ChildSocketFD is the fd number the vmnet-helper child sees the socketpair
+// end at: cmd.ExtraFiles[0] maps to fd 3 in the child. Callers must set
+// HelperConfig.SocketFD to this value; Start enforces it.
+const ChildSocketFD = 3
 
 // Start launches vmnet-helper with cfg applied. The caller owns fdEnd
 // (one half of a syscall.Socketpair); Start attaches it to
@@ -44,10 +44,10 @@ func Start(cfg HelperConfig, fdEnd *os.File) (*StartResult, error) {
 	if cfg.BinaryPath == "" {
 		return nil, errors.New("vmnethelper: BinaryPath is empty")
 	}
-	if cfg.SocketFD != requiredChildFD {
+	if cfg.SocketFD != ChildSocketFD {
 		return nil, fmt.Errorf(
 			"vmnethelper: SocketFD must be %d (ExtraFiles[0] maps to fd %d in the child), got %d",
-			requiredChildFD, requiredChildFD, cfg.SocketFD,
+			ChildSocketFD, ChildSocketFD, cfg.SocketFD,
 		)
 	}
 	if fdEnd == nil {

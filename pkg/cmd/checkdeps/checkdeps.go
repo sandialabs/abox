@@ -20,6 +20,18 @@ type dependency struct {
 	name     string
 	required bool
 	usedBy   string
+	// check, when non-nil, replaces the default PATH lookup. Used for tools
+	// that are not on PATH (e.g. vmnet-helper, which installs to libexec).
+	check func() error
+}
+
+// checkDep verifies a single dependency, using its custom check if present
+// and otherwise falling back to a PATH lookup.
+func checkDep(dep dependency) error {
+	if dep.check != nil {
+		return dep.check()
+	}
+	return checkExecutable(dep.name)
 }
 
 // Options holds the options for the check-deps command.
@@ -96,7 +108,7 @@ func runCheckDeps(opts *Options) error {
 func checkAllDependencies(w io.Writer, quiet bool) []string {
 	var missingRequired []string
 	for _, dep := range dependencies {
-		found := checkExecutable(dep.name) == nil
+		found := checkDep(dep) == nil
 
 		if !quiet {
 			status := "ok"
@@ -141,7 +153,7 @@ func RunQuiet() bool {
 	// Check required dependencies
 	for _, dep := range dependencies {
 		if dep.required {
-			if err := checkExecutable(dep.name); err != nil {
+			if err := checkDep(dep); err != nil {
 				return false
 			}
 		}

@@ -1,6 +1,6 @@
 # macOS Support
 
-abox runs natively on macOS (Apple Silicon) using [vfkit](https://github.com/crc-org/vfkit) as the VM backend, `pfctl` for packet filtering, and macOS's built-in `vmnet` framework for networking. This document covers installation, first-run behavior, and platform-specific notes that differ from the Linux backend.
+abox runs natively on macOS (Apple Silicon) using [vfkit](https://github.com/crc-org/vfkit) as the VM backend, `pfctl` for packet filtering, and [vmnet-helper](https://github.com/nirs/vmnet-helper) for per-VM networking. Each VM gets its own isolated vmnet interface (its own `bridgeN`) on its own `/24`. This document covers installation, first-run behavior, and platform-specific notes that differ from the Linux backend.
 
 ## Supported Platforms
 
@@ -14,7 +14,18 @@ abox shells out to a small set of tools, all available via [Homebrew](https://br
 
 ```bash
 brew install vfkit qemu xorriso
+brew tap nirs/vmnet-helper && brew install vmnet-helper
 ```
+
+`vmnet-helper` provides each VM's network interface. It is **required**. If you
+prefer not to use Homebrew, install it via the upstream script:
+
+```bash
+curl -fsSL https://github.com/nirs/vmnet-helper/releases/latest/download/install.sh | bash
+```
+
+abox locates the binary at the standard Homebrew/install-script paths, or you can
+point at it explicitly with `ABOX_VMNET_HELPER_PATH=/abs/path/to/vmnet-helper`.
 
 For `abox mount` (optional — SSHFS-based VM filesystem mounting):
 
@@ -70,6 +81,41 @@ The first `pfctl -f /etc/pf.conf` discards in-memory rules that vmnet installs a
 - A manually launched `vfkit`/`vz` VM
 
 **Recommendation:** stop other VM runtimes before the first `abox start` on a fresh install, or accept a one-time reset and restart them afterwards. Subsequent `abox start` invocations do not reload the main ruleset and do not risk this disruption.
+
+## Networking
+
+Each abox instance gets its own [vmnet-helper](https://github.com/nirs/vmnet-helper)
+process, which owns one vmnet interface — one `bridgeN` on the host — giving every
+VM an isolated bridge, the structural analog of libvirt's per-VM bridge on Linux.
+
+- **Host mode, not shared.** The helper runs in vmnet `host` mode (`--operation-mode=host`):
+  no NAT path out of the VM. The host is the VM's gateway, DNS resolver, and HTTP
+  proxy; the host makes all external connections on the VM's behalf, enforced by
+  `pfctl`. This is a stronger sandbox than shared-mode NAT.
+- **Deterministic per-VM subnets.** abox allocates each instance its own `/24` from
+  the `192.168.128.0/24`, `192.168.129.0/24`, … pool at create time and pins
+  vmnet-helper to exactly that subnet. The gateway (`.1`) is baked into cloud-init
+  before boot. This pool deliberately avoids `192.168.64.x`, which Docker Desktop /
+  OrbStack / Podman Machine use for vmnet shared mode — so abox VMs never collide
+  with those runtimes' addresses.
+- **IPv6 is blocked.** vmnet has no flag to disable its IPv6/NAT66 path, so abox
+  installs a `block drop quick on <bridge> inet6 all` rule scoped to each VM's
+  bridge. IPv6 egress from the VM fails even if the guest auto-configures a v6
+  address. The block is per-bridge, so it never affects the host or other VMs.
+- **VM-to-VM isolation is automatic.** The per-instance `pfctl` rules default-deny
+  everything from the VM except gateway traffic, which inherently blocks one VM from
+  reaching another — no separate isolation flag is needed.
+
+### vmnet-helper and sudo
+
+On **macOS 26 and later**, vmnet-helper runs without `sudo` — no extra prompt. On
+**macOS 15 and earlier** it requires root, so abox launches it via `sudo -n` and you
+may see a sudo prompt at `abox start` (in addition to the privilege-helper prompt).
+
+The helper is torn down when its VM stops (`abox stop`/`abox remove`); it does not
+auto-exit on its own, so abox stops it explicitly. After a stop you can confirm no
+leak with `pgrep -fl vmnet-helper` (empty) and that the VM's `bridgeN` is gone from
+`ifconfig`.
 
 ## PF Anchor Wiring
 
@@ -144,7 +190,7 @@ The underlying gRPC privilege server and its security boundary (token authentica
 |---------|----------------|--------|
 | Snapshots (`abox snapshot …`) | Not supported | vfkit has no native snapshot support |
 | Monitor / Tetragon events | Not supported | Tetragon relies on eBPF, which is Linux-only |
-| libvirt / nwfilter | Not used | Replaced by vfkit + vmnet + pfctl |
+| libvirt / nwfilter | Not used | Replaced by vfkit + vmnet-helper + pfctl |
 | Setuid privilege helper | Not available | macOS uses sudo only |
 | x86_64 guests | Not supported | Apple Silicon only; arm64 base images |
 

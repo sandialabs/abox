@@ -47,6 +47,15 @@ type HelperConfig struct {
 	BinaryPath      string // absolute path; caller populates via ResolveBinaryPath
 	PIDFile         string // where to write the process PID
 	LogFile         string // where to redirect stderr (optional)
+
+	// Host-mode deterministic addressing. When set, these pin the vmnet
+	// interface to a caller-chosen /24 instead of letting vmnet auto-assign.
+	// abox allocates a per-instance subnet at create time and bakes the
+	// gateway into cloud-init, so the helper must come up on exactly that
+	// subnet. All three are passed together or not at all.
+	StartAddress string // --start-address (the gateway / host IP, e.g. 192.168.128.1)
+	EndAddress   string // --end-address (last usable, e.g. 192.168.128.254)
+	SubnetMask   string // --subnet-mask (e.g. 255.255.255.0)
 }
 
 // StartResult is the parsed subset of vmnet-helper's one-line JSON
@@ -90,6 +99,9 @@ type startJSON struct {
 //	sudo -n <BinaryPath>
 //	  --fd=<SocketFD>
 //	  --operation-mode=<OperationMode>
+//	  [--start-address=<StartAddress>]
+//	  [--end-address=<EndAddress>]
+//	  [--subnet-mask=<SubnetMask>]
 //	  [--enable-isolation]
 //	  [--interface-id=<InterfaceID>]
 func BuildArgs(cfg HelperConfig) []string {
@@ -101,6 +113,16 @@ func BuildArgs(cfg HelperConfig) []string {
 
 	args = append(args, "--fd="+strconv.Itoa(cfg.SocketFD))
 	args = append(args, "--operation-mode="+cfg.OperationMode)
+
+	if cfg.StartAddress != "" {
+		args = append(args, "--start-address="+cfg.StartAddress)
+	}
+	if cfg.EndAddress != "" {
+		args = append(args, "--end-address="+cfg.EndAddress)
+	}
+	if cfg.SubnetMask != "" {
+		args = append(args, "--subnet-mask="+cfg.SubnetMask)
+	}
 
 	if cfg.EnableIsolation {
 		args = append(args, "--enable-isolation")

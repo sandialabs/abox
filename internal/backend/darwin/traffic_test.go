@@ -65,7 +65,7 @@ func TestTrafficInterceptor_FilterExists(t *testing.T) {
 	// the public contract: after a successful ApplyInstanceRules call,
 	// FilterExists reports true.
 	if err := firewall.NewPfctlClient(stubPrivilegeClient{}).ApplyInstanceRules(
-		"dev", "192.168.64.5", "192.168.64.1", 5353, 8443,
+		"dev", "192.168.128.5", "192.168.128.1", "bridge101", 5353, 8443,
 	); err != nil {
 		t.Fatalf("ApplyInstanceRules: %v", err)
 	}
