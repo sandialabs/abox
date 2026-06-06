@@ -11,6 +11,7 @@ LDFLAGS := -s -w \
 
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o abox ./cmd/abox
+	@if [ "$$(uname -s)" = "Darwin" ]; then codesign --force --sign - abox; fi
 
 build-helper:
 	@if [ "$$(uname -s)" = "Darwin" ]; then \

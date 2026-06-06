@@ -310,6 +310,28 @@ This checks: host configuration, VM state, network, DNS/HTTP filter services, SS
 
 ### macOS-Specific Issues
 
+#### abox is "killed" Immediately on Launch
+
+**Symptoms:**
+- Running `abox` (e.g. `abox version`) prints `killed` and exits with code 137
+- This happens right after building/installing from source
+- A crash report under `~/Library/Logs/DiagnosticReports/abox-*.ips` shows
+  `SIGKILL (Code Signature Invalid)`
+
+**Cause:** With `CGO_ENABLED=0`, Go's internal linker applies an ad-hoc
+signature flagged `linker-signed`. macOS 26's hardened Code Signing Monitor
+rejects that signature at `exec()` and kills the process — even though
+`codesign -v` validates the binary at rest.
+
+**Resolution:** re-sign the binary with a plain ad-hoc signature:
+
+```bash
+codesign --force --sign - ~/.local/bin/abox
+```
+
+`make build` and `make install` do this automatically on macOS, so this only
+affects binaries built with a bare `go build`.
+
 #### VM Exits Immediately After Start
 
 **Symptoms:**
