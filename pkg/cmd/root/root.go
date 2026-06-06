@@ -29,6 +29,7 @@ import (
 	"github.com/sandialabs/abox/pkg/cmd/overrides"
 	"github.com/sandialabs/abox/pkg/cmd/provision"
 	"github.com/sandialabs/abox/pkg/cmd/prune"
+	"github.com/sandialabs/abox/pkg/cmd/remote"
 	"github.com/sandialabs/abox/pkg/cmd/remove"
 	"github.com/sandialabs/abox/pkg/cmd/restart"
 	"github.com/sandialabs/abox/pkg/cmd/scp"
@@ -216,6 +217,7 @@ func addSubcommands(cmd *cobra.Command, f *factory.Factory) {
 	// Access commands
 	addGroupedCommand(cmd, ssh.NewCmdSSH(f, nil), groupAccess)
 	addGroupedCommand(cmd, scp.NewCmdSCP(f, nil), groupAccess)
+	addGroupedCommand(cmd, remote.NewCmdRemote(f), groupAccess)
 	addGroupedCommand(cmd, provision.NewCmdProvision(f, nil), groupAccess)
 	addGroupedCommand(cmd, forward.NewCmdForward(f), groupAccess)
 

@@ -32,7 +32,8 @@ point at it explicitly with `ABOX_VMNET_HELPER_PATH=/abs/path/to/vmnet-helper`.
 > **Note:** `abox mount`/`abox unmount` (SSHFS-based VM filesystem mounting)
 > are not available on macOS — they rely on FUSE, which on Apple Silicon would
 > require macFUSE (a kernel extension needing Reduced Security). Use `abox scp`
-> to move files instead.
+> to move files, or [`abox remote add`](vm-access.md#git-remotes-abox-remote)
+> to work with a git repository inside the VM directly from your host.
 
 Verify with:
 

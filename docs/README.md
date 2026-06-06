@@ -29,7 +29,7 @@
 
 | Topic | Document |
 |-------|----------|
-| SSH, SCP, mounts | [VM Access](vm-access.md) |
+| SSH, SCP, git remotes, mounts | [VM Access](vm-access.md) |
 | Export/import | [Export & Import](export-import.md) |
 | Problem solving | [Troubleshooting](troubleshooting.md) |
 

@@ -35,11 +35,12 @@ const (
 	ActionHTTPAllowFronting = "http.allow.cross_origin"
 
 	// User commands
-	ActionSSH     = "access.ssh"
-	ActionSCP     = "access.scp"
-	ActionTap     = "access.tap"
-	ActionMount   = "access.mount"
-	ActionUnmount = "access.unmount"
+	ActionSSH       = "access.ssh"
+	ActionSCP       = "access.scp"
+	ActionTap       = "access.tap"
+	ActionMount     = "access.mount"
+	ActionUnmount   = "access.unmount"
+	ActionRemoteAdd = "access.remote.add"
 
 	// Snapshots
 	ActionSnapshotCreate = "snapshot.create"

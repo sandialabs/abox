@@ -61,7 +61,8 @@ COMMON TASKS
 
 MACOS-SPECIFIC NOTES
   - 'abox mount'/'abox unmount' (SSHFS) are not available on macOS; use
-    'abox scp' instead.
+    'abox scp' to move files, or 'abox remote add <instance>:<path>' to work
+    with a git repository inside the VM from a host clone.
   - 'abox doctor' reports whether abox's PF anchor references are wired
     into /etc/pf.conf. The first 'abox start' adds them automatically.
   - 'abox teardown-pf' removes the anchor references (run before uninstall).
