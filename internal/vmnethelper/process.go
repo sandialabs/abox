@@ -287,7 +287,7 @@ func isHelperProcess(pid int) bool {
 		return false
 	}
 	comm := strings.TrimSpace(string(out))
-	return strings.Contains(comm, "vmnet-helper") || strings.HasSuffix(comm, "/sudo") || comm == "sudo"
+	return strings.Contains(comm, "vmnet-helper") || strings.HasSuffix(comm, "/"+cmdSudo) || comm == cmdSudo
 }
 
 // killChild is a best-effort SIGKILL for cleanup paths in Start where

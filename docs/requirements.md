@@ -9,6 +9,7 @@ Abox is tested on:
 - **Ubuntu 22.04+** (LTS recommended)
 - **Debian 13+** (Trixie and newer)
 - **Fedora 38+**
+- **AlmaLinux 9+, Rocky Linux 9+, CentOS Stream 9+** (RHEL family; requires [EPEL](https://docs.fedoraproject.org/en-US/epel/) for `fuse-sshfs`)
 - **Arch Linux** (rolling release)
 - **macOS 13+ on Apple Silicon** (arm64; see [macOS Support](macos.md))
 
@@ -35,9 +36,9 @@ Other Linux distributions with libvirt 8.0+ and QEMU 6.0+ should work. Intel Mac
 | iptables | Yes | iptables | iptables | DNS redirect rules |
 | pkexec | Yes* | policykit-1 | polkit | Privilege escalation |
 | sudo | Yes* | sudo | sudo | Privilege escalation (fallback) |
-| sshfs | Yes | sshfs | sshfs | Mount command |
+| sshfs | Yes | sshfs | fuse-sshfs (EPEL on RHEL) | Mount command |
 | fusermount | Yes | fuse3 | fuse3 | Unmount command |
-| genisoimage | Yes** | genisoimage | cdrkit | Cloud-init ISO creation |
+| genisoimage | Yes** | genisoimage | genisoimage (EPEL on RHEL) | Cloud-init ISO creation |
 | xorriso | Yes** | xorriso | xorriso | Cloud-init ISO creation |
 | tcpdump | No | tcpdump | tcpdump | Packet capture (tap command) |
 
@@ -126,7 +127,7 @@ sudo dnf install \
   qemu-img \
   openssh-clients \
   iptables \
-  sshfs \
+  fuse-sshfs \
   fuse3 \
   genisoimage
 
@@ -136,6 +137,37 @@ sudo usermod -aG libvirt $USER
 # Start libvirtd
 sudo systemctl enable --now libvirtd
 ```
+
+### RHEL / AlmaLinux / Rocky / CentOS Stream
+
+On the RHEL family, `fuse-sshfs` (and `genisoimage`) ship in EPEL, not the base
+repos, so enable EPEL first:
+
+```bash
+# Enable EPEL (provides fuse-sshfs, genisoimage)
+sudo dnf install -y epel-release
+
+# Required packages
+sudo dnf install \
+  libvirt \
+  libvirt-client \
+  qemu-kvm \
+  qemu-img \
+  openssh-clients \
+  iptables \
+  fuse-sshfs \
+  fuse3 \
+  xorriso
+
+# Add user to libvirt group
+sudo usermod -aG libvirt $USER
+
+# Start libvirtd
+sudo systemctl enable --now libvirtd
+```
+
+If `firewalld` is active, see [Firewall Configuration](#firewall-configuration)
+below — abox's iptables NAT rules can conflict with it.
 
 ### Arch Linux
 

@@ -28,12 +28,22 @@ const (
 // envBinaryPath is the env var used to override the resolved binary path.
 const envBinaryPath = "ABOX_VMNET_HELPER_PATH"
 
-// knownBinaryPaths are absolute paths tried (in order) after the env
+// cmdSudo is the privilege-escalation command vmnet-helper is launched under.
+const cmdSudo = "sudo"
+
+// Absolute paths to the vmnet-helper binary, tried (in order) after the env
 // override. They match vmnet-helper's Homebrew + install-script docs.
+const (
+	pathBrewAppleSilicon = "/opt/homebrew/opt/vmnet-helper/libexec/vmnet-helper" // Apple Silicon brew
+	pathBrewIntel        = "/usr/local/opt/vmnet-helper/libexec/vmnet-helper"    // Intel brew
+	pathInstallScript    = "/opt/vmnet-helper/bin/vmnet-helper"                  // install.sh script
+)
+
+// knownBinaryPaths are absolute paths tried (in order) after the env override.
 var knownBinaryPaths = []string{
-	"/opt/homebrew/opt/vmnet-helper/libexec/vmnet-helper", // Apple Silicon brew
-	"/usr/local/opt/vmnet-helper/libexec/vmnet-helper",    // Intel brew
-	"/opt/vmnet-helper/bin/vmnet-helper",                  // install.sh script
+	pathBrewAppleSilicon,
+	pathBrewIntel,
+	pathInstallScript,
 }
 
 // HelperConfig is the pure input to BuildArgs and Start.
@@ -107,7 +117,7 @@ type startJSON struct {
 func BuildArgs(cfg HelperConfig) []string {
 	var args []string
 	if cfg.UseSudo {
-		args = append(args, "sudo", "-n")
+		args = append(args, cmdSudo, "-n")
 	}
 	args = append(args, cfg.BinaryPath)
 

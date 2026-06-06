@@ -34,7 +34,8 @@ type BoxfileMonitor struct {
 
 // BoxfileHTTP holds HTTP proxy-related configuration in abox.yaml.
 type BoxfileHTTP struct {
-	MITM *bool `yaml:"mitm,omitempty"` // Enable TLS MITM (default: true). Pointer to distinguish unset from false.
+	MITM           *bool `yaml:"mitm,omitempty"`            // Enable TLS MITM (default: true). Pointer to distinguish unset from false.
+	MaxConnections *int  `yaml:"max_connections,omitempty"` // cap on concurrent client connections (default: 512). Pointer to distinguish unset.
 }
 
 // Boxfile represents the abox.yaml declarative configuration.
@@ -63,11 +64,11 @@ func DefaultBoxfile() *Boxfile {
 		Version: CurrentBoxfileVersion,
 		CPUs:    2,
 		Memory:  4096,
-		Disk:    "20G",
-		Base:    "ubuntu-24.04",
+		Disk:    config.DefaultDisk,
+		Base:    config.DefaultBase,
 		User:    "ubuntu",
 		DNS: BoxfileDNS{
-			Upstream: "8.8.8.8:53",
+			Upstream: config.DefaultUpstream,
 		},
 		HTTP: BoxfileHTTP{
 			MITM: &mitmDefault,
@@ -89,6 +90,15 @@ func (b *Boxfile) GetMITM() bool {
 		return true // Default to enabled for security
 	}
 	return *b.HTTP.MITM
+}
+
+// GetMaxConnections returns the HTTP proxy connection cap, defaulting to
+// config.DefaultHTTPMaxConnections if not set.
+func (b *Boxfile) GetMaxConnections() int {
+	if b.HTTP.MaxConnections == nil {
+		return config.DefaultHTTPMaxConnections
+	}
+	return *b.HTTP.MaxConnections
 }
 
 // Load reads abox.yaml from the specified directory (or current directory if empty).
@@ -163,6 +173,9 @@ func (b *Boxfile) Validate(baseDir string) error {
 	}
 	if err := b.validateOverrides(baseDir); err != nil {
 		return err
+	}
+	if b.HTTP.MaxConnections != nil && *b.HTTP.MaxConnections < 1 {
+		return fmt.Errorf("invalid http.max_connections in abox.yaml: must be >= 1 (got %d)", *b.HTTP.MaxConnections)
 	}
 	return b.validateDNS()
 }

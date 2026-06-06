@@ -465,20 +465,26 @@ func DomainExists(name string) bool {
 	return virshOutputContainsLine(name, "list", "--all", "--name")
 }
 
+// virsh domstate output values.
+const (
+	domStateRunning = "running"
+	domStateUnknown = "unknown"
+)
+
 // DomainIsRunning checks if a domain is running.
 func DomainIsRunning(name string) bool {
 	output, err := virsh("domstate", name)
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(output) == "running"
+	return strings.TrimSpace(output) == domStateRunning
 }
 
 // DomainState returns the state of a domain.
 func DomainState(name string) string {
 	output, err := virsh("domstate", name)
 	if err != nil {
-		return "unknown"
+		return domStateUnknown
 	}
 	return strings.TrimSpace(output)
 }

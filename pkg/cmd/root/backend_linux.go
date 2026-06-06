@@ -3,9 +3,10 @@
 package root
 
 import (
+	"github.com/spf13/cobra"
+
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 	"github.com/sandialabs/abox/pkg/cmd/helper"
-	"github.com/spf13/cobra"
 
 	// Register the libvirt backend on Linux.
 	_ "github.com/sandialabs/abox/internal/backend/libvirt"

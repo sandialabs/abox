@@ -252,6 +252,52 @@ func TestMITM_HTTPSAllowedDomain(t *testing.T) {
 	}
 }
 
+// TestMITM_HTTP2AllowedDomain tests that an HTTP/2 request to an allowed domain
+// works through the MITM proxy AND is actually served over h2. This exercises the
+// h2 ServeConn intercept path (the headline feature of this branch) end-to-end in
+// a real VM — the existing MITM e2e tests only drive HTTP/1.1. The client↔proxy
+// hop negotiates h2 via ALPN against the MITM, so curl reports http_version 2
+// regardless of the upstream's protocol; example.com keeps the host stable.
+func TestMITM_HTTP2AllowedDomain(t *testing.T) {
+	skipIfNoLibvirt(t)
+	skipIfNoConfiguredBaseImage(t)
+	skipInShortMode(t)
+
+	env := newTestEnv(t)
+	inst := env.newTestInstance()
+	inst.create()
+	inst.start()
+
+	if !inst.waitForRunning(60 * time.Second) {
+		t.Fatal("Instance did not start")
+	}
+
+	if !inst.waitForSSH(120 * time.Second) {
+		inst.dumpDiagnostics()
+		t.Fatal("SSH did not become available")
+	}
+
+	// Wait for cloud-init runcmd (update-ca-certificates) so the VM trusts our CA.
+	inst.waitForCloudInit()
+
+	inst.allowlistAdd("example.com")
+	inst.setFilterMode("active")
+
+	// curl --http2 forces HTTP/2 in the TLS ALPN. Report the negotiated version so
+	// we can assert the MITM served h2, not just that the request succeeded. Retry
+	// to allow CA-trust/proxy config to settle in the VM.
+	result := inst.waitForSSHCondition(30*time.Second, 3*time.Second, func(r *runResult) bool {
+		return r.Success() && strings.TrimSpace(r.Stdout) == "2"
+	}, "curl", "-s", "--http2", "--max-time", "10", "-o", "/dev/null", "-w", "%{http_version}", "https://example.com")
+
+	if !result.Success() {
+		t.Fatalf("HTTP/2 request to allowed domain should succeed through MITM proxy: %v", result.Stderr)
+	}
+	if v := strings.TrimSpace(result.Stdout); v != "2" {
+		t.Errorf("expected MITM to serve HTTP/2 (http_version=2), got %q — h2 ServeConn path not exercised", v)
+	}
+}
+
 // TestMITM_HTTPSBlockedDomain tests that HTTPS to a non-allowed domain is blocked.
 func TestMITM_HTTPSBlockedDomain(t *testing.T) {
 	skipIfNoLibvirt(t)

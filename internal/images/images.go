@@ -193,16 +193,31 @@ func GroupByProvider(images []ImageInfo) map[string][]ImageInfo {
 	return groups
 }
 
+// Provider identifiers used in ImageInfo.Provider, image catalog keys, and CLI selection.
+// Values are part of the user-facing API and must not change.
+const (
+	providerAlmaLinux = "almalinux"
+	providerDebian    = "debian"
+	providerUbuntu    = "ubuntu"
+)
+
+// Go-style architecture identifiers used by upstream image catalogs.
+// Ubuntu/Debian use these names directly; AlmaLinux maps them to x86_64/aarch64.
+const (
+	archAMD64 = "amd64"
+	archARM64 = "arm64"
+)
+
 // ProviderOrder returns the canonical display order for providers.
 func ProviderOrder() []string {
-	return []string{"almalinux", "debian", "ubuntu"}
+	return []string{providerAlmaLinux, providerDebian, providerUbuntu}
 }
 
 // providerDisplayNames maps provider identifiers to their proper display names.
 var providerDisplayNames = map[string]string{
-	"almalinux": "AlmaLinux",
-	"debian":    "Debian",
-	"ubuntu":    "Ubuntu",
+	providerAlmaLinux: "AlmaLinux",
+	providerDebian:    "Debian",
+	providerUbuntu:    "Ubuntu",
 }
 
 // ProviderDisplayName returns the display name for a provider.

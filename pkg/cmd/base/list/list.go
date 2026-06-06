@@ -70,29 +70,29 @@ func runList(ctx context.Context, f *factory.Factory, exporter *cmdutil.Exporter
 		return err
 	}
 
-	out := f.IO.Out
-
 	// Fetch available images dynamically
 	if refresh {
-		fmt.Fprintln(out, "Refreshing available images...")
+		fmt.Fprintln(f.IO.Out, "Refreshing available images...")
 	}
 
 	allImages, err := images.FetchAll(ctx, refresh)
 	if err != nil {
 		if exporter.Enabled() {
-			return exporter.Write(out, []imageJSON{})
+			return exporter.Write(f.IO.Out, []imageJSON{})
 		}
-		fmt.Fprintf(out, "Warning: failed to fetch available images: %v\n", err)
-		fmt.Fprintln(out, "Showing only downloaded images.")
+		fmt.Fprintf(f.IO.Out, "Warning: failed to fetch available images: %v\n", err)
+		fmt.Fprintln(f.IO.Out, "Showing only downloaded images.")
 		return listDownloadedOnly(f, paths)
 	}
 
 	if exporter.Enabled() {
-		return exportImagesJSON(out, exporter, allImages, paths)
+		return exportImagesJSON(f.IO.Out, exporter, allImages, paths)
 	}
 
 	f.IO.StartPager()
 	defer f.IO.StopPager()
+
+	out := f.IO.Out
 
 	fmt.Fprintln(out, "Available base images:")
 	fmt.Fprintln(out)

@@ -163,24 +163,44 @@ const (
 	CheckHTTPUpstream CheckID = "httpupstream"
 )
 
+// User-visible check names. These appear in CLI output and TUI.
+const (
+	CheckNameConfig       = "Instance configuration valid"
+	CheckNameVMRunning    = "VM running"
+	CheckNameBridge       = "Network bridge active"
+	CheckNameVMIP         = "VM IP address"
+	CheckNameHostDisk     = "Host disk space"
+	CheckNameDNSFilter    = "DNS filter running"
+	CheckNameHTTPFilter   = "HTTP filter running"
+	CheckNameDNSUpstream  = "DNS upstream reachable"
+	CheckNameSSH          = "SSH connection"
+	CheckNameGateway      = "Gateway reachable"
+	CheckNameDNSResolve   = "DNS resolution working"
+	CheckNameHTTPProxy    = "HTTP proxy reachable"
+	CheckNameGuestDisk    = "Guest disk space"
+	CheckNameProxyEnv     = "Proxy environment variables"
+	CheckNameDNSConfig    = "DNS configuration"
+	CheckNameHTTPUpstream = "HTTP upstream reachable"
+)
+
 // checkNameToID maps result names to check IDs.
 var checkNameToID = map[string]CheckID{
-	"Instance configuration valid": CheckConfig,
-	"VM running":                   CheckVM,
-	"Network bridge active":        CheckBridge,
-	"VM IP address":                CheckVMIP,
-	"Host disk space":              CheckHostDisk,
-	"DNS filter running":           CheckDNSFilter,
-	"HTTP filter running":          CheckHTTPFilter,
-	"DNS upstream reachable":       CheckDNSUpstream,
-	"SSH connection":               CheckSSH,
-	"Gateway reachable":            CheckGateway,
-	"DNS resolution working":       CheckDNSResolve,
-	"HTTP proxy reachable":         CheckHTTPProxy,
-	"Guest disk space":             CheckGuestDisk,
-	"Proxy environment variables":  CheckProxyEnv,
-	"DNS configuration":            CheckDNSConfig,
-	"HTTP upstream reachable":      CheckHTTPUpstream,
+	CheckNameConfig:       CheckConfig,
+	CheckNameVMRunning:    CheckVM,
+	CheckNameBridge:       CheckBridge,
+	CheckNameVMIP:         CheckVMIP,
+	CheckNameHostDisk:     CheckHostDisk,
+	CheckNameDNSFilter:    CheckDNSFilter,
+	CheckNameHTTPFilter:   CheckHTTPFilter,
+	CheckNameDNSUpstream:  CheckDNSUpstream,
+	CheckNameSSH:          CheckSSH,
+	CheckNameGateway:      CheckGateway,
+	CheckNameDNSResolve:   CheckDNSResolve,
+	CheckNameHTTPProxy:    CheckHTTPProxy,
+	CheckNameGuestDisk:    CheckGuestDisk,
+	CheckNameProxyEnv:     CheckProxyEnv,
+	CheckNameDNSConfig:    CheckDNSConfig,
+	CheckNameHTTPUpstream: CheckHTTPUpstream,
 }
 
 // CheckIDFromName returns the CheckID for a given check result name.

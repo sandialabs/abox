@@ -22,8 +22,26 @@ import (
 // This location is accessible by the libvirt-qemu user, unlike user home directories.
 const LibvirtImagesDir = "/var/lib/libvirt/images/abox"
 
-// defaultUser is the default SSH username for Ubuntu and unknown base images.
-const defaultUser = "ubuntu"
+// Default values for new instances.
+const (
+	DefaultBase     = "ubuntu-24.04"
+	DefaultDisk     = "20G"
+	DefaultUpstream = "8.8.8.8:53"
+
+	// DefaultHTTPMaxConnections caps concurrent client connections to the HTTP
+	// filter proxy, bounding host fd/goroutine use against a hostile VM. A
+	// zero/unset value in a saved config resolves to this default at startup.
+	DefaultHTTPMaxConnections = 512
+)
+
+// SSH usernames for supported distros.
+const (
+	defaultUser   = "ubuntu" // also used for unknown base images
+	userAlmaLinux = "almalinux"
+	userRocky     = "cloud-user"
+	userCentOS    = "centos"
+	userDebian    = "debian"
+)
 
 // lockFile holds the file descriptor for the global lock.
 // Note: This global is safe because abox is a single-threaded CLI tool.
@@ -65,7 +83,7 @@ func AcquireLock() error {
 	}
 
 	// Acquire exclusive lock (blocks until available)
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil { //nolint:gosec // fd from os.File, safe conversion
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		f.Close()
 		return fmt.Errorf("failed to acquire lock: %w", err)
 	}
@@ -81,7 +99,7 @@ func ReleaseLock() error {
 	}
 
 	// Release the lock
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil { //nolint:gosec // fd from os.File, safe conversion
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil {
 		lockFile.Close()
 		lockFile = nil
 		return fmt.Errorf("failed to release lock: %w", err)
@@ -101,9 +119,10 @@ type DNSConfig struct {
 
 // HTTPConfig holds HTTP proxy-related configuration for an instance.
 type HTTPConfig struct {
-	Port     int    `yaml:"port"`                // httpfilter proxy port
-	LogLevel string `yaml:"log_level,omitempty"` // "debug", "info", "warn", "error" (default: info)
-	MITM     bool   `yaml:"mitm"`                // Enable TLS MITM for domain fronting protection
+	Port           int    `yaml:"port"`                      // httpfilter proxy port
+	LogLevel       string `yaml:"log_level,omitempty"`       // "debug", "info", "warn", "error" (default: info)
+	MITM           bool   `yaml:"mitm"`                      // Enable TLS MITM for domain fronting protection
+	MaxConnections int    `yaml:"max_connections,omitempty"` // cap on concurrent client connections (0/unset = DefaultHTTPMaxConnections)
 }
 
 // MonitorConfig holds monitoring-related configuration for an instance.
@@ -150,13 +169,13 @@ type Instance struct {
 func DefaultUserForBase(base string) string {
 	switch {
 	case strings.HasPrefix(base, "almalinux-"):
-		return "almalinux"
+		return userAlmaLinux
 	case strings.HasPrefix(base, "rocky-"):
-		return "cloud-user"
+		return userRocky
 	case strings.HasPrefix(base, "centos-"):
-		return "centos"
+		return userCentOS
 	case strings.HasPrefix(base, "debian-"):
-		return "debian"
+		return userDebian
 	default:
 		return defaultUser
 	}
@@ -222,14 +241,15 @@ func DefaultInstance(name string) *Instance {
 		Name:    name,
 		CPUs:    2,
 		Memory:  4096,
-		Base:    "ubuntu-24.04",
+		Base:    DefaultBase,
 		DNS: DNSConfig{
-			Upstream: "8.8.8.8:53",
+			Upstream: DefaultUpstream,
 		},
 		HTTP: HTTPConfig{
-			MITM: true, // Default to enabled for security
+			MITM:           true, // Default to enabled for security
+			MaxConnections: DefaultHTTPMaxConnections,
 		},
-		Disk: "20G",
+		Disk: DefaultDisk,
 	}
 }
 
@@ -501,6 +521,11 @@ func (i *Instance) Validate() error {
 	// Validate HTTP log level
 	if err := validation.ValidateLogLevel(i.HTTP.LogLevel); err != nil {
 		return fmt.Errorf("http: %w", err)
+	}
+
+	// Validate HTTP max connections (0 = unset, resolved to the default at startup).
+	if i.HTTP.MaxConnections < 0 {
+		return fmt.Errorf("http: max_connections must be >= 0 (got %d)", i.HTTP.MaxConnections)
 	}
 
 	// Validate resource limits

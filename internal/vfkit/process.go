@@ -3,6 +3,7 @@
 package vfkit
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -27,7 +28,7 @@ import (
 // Returns the PID of the launched process.
 func StartVM(cfg VMConfig, netFD *os.File) (int, error) {
 	if netFD == nil {
-		return 0, fmt.Errorf("vfkit: netFD is required (socketpair end for vmnet-helper)")
+		return 0, errors.New("vfkit: netFD is required (socketpair end for vmnet-helper)")
 	}
 	if cfg.NetFD != NetFDChild {
 		// Close so the fd isn't leaked on the error return.

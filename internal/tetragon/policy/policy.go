@@ -81,6 +81,36 @@ const (
 	EventTypeSecurity EventType = "security"
 )
 
+// Kernel hook (kprobe) names. These flow into Tetragon JSON events and are
+// parsed verbatim by callers; values must remain byte-for-byte identical.
+const (
+	kpSecurityFileOpen      = "security_file_open"
+	kpVfsUnlink             = "vfs_unlink"
+	kpVfsRename             = "vfs_rename"
+	kpSecuritySocketConnect = "security_socket_connect"
+	kpInetCskListenStart    = "inet_csk_listen_start"
+	kpSecurityBPRMCheck     = "security_bprm_check"
+	kpCommitCreds           = "commit_creds"
+	kpDoInitModule          = "do_init_module"
+	kpSysSetuid             = "sys_setuid"
+	kpSysPtrace             = "sys_ptrace"
+	kpPathMount             = "path_mount"
+	kpTCPClose              = "tcp_close"
+)
+
+// Kprobe spec literals (Tetragon CRD field values).
+const (
+	actionPost        = "Post"
+	operatorNotPrefix = "NotPrefix"
+	argTypeString     = "string"
+)
+
+// TracingPolicy CRD constants. External API contract — values must not change.
+const (
+	tracingPolicyAPIVersion = "cilium.io/v1alpha1"
+	tracingPolicyKind       = "TracingPolicy"
+)
+
 // CuratedKprobe holds a kprobe definition along with its event parser metadata.
 type CuratedKprobe struct {
 	Spec      KprobeSpec
@@ -90,64 +120,64 @@ type CuratedKprobe struct {
 
 // defaultOrder defines the canonical ordering of default kprobes.
 var defaultOrder = []string{
-	"security_file_open",
-	"vfs_unlink",
-	"vfs_rename",
-	"security_socket_connect",
-	"inet_csk_listen_start",
+	kpSecurityFileOpen,
+	kpVfsUnlink,
+	kpVfsRename,
+	kpSecuritySocketConnect,
+	kpInetCskListenStart,
 }
 
 // Registry maps kernel function names to their curated kprobe definitions.
 var Registry = map[string]CuratedKprobe{
-	"security_file_open": {
+	kpSecurityFileOpen: {
 		Spec: KprobeSpec{
-			Call: "security_file_open",
-			Args: []KprobeArg{{Index: 0, Type: "file"}},
+			Call: kpSecurityFileOpen,
+			Args: []KprobeArg{{Index: 0, Type: string(EventTypeFile)}},
 			Selectors: []SelectorSpec{{
 				MatchArgs: []MatchArgSpec{{
 					Index:    0,
-					Operator: "NotPrefix",
+					Operator: operatorNotPrefix,
 					Values:   []string{"/dev/vport", "/var/log/tetragon/", "/proc/", "/sys/"},
 				}},
-				MatchActions: []MatchActionSpec{{Action: "Post"}},
+				MatchActions: []MatchActionSpec{{Action: actionPost}},
 			}},
 		},
 		EventType: EventTypeFile,
 		Op:        "open",
 	},
-	"vfs_unlink": {
+	kpVfsUnlink: {
 		Spec: KprobeSpec{
-			Call: "vfs_unlink",
-			Args: []KprobeArg{{Index: 2, Type: "file"}},
+			Call: kpVfsUnlink,
+			Args: []KprobeArg{{Index: 2, Type: string(EventTypeFile)}},
 			Selectors: []SelectorSpec{{
 				MatchArgs: []MatchArgSpec{{
 					Index:    2,
-					Operator: "NotPrefix",
+					Operator: operatorNotPrefix,
 					Values:   []string{"/proc/", "/sys/"},
 				}},
-				MatchActions: []MatchActionSpec{{Action: "Post"}},
+				MatchActions: []MatchActionSpec{{Action: actionPost}},
 			}},
 		},
 		EventType: EventTypeFile,
 		Op:        "delete",
 	},
-	"vfs_rename": {
+	kpVfsRename: {
 		Spec: KprobeSpec{
-			Call: "vfs_rename",
+			Call: kpVfsRename,
 			Args: []KprobeArg{
-				{Index: 1, Type: "file"},
-				{Index: 3, Type: "file"},
+				{Index: 1, Type: string(EventTypeFile)},
+				{Index: 3, Type: string(EventTypeFile)},
 			},
 			Selectors: []SelectorSpec{{
-				MatchActions: []MatchActionSpec{{Action: "Post"}},
+				MatchActions: []MatchActionSpec{{Action: actionPost}},
 			}},
 		},
 		EventType: EventTypeFile,
 		Op:        "rename",
 	},
-	"security_socket_connect": {
+	kpSecuritySocketConnect: {
 		Spec: KprobeSpec{
-			Call: "security_socket_connect",
+			Call: kpSecuritySocketConnect,
 			Args: []KprobeArg{{Index: 1, Type: "sockaddr"}},
 			Selectors: []SelectorSpec{{
 				MatchArgs: []MatchArgSpec{{
@@ -155,18 +185,18 @@ var Registry = map[string]CuratedKprobe{
 					Operator: "Family",
 					Values:   []string{"AF_INET", "AF_INET6"},
 				}},
-				MatchActions: []MatchActionSpec{{Action: "Post"}},
+				MatchActions: []MatchActionSpec{{Action: actionPost}},
 			}},
 		},
 		EventType: EventTypeNetwork,
 		Op:        "connect",
 	},
-	"inet_csk_listen_start": {
+	kpInetCskListenStart: {
 		Spec: KprobeSpec{
-			Call: "inet_csk_listen_start",
+			Call: kpInetCskListenStart,
 			Args: []KprobeArg{{Index: 0, Type: "sock"}},
 			Selectors: []SelectorSpec{{
-				MatchActions: []MatchActionSpec{{Action: "Post"}},
+				MatchActions: []MatchActionSpec{{Action: actionPost}},
 			}},
 		},
 		EventType: EventTypeNetwork,
@@ -175,42 +205,42 @@ var Registry = map[string]CuratedKprobe{
 
 	// --- Security monitoring (opt-in) ---
 
-	"security_bprm_check": {
+	kpSecurityBPRMCheck: {
 		Spec: KprobeSpec{
-			Call: "security_bprm_check",
+			Call: kpSecurityBPRMCheck,
 			Args: []KprobeArg{{Index: 0, Type: "linux_binprm"}},
 			Selectors: []SelectorSpec{{
-				MatchActions: []MatchActionSpec{{Action: "Post"}},
+				MatchActions: []MatchActionSpec{{Action: actionPost}},
 			}},
 		},
 		EventType: EventTypeSecurity,
 		Op:        "exec_check",
 	},
-	"commit_creds": {
+	kpCommitCreds: {
 		Spec: KprobeSpec{
-			Call: "commit_creds",
+			Call: kpCommitCreds,
 			Args: []KprobeArg{{Index: 0, Type: "cred"}},
 			Selectors: []SelectorSpec{{
-				MatchActions: []MatchActionSpec{{Action: "Post"}},
+				MatchActions: []MatchActionSpec{{Action: actionPost}},
 			}},
 		},
 		EventType: EventTypeSecurity,
 		Op:        "cred_change",
 	},
-	"do_init_module": {
+	kpDoInitModule: {
 		Spec: KprobeSpec{
-			Call: "do_init_module",
+			Call: kpDoInitModule,
 			Args: []KprobeArg{{Index: 0, Type: "module"}},
 			Selectors: []SelectorSpec{{
-				MatchActions: []MatchActionSpec{{Action: "Post"}},
+				MatchActions: []MatchActionSpec{{Action: actionPost}},
 			}},
 		},
 		EventType: EventTypeSecurity,
 		Op:        "module_load",
 	},
-	"sys_setuid": {
+	kpSysSetuid: {
 		Spec: KprobeSpec{
-			Call:    "sys_setuid",
+			Call:    kpSysSetuid,
 			Syscall: true,
 			Args:    []KprobeArg{{Index: 0, Type: "int"}},
 			Selectors: []SelectorSpec{{
@@ -219,7 +249,7 @@ var Registry = map[string]CuratedKprobe{
 					Operator: "Equal",
 					Values:   []string{"0"},
 				}},
-				MatchActions: []MatchActionSpec{{Action: "Post"}},
+				MatchActions: []MatchActionSpec{{Action: actionPost}},
 			}},
 		},
 		EventType: EventTypeSecurity,
@@ -228,28 +258,28 @@ var Registry = map[string]CuratedKprobe{
 
 	// --- Behavioral monitoring (opt-in) ---
 
-	"sys_ptrace": {
+	kpSysPtrace: {
 		Spec: KprobeSpec{
-			Call:    "sys_ptrace",
+			Call:    kpSysPtrace,
 			Syscall: true,
 			Args:    []KprobeArg{{Index: 0, Type: "int"}},
 			Selectors: []SelectorSpec{{
-				MatchActions: []MatchActionSpec{{Action: "Post"}},
+				MatchActions: []MatchActionSpec{{Action: actionPost}},
 			}},
 		},
 		EventType: EventTypeSecurity,
 		Op:        "ptrace",
 	},
-	"path_mount": {
+	kpPathMount: {
 		Spec: KprobeSpec{
-			Call: "path_mount",
+			Call: kpPathMount,
 			Args: []KprobeArg{
-				{Index: 0, Type: "string"},
+				{Index: 0, Type: argTypeString},
 				{Index: 1, Type: "path"},
-				{Index: 2, Type: "string"},
+				{Index: 2, Type: argTypeString},
 			},
 			Selectors: []SelectorSpec{{
-				MatchActions: []MatchActionSpec{{Action: "Post"}},
+				MatchActions: []MatchActionSpec{{Action: actionPost}},
 			}},
 		},
 		EventType: EventTypeSecurity,
@@ -258,12 +288,12 @@ var Registry = map[string]CuratedKprobe{
 
 	// --- Additional network (opt-in) ---
 
-	"tcp_close": {
+	kpTCPClose: {
 		Spec: KprobeSpec{
-			Call: "tcp_close",
+			Call: kpTCPClose,
 			Args: []KprobeArg{{Index: 0, Type: "sock"}},
 			Selectors: []SelectorSpec{{
-				MatchActions: []MatchActionSpec{{Action: "Post"}},
+				MatchActions: []MatchActionSpec{{Action: actionPost}},
 			}},
 		},
 		EventType: EventTypeNetwork,
@@ -317,8 +347,8 @@ func RenderPolicy(names []string) ([]byte, error) {
 	}
 
 	policy := TracingPolicy{
-		APIVersion: "cilium.io/v1alpha1",
-		Kind:       "TracingPolicy",
+		APIVersion: tracingPolicyAPIVersion,
+		Kind:       tracingPolicyKind,
 		Metadata:   TracingPolicyMeta{Name: "abox-monitor"},
 		Spec:       TracingPolicySpec{Kprobes: specs},
 	}
@@ -349,8 +379,8 @@ func RenderPerKrobePolicies(names []string) (map[string][]byte, error) {
 		spec.Ignore = &KprobeIgnore{CallNotFound: true}
 
 		p := TracingPolicy{
-			APIVersion: "cilium.io/v1alpha1",
-			Kind:       "TracingPolicy",
+			APIVersion: tracingPolicyAPIVersion,
+			Kind:       tracingPolicyKind,
 			Metadata:   TracingPolicyMeta{Name: "abox-" + strings.ReplaceAll(name, "_", "-")},
 			Spec:       TracingPolicySpec{Kprobes: []KprobeSpec{spec}},
 		}

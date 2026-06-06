@@ -40,7 +40,7 @@ Use 'abox net profile <instance> export' to get the captured domains.`,
   abox net filter dev active               # Block domains not in allowlist
   abox net filter dev passive              # Allow all, capture for profiling`,
 		Args:              cobra.RangeArgs(1, 2),
-		ValidArgsFunction: completion.Sequence(completion.RunningInstances(), completion.Values("active", "passive")),
+		ValidArgsFunction: completion.Sequence(completion.RunningInstances(), completion.Values(modeActive, modePassive)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.Name = args[0]
 			if len(args) > 1 {
@@ -56,10 +56,16 @@ Use 'abox net profile <instance> export' to get the captured domains.`,
 	return cmd
 }
 
+// Filter mode names (CLI argument values).
+const (
+	modeActive  = "active"
+	modePassive = "passive"
+)
+
 // validModes are the allowed filter modes
 var validModes = map[string]bool{
-	"active":  true,
-	"passive": true,
+	modeActive:  true,
+	modePassive: true,
 }
 
 func runFilter(f *factory.Factory, name, mode string) error {
@@ -104,7 +110,7 @@ func runFilter(f *factory.Factory, name, mode string) error {
 		fmt.Fprintf(out, "  %s\n", httpResp.Message)
 	}
 
-	if mode == "passive" {
+	if mode == modePassive {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Passive mode: All requests allowed and captured for profiling.")
 		fmt.Fprintln(out, "Use 'abox net profile "+name+" export' to view captured domains.")
@@ -113,7 +119,7 @@ func runFilter(f *factory.Factory, name, mode string) error {
 	// Only log if we actually changed the mode
 	if mode != "" {
 		action := logging.ActionModeActive
-		if mode == "passive" {
+		if mode == modePassive {
 			action = logging.ActionModePassive
 		}
 		logging.AuditInstance(name, action)

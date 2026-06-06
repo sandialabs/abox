@@ -297,7 +297,7 @@ func (m tuiModel) runPhase1() tea.Cmd {
 
 		// Check 1: Instance configuration
 		inst, paths, err := instance.LoadRequired(instanceName)
-		result := CheckResult{Name: "Instance configuration valid"}
+		result := CheckResult{Name: CheckNameConfig}
 		if err != nil {
 			result.Passed = false
 			result.Details = err.Error()
@@ -326,7 +326,7 @@ func (m tuiModel) runPhase1() tea.Cmd {
 
 		// Check 2: VM running
 		state := be.VM().State(instanceName)
-		vmResult := CheckResult{Name: "VM running"}
+		vmResult := CheckResult{Name: CheckNameVMRunning}
 		vmRunning := false
 		if state == backend.VMStateRunning {
 			vmResult.Passed = true
@@ -341,7 +341,7 @@ func (m tuiModel) runPhase1() tea.Cmd {
 
 		// Check 3: Network bridge
 		networkActive := be.Network().IsActive(inst.Bridge)
-		bridgeResult := CheckResult{Name: "Network bridge active"}
+		bridgeResult := CheckResult{Name: CheckNameBridge}
 		if networkActive {
 			bridgeResult.Passed = true
 			bridgeResult.Details = inst.Bridge
@@ -353,7 +353,7 @@ func (m tuiModel) runPhase1() tea.Cmd {
 		results = append(results, bridgeResult)
 
 		// Check 4: VM IP
-		ipResult := CheckResult{Name: "VM IP address"}
+		ipResult := CheckResult{Name: CheckNameVMIP}
 		var vmIP string
 		if vmRunning {
 			ip, err := instance.GetIP(inst, be.VM())
@@ -423,7 +423,7 @@ func runPhase2Cmd(instanceName string, inst *config.Instance, paths *config.Path
 // runPhase3Cmd returns a command that runs phase 3 checks.
 func runPhase3Cmd(inst *config.Instance, paths *config.Paths, vmIP string, vmRunning bool, dnsResult, httpResult CheckResult) tea.Cmd {
 	return func() tea.Msg {
-		result := CheckResult{Name: "SSH connection"}
+		result := CheckResult{Name: CheckNameSSH}
 		sshWorks := false
 		if vmRunning && vmIP != "" {
 			if testSSH(paths, inst.GetUser(), vmIP) {
@@ -452,7 +452,7 @@ func runPhase3Cmd(inst *config.Instance, paths *config.Paths, vmIP string, vmRun
 
 // checkInVMGateway checks whether the VM can reach its gateway.
 func checkInVMGateway(paths *config.Paths, inst *config.Instance, vmIP string, sshWorks bool) CheckResult {
-	result := CheckResult{Name: "Gateway reachable"}
+	result := CheckResult{Name: CheckNameGateway}
 	if !sshWorks {
 		result.Skipped = true
 		return result
@@ -469,7 +469,7 @@ func checkInVMGateway(paths *config.Paths, inst *config.Instance, vmIP string, s
 
 // checkInVMDNSResolve checks DNS resolution from inside the VM.
 func checkInVMDNSResolve(paths *config.Paths, inst *config.Instance, vmIP string, sshWorks bool, dnsResult CheckResult) CheckResult {
-	result := CheckResult{Name: "DNS resolution working"}
+	result := CheckResult{Name: CheckNameDNSResolve}
 	if !sshWorks || !dnsResult.Passed {
 		result.Skipped = true
 		return result
@@ -485,7 +485,7 @@ func checkInVMDNSResolve(paths *config.Paths, inst *config.Instance, vmIP string
 
 // checkInVMHTTPProxy checks HTTP proxy reachability from inside the VM.
 func checkInVMHTTPProxy(paths *config.Paths, inst *config.Instance, vmIP string, sshWorks bool, httpResult CheckResult) CheckResult {
-	result := CheckResult{Name: "HTTP proxy reachable"}
+	result := CheckResult{Name: CheckNameHTTPProxy}
 	if !sshWorks || !httpResult.Passed {
 		result.Skipped = true
 		return result
@@ -531,13 +531,13 @@ func runPhase4Cmd(instanceName string, inst *config.Instance, paths *config.Path
 			checkInVMGateway(paths, inst, vmIP, sshWorks),
 			checkInVMDNSResolve(paths, inst, vmIP, sshWorks, dnsResult),
 			checkInVMHTTPProxy(paths, inst, vmIP, sshWorks, httpResult),
-			skipOrRun("Guest disk space", sshWorks, func() CheckResult {
+			skipOrRun(CheckNameGuestDisk, sshWorks, func() CheckResult {
 				return checkGuestDiskSpace(paths, user, vmIP)
 			}),
-			skipOrRun("Proxy environment variables", sshWorks, func() CheckResult {
+			skipOrRun(CheckNameProxyEnv, sshWorks, func() CheckResult {
 				return checkProxyEnvVars(paths, user, vmIP, inst.Gateway, inst.HTTP.Port)
 			}),
-			skipOrRun("DNS configuration", sshWorks, func() CheckResult {
+			skipOrRun(CheckNameDNSConfig, sshWorks, func() CheckResult {
 				return checkDNSConfig(paths, user, vmIP, inst.Gateway)
 			}),
 		}

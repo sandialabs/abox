@@ -138,12 +138,10 @@ func (s *IOStreams) StartPager() {
 	cmd.Stdout = s.Out
 	cmd.Stderr = s.ErrOut
 
-	// Set LESS default options if not already set
-	if _, ok := os.LookupEnv("LESS"); !ok {
-		cmd.Env = append(os.Environ(), "LESS=FRX")
-	} else {
-		cmd.Env = os.Environ()
-	}
+	// Always set LESS=FRX (quit-if-one-screen, raw control chars,
+	// no init) so that paging behaves correctly regardless of the
+	// user's shell LESS setting.
+	cmd.Env = append(os.Environ(), "LESS=FRX")
 
 	pipe, err := cmd.StdinPipe()
 	if err != nil {

@@ -18,14 +18,14 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "^1"
+          go-version: "1.26"
           check-latest: true
           cache-dependency-path: go.sum
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.12.1
 
   build:
     name: Build
@@ -35,7 +35,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "^1"
+          go-version: "1.26"
           check-latest: true
           cache-dependency-path: go.sum
 
@@ -50,7 +50,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "^1"
+          go-version: "1.26"
           check-latest: true
           cache-dependency-path: go.sum
 
@@ -75,7 +75,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "^1"
+          go-version: "1.26"
           check-latest: true
           cache-dependency-path: go.sum
 
@@ -93,7 +93,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "^1"
+          go-version: "1.26"
           check-latest: true
           cache-dependency-path: go.sum
 
@@ -110,7 +110,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "^1"
+          go-version: "1.26"
           check-latest: true
           cache-dependency-path: go.sum
 
@@ -125,7 +125,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "^1"
+          go-version: "1.26"
           check-latest: true
           cache-dependency-path: go.sum
 

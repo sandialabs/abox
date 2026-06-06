@@ -317,13 +317,25 @@ func NormalizeUpstreamDNS(upstream string) (string, error) {
 	return net.JoinHostPort(host, port), nil
 }
 
+// Log level and format identifiers. Mirrored in internal/logging; kept local
+// here to avoid an import cycle.
+const (
+	logLevelDebug   = "debug"
+	logLevelInfo    = "info"
+	logLevelWarn    = "warn"
+	logLevelWarning = "warning"
+	logLevelError   = "error"
+	logFormatText   = "text"
+	logFormatJSON   = "json"
+)
+
 // validLogLevels contains the set of valid log level values.
 var validLogLevels = map[string]bool{
-	"debug":   true,
-	"info":    true,
-	"warn":    true,
-	"warning": true,
-	"error":   true,
+	logLevelDebug:   true,
+	logLevelInfo:    true,
+	logLevelWarn:    true,
+	logLevelWarning: true,
+	logLevelError:   true,
 }
 
 // ValidateLogLevel validates a log level string.
@@ -342,8 +354,8 @@ func ValidateLogLevel(level string) error {
 
 // validLogFormats contains the set of valid log format values.
 var validLogFormats = map[string]bool{
-	"text": true,
-	"json": true,
+	logFormatText: true,
+	logFormatJSON: true,
 }
 
 // ValidateLogFormat validates a log format string.

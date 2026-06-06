@@ -95,8 +95,9 @@ func deriveVMNetAddresses(subnetCIDR, gateway string) (subnetMask, endAddress st
 	}
 
 	subnetMask = fmt.Sprintf("%d.%d.%d.%d", mask[0], mask[1], mask[2], mask[3])
-	endAddress = fmt.Sprintf("%d.%d.%d.%d",
-		byte(endNum>>24), byte(endNum>>16), byte(endNum>>8), byte(endNum))
+	endIP := make(net.IP, net.IPv4len)
+	binary.BigEndian.PutUint32(endIP, endNum)
+	endAddress = endIP.String()
 	return subnetMask, endAddress, nil
 }
 

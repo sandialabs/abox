@@ -386,6 +386,27 @@ func TestDefaultInstance(t *testing.T) {
 	if inst.Disk != "20G" {
 		t.Errorf("DefaultInstance().Disk = %q, want %q", inst.Disk, "20G")
 	}
+	if inst.HTTP.MaxConnections != DefaultHTTPMaxConnections {
+		t.Errorf("DefaultInstance().HTTP.MaxConnections = %d, want %d", inst.HTTP.MaxConnections, DefaultHTTPMaxConnections)
+	}
+}
+
+func TestValidate_MaxConnections(t *testing.T) {
+	inst := DefaultInstance("test")
+	inst.Subnet = "10.10.10.0/24"
+	inst.Gateway = "10.10.10.1"
+
+	// Negative is invalid.
+	inst.HTTP.MaxConnections = -1
+	if err := inst.Validate(); err == nil {
+		t.Error("expected error for negative HTTP.MaxConnections, got nil")
+	}
+
+	// Zero is allowed (legacy/unset; resolved to default at startup).
+	inst.HTTP.MaxConnections = 0
+	if err := inst.Validate(); err != nil {
+		t.Errorf("unexpected error for zero (unset) HTTP.MaxConnections: %v", err)
+	}
 }
 
 func TestDefaultUserForBase(t *testing.T) {

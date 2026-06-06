@@ -28,7 +28,7 @@ func NewAlmaLinuxProvider() *AlmaLinuxProvider {
 
 // Name returns the provider name.
 func (p *AlmaLinuxProvider) Name() string {
-	return "almalinux"
+	return providerAlmaLinux
 }
 
 // almalinuxRelease holds release info for AlmaLinux.
@@ -51,9 +51,9 @@ func supportedAlmaLinuxVersions() []almalinuxRelease {
 // upstream naming ("x86_64"/"aarch64"). Returns empty string for unsupported arches.
 func almalinuxUpstreamArch(arch string) string {
 	switch arch {
-	case "amd64":
+	case archAMD64:
 		return "x86_64"
-	case "arm64":
+	case archARM64:
 		return "aarch64"
 	default:
 		return ""
@@ -136,7 +136,7 @@ func (p *AlmaLinuxProvider) fetchImageInfo(ctx context.Context, rel almalinuxRel
 		URL:         imageURL,
 		Hash:        hash,
 		HashAlgo:    "sha256",
-		Provider:    "almalinux",
+		Provider:    providerAlmaLinux,
 	}, nil
 }
 

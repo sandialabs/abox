@@ -20,6 +20,7 @@ type dependency struct {
 	name     string
 	required bool
 	usedBy   string
+	hint     string // install instructions; empty falls back to a generic message
 	// check, when non-nil, replaces the default PATH lookup. Used for tools
 	// that are not on PATH (e.g. vmnet-helper, which installs to libexec).
 	check func() error
@@ -99,6 +100,7 @@ func runCheckDeps(opts *Options) error {
 	}
 
 	if !opts.Quiet {
+		warnFirewalld(w)
 		fmt.Fprintln(w, "All required dependencies are installed.")
 	}
 
@@ -146,6 +148,17 @@ func checkExecutable(name string) error {
 		}
 	}
 	return fmt.Errorf("%s: executable file not found", name)
+}
+
+// installHint returns the install instructions for a dependency, looked up
+// from the platform's dependency table. Falls back to a generic message.
+func installHint(name string) string {
+	for _, dep := range dependencies {
+		if dep.name == name && dep.hint != "" {
+			return dep.hint
+		}
+	}
+	return "check your package manager"
 }
 
 // RunQuiet runs dependency checks without output, returns true if all pass.

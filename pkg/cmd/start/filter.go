@@ -2,12 +2,16 @@ package start
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/sandialabs/abox/internal/daemon"
 	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/validation"
 )
@@ -48,10 +52,8 @@ type daemonOptions struct {
 // startFilter starts a filter daemon as a background process.
 // It validates the log level, creates the log file, spawns the process with
 // restrictive umask for socket creation, and waits for the socket to appear.
-func startFilter(name string, filterType FilterType, paths FilterPaths, logLevel string) error {
-	// Check if already running by looking for socket
-	if _, err := os.Stat(paths.Socket); err == nil {
-		logging.Warn("filter already running", "type", string(filterType))
+func startFilter(w io.Writer, name string, filterType FilterType, paths FilterPaths, logLevel string) error {
+	if checkAlreadyRunning(w, string(filterType), paths.PIDFile, paths.Socket) {
 		return nil
 	}
 
@@ -93,10 +95,8 @@ func startFilter(name string, filterType FilterType, paths FilterPaths, logLevel
 
 // startDaemon starts a generic daemon as a background process.
 // Used for daemons like monitor that don't need log level validation.
-func startDaemon(name string, daemonType string, paths DaemonPaths) error {
-	// Check if already running by looking for socket
-	if _, err := os.Stat(paths.Socket); err == nil {
-		logging.Warn("daemon already running", "type", daemonType)
+func startDaemon(w io.Writer, name string, daemonType string, paths DaemonPaths) error {
+	if checkAlreadyRunning(w, daemonType, paths.PIDFile, paths.Socket) {
 		return nil
 	}
 
@@ -180,6 +180,44 @@ func startDaemonProcess(opts daemonOptions) error {
 	}
 
 	return fmt.Errorf("%s daemon started but socket not ready", opts.daemonType)
+}
+
+// checkAlreadyRunning reports whether a daemon is already alive based on its
+// PID file. If the PID is dead but socket/PID files remain (an ungraceful
+// previous exit), it removes the stale files, prints a user-visible recovery
+// notice, and returns false so the caller can start a fresh daemon.
+func checkAlreadyRunning(w io.Writer, daemonType, pidFile, socketPath string) bool {
+	if w == nil {
+		w = io.Discard
+	}
+	if isDaemonAlive(pidFile) {
+		logging.Warn("daemon already running", "type", daemonType)
+		return true
+	}
+	_, socketErr := os.Stat(socketPath)
+	_, pidErr := os.Stat(pidFile)
+	if socketErr == nil || pidErr == nil {
+		fmt.Fprintf(w, "  %s daemon from previous run did not exit cleanly, restarting...\n", daemonType)
+		logging.Warn("cleaning up stale daemon files from previous crash", "type", daemonType)
+		_ = os.Remove(socketPath)
+		_ = os.Remove(pidFile)
+	}
+	return false
+}
+
+// isDaemonAlive returns true only if pidFile holds a live abox process.
+// Any read/parse error, dead PID, or non-abox PID is treated as "not alive"
+// since each leads to the same caller action: clean up and start fresh.
+func isDaemonAlive(pidFile string) bool {
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	return isProcessRunning(pid) && daemon.IsAboxProcess(pid)
 }
 
 // isProcessRunning checks if a process with the given PID is still running.

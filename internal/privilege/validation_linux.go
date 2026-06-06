@@ -9,10 +9,15 @@ import (
 	"strings"
 )
 
+// libvirtImagesDir is the privileged-helper-managed disk image storage root.
+// Mirrors config.LibvirtImagesDir; kept local to avoid importing config from
+// the privilege helper, which must be a leaf package for the setuid binary.
+const libvirtImagesDir = "/var/lib/libvirt/images/abox"
+
 // allowedPaths lists the base directories for privileged file operations on Linux.
 // Operations (chmod, mkdir, remove, copy) are restricted to paths under these directories.
 var allowedPaths = []string{
-	"/var/lib/libvirt/images/abox",
+	libvirtImagesDir,
 }
 
 // ValidatePath checks if a path is within the allowed paths.

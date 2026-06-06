@@ -27,7 +27,7 @@ func OpenFileNoFollow(path string, flag int, perm os.FileMode) (*os.File, error)
 		}
 		return nil, err
 	}
-	return os.NewFile(uintptr(fd), path), nil //nolint:gosec // fd comes from unix.Open, safe conversion
+	return os.NewFile(uintptr(fd), path), nil
 }
 
 // Loader handles loading and watching the allowlist configuration file.

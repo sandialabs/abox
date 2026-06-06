@@ -135,3 +135,11 @@ func WithURL(url string) EventOption {
 		e.URL = url
 	}
 }
+
+// WithReason sets the event reason. Useful on allow events to annotate a
+// notable-but-permitted decision (e.g. a cross-origin host that is allowlisted).
+func WithReason(reason string) EventOption {
+	return func(e *TrafficEvent) {
+		e.Reason = reason
+	}
+}
