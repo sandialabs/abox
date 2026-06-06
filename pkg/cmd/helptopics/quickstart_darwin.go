@@ -8,9 +8,6 @@ PREREQUISITES
   - macOS on Apple Silicon (arm64)
   - vfkit, qemu, xorriso installed via Homebrew
       brew install vfkit qemu xorriso
-  - macFUSE + sshfs-mac for 'abox mount' (optional)
-      brew install --cask macfuse
-      brew install gromgit/fuse/sshfs-mac
   - sudo available (first 'abox start' wires abox anchors into /etc/pf.conf)
 
   Check with: abox check-deps
@@ -61,9 +58,10 @@ COMMON TASKS
   abox list              # List all instances
   abox status dev        # Show instance status
   abox scp dev:file .    # Copy file from instance
-  abox mount dev ~/mnt   # Mount instance via SSHFS (requires macFUSE)
 
 MACOS-SPECIFIC NOTES
+  - 'abox mount'/'abox unmount' (SSHFS) are not available on macOS; use
+    'abox scp' instead.
   - 'abox doctor' reports whether abox's PF anchor references are wired
     into /etc/pf.conf. The first 'abox start' adds them automatically.
   - 'abox teardown-pf' removes the anchor references (run before uninstall).

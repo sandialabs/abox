@@ -27,14 +27,12 @@ curl -fsSL https://github.com/nirs/vmnet-helper/releases/latest/download/install
 abox locates the binary at the standard Homebrew/install-script paths, or you can
 point at it explicitly with `ABOX_VMNET_HELPER_PATH=/abs/path/to/vmnet-helper`.
 
-For `abox mount` (optional — SSHFS-based VM filesystem mounting):
-
-```bash
-brew install --cask macfuse
-brew install gromgit/fuse/sshfs-mac
-```
-
 `pfctl`, `sudo`, `ssh`, `scp`, `ssh-keygen`, and `tcpdump` ship with macOS.
+
+> **Note:** `abox mount`/`abox unmount` (SSHFS-based VM filesystem mounting)
+> are not available on macOS — they rely on FUSE, which on Apple Silicon would
+> require macFUSE (a kernel extension needing Reduced Security). Use `abox scp`
+> to move files instead.
 
 Verify with:
 

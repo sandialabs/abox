@@ -25,7 +25,6 @@ import (
 	"github.com/sandialabs/abox/pkg/cmd/list"
 	"github.com/sandialabs/abox/pkg/cmd/logs"
 	"github.com/sandialabs/abox/pkg/cmd/monitor"
-	"github.com/sandialabs/abox/pkg/cmd/mount"
 	"github.com/sandialabs/abox/pkg/cmd/net"
 	"github.com/sandialabs/abox/pkg/cmd/overrides"
 	"github.com/sandialabs/abox/pkg/cmd/provision"
@@ -39,7 +38,6 @@ import (
 	"github.com/sandialabs/abox/pkg/cmd/status"
 	"github.com/sandialabs/abox/pkg/cmd/stop"
 	"github.com/sandialabs/abox/pkg/cmd/tap"
-	"github.com/sandialabs/abox/pkg/cmd/unmount"
 	"github.com/sandialabs/abox/pkg/cmd/up"
 	versioncmd "github.com/sandialabs/abox/pkg/cmd/version"
 
@@ -221,9 +219,10 @@ func addSubcommands(cmd *cobra.Command, f *factory.Factory) {
 	addGroupedCommand(cmd, provision.NewCmdProvision(f, nil), groupAccess)
 	addGroupedCommand(cmd, forward.NewCmdForward(f), groupAccess)
 
-	// File transfer commands
-	addGroupedCommand(cmd, mount.NewCmdMount(f, nil), groupFiles)
-	addGroupedCommand(cmd, unmount.NewCmdUnmount(f, nil), groupFiles)
+	// File transfer commands. mount/unmount are registered per-platform
+	// (Linux only) because they rely on FUSE/sshfs, which abox does not
+	// support on macOS.
+	addPlatformFileCommands(cmd, f)
 	addGroupedCommand(cmd, export.NewCmdExport(f, nil), groupFiles)
 	addGroupedCommand(cmd, importcmd.NewCmdImport(f, nil), groupFiles)
 

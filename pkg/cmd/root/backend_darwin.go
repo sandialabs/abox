@@ -23,3 +23,9 @@ func addPlatformCommands(cmd *cobra.Command) {
 func addPlatformGroupedCommands(cmd *cobra.Command, f *factory.Factory) {
 	addGroupedCommand(cmd, teardownpf.NewCmdTeardownPF(f, nil), groupUtilities)
 }
+
+// addPlatformFileCommands is a no-op on macOS. The mount/unmount commands rely
+// on FUSE/sshfs, which abox does not support on macOS (macFUSE is a kernel
+// extension requiring Reduced Security — a poor fit for a sandboxing tool). Use
+// `abox scp` instead.
+func addPlatformFileCommands(_ *cobra.Command, _ *factory.Factory) {}

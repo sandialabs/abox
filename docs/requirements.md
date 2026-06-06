@@ -57,10 +57,9 @@ Other Linux distributions with libvirt 8.0+ and QEMU 6.0+ should work. Intel Mac
 | xorriso | Yes | xorriso | Cloud-init ISO creation |
 | sudo | Yes | preinstalled | Privilege helper escalation |
 | pfctl | Yes | preinstalled (in `/sbin`) | Packet filter rules |
-| sshfs | For mount | `--cask macfuse` + `gromgit/fuse/sshfs-mac` | Mount command |
 | tcpdump | No | preinstalled | Packet capture (tap command) |
 
-macOS uses `sudo` only — there is no `pkexec` alternative and no libvirt group. See [macOS Support](macos.md) for platform notes.
+macOS uses `sudo` only — there is no `pkexec` alternative and no libvirt group. `abox mount`/`abox unmount` (SSHFS) are Linux-only. See [macOS Support](macos.md) for platform notes.
 
 ### Check Dependencies
 
@@ -193,10 +192,6 @@ sudo systemctl enable --now libvirtd
 ```bash
 # Required packages
 brew install vfkit qemu xorriso
-
-# Optional — required only for 'abox mount'
-brew install --cask macfuse
-brew install gromgit/fuse/sshfs-mac
 ```
 
 macOS does not require any group membership, polkit configuration, or

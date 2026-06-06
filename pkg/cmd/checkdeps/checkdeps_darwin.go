@@ -20,7 +20,6 @@ const (
 	depQemuImg     = "qemu-img"
 	depSSH         = "ssh"
 	depSCP         = "scp"
-	depSSHFS       = "sshfs"
 	depSSHKeygen   = "ssh-keygen"
 	depXorriso     = "xorriso"
 	depSudo        = "sudo"
@@ -42,7 +41,6 @@ var dependencies = []dependency{
 	{name: depQemuImg, required: true, usedBy: "base image conversion (qcow2 → raw)", hint: "brew install qemu"},
 	{name: depSSH, required: true, usedBy: "ssh, provision, scp", hint: hintPreinstalledMacOS},
 	{name: depSCP, required: true, usedBy: "scp command", hint: hintPreinstalledMacOS},
-	{name: depSSHFS, required: true, usedBy: "mount command (requires macFUSE)", hint: "brew install --cask macfuse && brew install gromgit/fuse/sshfs-mac"},
 	{name: depSSHKeygen, required: true, usedBy: "create (key generation)", hint: hintPreinstalledMacOS},
 	{name: depXorriso, required: true, usedBy: "create (cloud-init ISO)", hint: "brew install xorriso"},
 	{name: depSudo, required: true, usedBy: "privilege helper escalation", hint: hintPreinstalledMacOS},

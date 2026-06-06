@@ -173,6 +173,9 @@ curl http://localhost:3000/api/health
 
 For more seamless file access, mount the VM's filesystem on your host.
 
+> **Linux only.** `abox mount`/`abox unmount` depend on FUSE/SSHFS and are not
+> available on macOS. On macOS, use [`abox scp`](#file-transfer-scp) instead.
+
 ### Mount
 
 ```bash

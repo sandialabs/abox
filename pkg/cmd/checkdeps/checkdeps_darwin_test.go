@@ -18,7 +18,6 @@ func TestInstallHintDarwin(t *testing.T) {
 		{"vfkit", []string{"brew install vfkit"}},
 		{"vmnet-helper", []string{"brew", "vmnet-helper"}},
 		{"qemu-img", []string{"brew install qemu"}},
-		{"sshfs", []string{"macfuse", "sshfs"}},
 		{"ssh", []string{"macOS"}},
 		{"pfctl", []string{"macOS"}},
 	}
