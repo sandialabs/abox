@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/sandialabs/abox/internal/backend"
 	"github.com/sandialabs/abox/internal/config"
@@ -289,6 +290,24 @@ func (m *VMManager) Start(_ context.Context, name string) error {
 		return fmt.Errorf("VM %q is already running", name)
 	}
 
+	// At this point vfkit is NOT running. vmnet-helper does not auto-exit when
+	// vfkit dies, so a prior crash can leave an orphaned helper holding our
+	// pinned subnet/interface-id. Launching a second helper on top of it hangs
+	// (it never emits its start JSON), so reclaim the orphan first: stop it
+	// gracefully, force-kill on failure, then clear its PID file.
+	if vmnethelper.IsRunning(helperPID) {
+		logging.Warn("found orphaned vmnet-helper from a previous crash, stopping it",
+			"instance", name)
+		if herr := vmnethelper.Stop(helperPID); herr != nil {
+			logging.Warn("graceful stop of orphaned vmnet-helper failed, force-killing",
+				"instance", name, "error", herr)
+			if ferr := vmnethelper.ForceStop(helperPID); ferr != nil {
+				logging.Warn("failed to force-stop orphaned vmnet-helper",
+					"instance", name, "error", ferr)
+			}
+		}
+	}
+
 	// Clean up stale PID files from a previous crash.
 	_ = vfkit.CleanupPIDFile(pidFile)
 	_ = vmnethelper.CleanupPIDFile(helperPID)
@@ -384,42 +403,97 @@ func (m *VMManager) Start(_ context.Context, name string) error {
 	return nil
 }
 
-// Stop gracefully stops a running VM via the vfkit REST API,
-// falling back to SIGTERM+SIGKILL if the API is unreachable.
-// The caller (stop command) polls IsRunning() until the process exits,
-// so we always fall through to StopVM which handles PID file cleanup.
-func (m *VMManager) Stop(_ context.Context, name string) error {
+// gracefulStopWindow bounds how long Stop waits for vfkit to exit on its own
+// after a REST/ACPI shutdown request before falling back to signals. It sits
+// just under the stop command's 60s grace poll so that, in the common case,
+// the guest gets a real chance to flush and exit cleanly rather than being
+// force-killed after vfkit's own ~5s SIGTERM handler.
+const gracefulStopWindow = 55 * time.Second
+
+// Stop gracefully stops a running VM. It requests an ACPI shutdown via the
+// vfkit REST API and then blocks (honoring ctx for cancellation) for up to
+// gracefulStopWindow for vfkit to exit on its own. If the REST request fails
+// or the grace window elapses, it falls back to vfkit.StopVM (SIGTERM → 5s →
+// SIGKILL). The vmnet-helper is always torn down afterwards, since it does NOT
+// auto-exit when vfkit closes the socket.
+//
+// Stop is synchronous: when it returns, vfkit has exited and the helper has
+// been stopped. The stop command's grace poll therefore sees IsRunning()==false
+// almost immediately after Stop returns.
+func (m *VMManager) Stop(ctx context.Context, name string) error {
 	pidFile := vfkitPIDFile(name)
 	helperPID := vmnetHelperPIDFile(name)
 
-	// Try REST API graceful stop first (ACPI shutdown).
-	if inst, _, err := loadInstanceState(name); err == nil {
-		if uri := restfulURI(inst); uri != "" {
-			if rerr := vfkit.RequestStop(uri); rerr != nil {
-				logging.Debug("REST API stop failed, falling back to signal", "error", rerr)
-			} else {
-				logging.Debug("REST API stop requested, waiting for process exit")
-			}
-		}
+	graceful, err := requestGracefulExit(ctx, name, pidFile)
+	if err != nil {
+		// Context cancelled mid-wait — stop the helper and surface the error.
+		stopHelper(name, helperPID)
+		return err
 	}
 
-	// Stop vfkit before the helper so the VM releases the socket first.
-	vmErr := vfkit.StopVM(pidFile)
+	// Fall back to SIGTERM+SIGKILL when the REST path didn't get vfkit to exit.
+	var vmErr error
+	if !graceful {
+		// Stop vfkit before the helper so the VM releases the socket first.
+		vmErr = vfkit.StopVM(pidFile)
+	}
 
 	// vmnet-helper does NOT auto-exit when vfkit closes the socket, so this
 	// teardown is mandatory — otherwise every stop leaks a helper + bridge.
-	if herr := vmnethelper.Stop(helperPID); herr != nil {
-		logging.Debug("failed to stop vmnet-helper", "instance", name, "error", herr)
-	}
+	stopHelper(name, helperPID)
 
 	return vmErr
+}
+
+// requestGracefulExit issues a REST/ACPI stop and waits up to
+// gracefulStopWindow for vfkit to exit on its own, honoring ctx for
+// cancellation. The grace window is only honored when the REST request
+// actually succeeded; if the instance state can't be loaded, no REST URI is
+// configured, or the request fails, there is nothing to wait for and the
+// caller falls straight to signals. Returns whether vfkit exited gracefully;
+// a non-nil error means ctx was cancelled mid-wait.
+func requestGracefulExit(ctx context.Context, name, pidFile string) (bool, error) {
+	inst, _, err := loadInstanceState(name)
+	if err != nil {
+		logging.Debug("could not load instance state for REST stop, falling back to signal",
+			"instance", name, "error", err)
+		return false, nil
+	}
+	uri := restfulURI(inst)
+	if uri == "" {
+		return false, nil
+	}
+	if rerr := vfkit.RequestStop(uri); rerr != nil {
+		logging.Debug("REST API stop failed, falling back to signal", "error", rerr)
+		return false, nil
+	}
+
+	logging.Debug("REST API stop requested, waiting for process exit")
+	exited, werr := vfkit.WaitForExit(ctx, pidFile, gracefulStopWindow)
+	if werr != nil {
+		return false, werr
+	}
+	if !exited {
+		logging.Warn("VM did not exit within graceful window, falling back to signal",
+			"instance", name)
+	}
+	return exited, nil
+}
+
+// stopHelper gracefully stops the instance's vmnet-helper, logging at Warn on
+// failure — a leaked root helper process is worth surfacing, not hiding behind
+// a debug line.
+func stopHelper(name, helperPID string) {
+	if herr := vmnethelper.Stop(helperPID); herr != nil {
+		logging.Warn("failed to stop vmnet-helper", "instance", name, "error", herr)
+	}
 }
 
 // ForceStop forcefully stops the VM and its vmnet-helper via SIGKILL.
 func (m *VMManager) ForceStop(_ context.Context, name string) error {
 	vmErr := vfkit.ForceStopVM(vfkitPIDFile(name))
 	if herr := vmnethelper.ForceStop(vmnetHelperPIDFile(name)); herr != nil {
-		logging.Debug("failed to force-stop vmnet-helper", "instance", name, "error", herr)
+		logging.Warn("failed to force-stop vmnet-helper", "instance", name, "error", herr)
 	}
 	return vmErr
 }

@@ -3,9 +3,11 @@
 package vfkit
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestBuildArgs_Basic(t *testing.T) {
@@ -205,6 +207,42 @@ func TestReadPID_Negative(t *testing.T) {
 	_, err := ReadPID(f)
 	if err == nil {
 		t.Error("ReadPID() should return error for negative PID")
+	}
+}
+
+func TestWaitForExit_MissingPIDFile(t *testing.T) {
+	// A missing PID file means the process is already gone, so WaitForExit
+	// should report exit immediately without consuming the timeout.
+	f := filepath.Join(t.TempDir(), "nonexistent.pid")
+	start := time.Now()
+	exited, err := WaitForExit(context.Background(), f, 5*time.Second)
+	if err != nil {
+		t.Fatalf("WaitForExit() error: %v", err)
+	}
+	if !exited {
+		t.Error("WaitForExit() = false, want true for a missing PID file")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("WaitForExit() took %v, expected near-instant return", elapsed)
+	}
+}
+
+func TestWaitForExit_StalePIDFileRemoved(t *testing.T) {
+	// A PID file referencing a PID that isn't a live vfkit process counts as
+	// exited, and WaitForExit removes the stale file as a side effect.
+	f := filepath.Join(t.TempDir(), "stale.pid")
+	if err := os.WriteFile(f, []byte("999999999\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exited, err := WaitForExit(context.Background(), f, 5*time.Second)
+	if err != nil {
+		t.Fatalf("WaitForExit() error: %v", err)
+	}
+	if !exited {
+		t.Error("WaitForExit() = false, want true (stale PID is not a live vfkit)")
+	}
+	if _, statErr := os.Stat(f); !os.IsNotExist(statErr) {
+		t.Errorf("WaitForExit() left stale PID file in place: %v", statErr)
 	}
 }
 

@@ -3,6 +3,7 @@
 package vfkit
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -147,6 +148,33 @@ func StopVM(pidFile string) error {
 
 	_ = os.Remove(pidFile)
 	return nil
+}
+
+// WaitForExit polls the vfkit PID file until the referenced process is no
+// longer running, the timeout elapses, or ctx is cancelled. It does NOT
+// signal the process — callers use it after requesting a graceful (REST/ACPI)
+// shutdown to wait for vfkit to exit on its own.
+//
+// Returns true if the process exited within the window, false if the timeout
+// elapsed. A cancelled ctx returns (false, ctx.Err()). A missing/stale PID file
+// counts as exited (true, nil).
+func WaitForExit(ctx context.Context, pidFile string, timeout time.Duration) (bool, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !IsRunning(pidFile) {
+			// Process gone — clean up any stale PID file it left behind.
+			_ = os.Remove(pidFile)
+			return true, nil
+		}
+		if time.Now().After(deadline) {
+			return false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 // ForceStopVM sends SIGKILL to the vfkit process immediately.
