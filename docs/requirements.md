@@ -50,6 +50,7 @@ Other Linux distributions with libvirt 8.0+ and QEMU 6.0+ should work. Intel Mac
 | Tool | Required | Homebrew Package | Used For |
 |------|----------|------------------|----------|
 | vfkit | Yes | vfkit | All VM operations |
+| vmnet-helper | Yes | nirs/vmnet-helper tap (`brew tap nirs/vmnet-helper && brew install vmnet-helper`) | Per-VM networking (installs off PATH; override path with `ABOX_VMNET_HELPER_PATH`) |
 | qemu-img | Yes | qemu | Base image conversion (qcow2 → raw) |
 | ssh | Yes | preinstalled | ssh, provision, scp |
 | scp | Yes | preinstalled | scp command |
@@ -192,7 +193,11 @@ sudo systemctl enable --now libvirtd
 ```bash
 # Required packages
 brew install vfkit qemu xorriso
+brew tap nirs/vmnet-helper && brew install vmnet-helper
 ```
+
+`vmnet-helper` installs into Homebrew's `libexec` directory (off `PATH`); abox
+locates it automatically. To use a custom path, set `ABOX_VMNET_HELPER_PATH`.
 
 macOS does not require any group membership, polkit configuration, or
 daemon startup. On first `abox start`, abox edits `/etc/pf.conf` to wire

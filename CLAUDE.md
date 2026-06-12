@@ -44,7 +44,10 @@ flowchart TB
         subgraph internal["internal/"]
             config["config/<br/>Instance configuration & storage"]
             libvirt["libvirt/<br/>virsh wrapper for networks, VMs, filters"]
-            backend["backend/<br/>Pluggable VM backend interface"]
+            backend["backend/<br/>Pluggable VM backend interface and registry"]
+            vfkitbackend["backend/vfkit/<br/>macOS vfkit backend (VM, network, disk)"]
+            vfkit["vfkit/<br/>vfkit process management & REST API"]
+            vmnethelper["vmnethelper/<br/>vmnet-helper process management"]
             dnsfilter["dnsfilter/<br/>DNS filtering service"]
             httpfilter["httpfilter/<br/>HTTP proxy filtering service"]
             allowlist["allowlist/<br/>Shared domain allowlist"]
@@ -83,6 +86,9 @@ flowchart TB
 | `pkg/cmd/root/root.go` | Root command and subcommand registration |
 | `internal/instance/` | Instance lifecycle and security (create, start, stop, remove) |
 | `internal/backend/` | Pluggable VM backend interface and registry |
+| `internal/backend/vfkit/` | macOS vfkit backend (VM, network, disk, traffic) |
+| `internal/vfkit/` | vfkit process management and REST API client |
+| `internal/vmnethelper/` | vmnet-helper process management and binary resolution |
 | `internal/libvirt/` | XML generation, virsh commands |
 | `internal/config/` | Instance config, paths, allocation |
 | `internal/boxfile/` | abox.yaml parsing and validation |
@@ -133,4 +139,4 @@ When adding new commands:
 3. Use `config.Load()` to get instance config
 4. Use backend abstraction via `factory.BackendFor(name)` for VM/network operations
 
-Note: The codebase uses a backend abstraction layer (`internal/backend/`) to support multiple VM backends. Currently only libvirt is implemented, but commands should use the backend interface rather than calling `internal/libvirt/` directly.
+Note: The codebase uses a backend abstraction layer (`internal/backend/`) to support multiple VM backends. Two backends are implemented: `libvirt` (Linux) and `vfkit` (macOS/Apple Silicon). Commands should use the backend interface rather than calling `internal/libvirt/` or `internal/backend/vfkit/` directly.

@@ -8,6 +8,9 @@ PREREQUISITES
   - macOS on Apple Silicon (arm64)
   - vfkit, qemu, xorriso installed via Homebrew
       brew install vfkit qemu xorriso
+  - vmnet-helper installed via Homebrew (required; installs off PATH)
+      brew tap nirs/vmnet-helper && brew install vmnet-helper
+      (override path with ABOX_VMNET_HELPER_PATH=/abs/path/to/vmnet-helper)
   - sudo available (first 'abox start' wires abox anchors into /etc/pf.conf)
 
   Check with: abox check-deps

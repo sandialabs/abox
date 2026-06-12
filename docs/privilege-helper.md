@@ -104,9 +104,10 @@ NOPASSWD option documented here, and no `abox` group.
 
 - `make install-helper` and the `abox-helper` binary are Linux-only (the
   Makefile rejects running them on macOS).
-- `abox start` prompts for `sudo` once per privilege-helper lifetime.
-  The helper keeps running across multiple commands until the last
-  instance stops, so most sessions see a single prompt.
+- The privilege helper is launched per privileged command and exits
+  when that command finishes. Repeat prompts within the same terminal
+  session are suppressed by sudo's credential cache (typically 5
+  minutes), so most sessions see only a single prompt.
 - The gRPC privilege server is the same implementation as on Linux;
   only the launch mechanism differs. Input validation, UID checking,
   and token authentication are identical.

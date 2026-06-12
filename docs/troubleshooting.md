@@ -377,9 +377,10 @@ The PF anchors check reports one of three states:
 #### abox start Prompts for sudo Every Time
 
 This is expected. macOS does not support the setuid `abox-helper` path,
-so every privilege helper launch goes through `sudo`. The helper stays
-running across multiple commands until the last instance stops; you
-should see one sudo prompt per helper lifetime, not per command. See
+so every privilege helper launch goes through `sudo`. The helper is
+launched per privileged command and exits when that command finishes;
+repeat prompts are suppressed by sudo's credential cache (typically 5
+minutes), so most sessions see only a single prompt. See
 [macOS Support: Privilege Escalation](macos.md#privilege-escalation).
 
 #### Other VMs Lost Network After abox start

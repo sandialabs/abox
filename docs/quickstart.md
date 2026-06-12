@@ -13,6 +13,7 @@ Get started with abox in five minutes.
 - Apple Silicon Mac running macOS 13+
 - Homebrew
 - vfkit, qemu, xorriso installed via `brew install`
+- vmnet-helper installed via `brew tap nirs/vmnet-helper && brew install vmnet-helper`
 - Go 1.25+ (for building)
 
 See [macOS Support](macos.md) for the full macOS setup flow.

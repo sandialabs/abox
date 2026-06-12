@@ -65,7 +65,7 @@ On macOS this downloads the **arm64** variant of the cloud image. Other provider
 
 The very first `abox start <name>` after installation does three extra things that subsequent starts do not:
 
-1. **Prompts for sudo** to launch the privilege helper (used for every `pfctl` operation). The helper stays running until the last instance stops, so you typically see the sudo prompt once per session.
+1. **Prompts for sudo** to launch the privilege helper (used for every `pfctl` operation). The helper is launched per privileged command and exits when that command finishes; repeat prompts within the same terminal session are suppressed by sudo's credential cache (typically 5 minutes), so most sessions see only one prompt.
 2. **Edits `/etc/pf.conf`** to wire abox's anchor references into the main PF ruleset (see [PF Anchor Wiring](#pf-anchor-wiring)). abox prints a one-line notice when it does this.
 3. **Reloads the main PF ruleset** via `pfctl -f /etc/pf.conf`. This can briefly disrupt other vmnet-based VMs — see the warning below.
 
@@ -202,11 +202,12 @@ Base images and instance data live under your home directory (no `/var/lib/libvi
 
 | Path | Content |
 |------|---------|
-| `~/Library/Application Support/abox/images/` | Base images (raw format, used directly by vfkit) |
-| `~/.local/share/abox/instances/<name>/` | Per-instance config, keys, disk, logs |
+| `~/Library/Application Support/abox/images/base/` | Base images (raw format, downloaded by `abox base pull`) |
+| `~/Library/Application Support/abox/images/instances/<name>/` | Per-instance disk (`disk.raw`), cloud-init ISO (`cidata.iso`), EFI variable store |
+| `~/.local/share/abox/instances/<name>/` | Per-instance config (`config.yaml`), SSH keys, allowlist, logs |
 | `~/Library/Caches/abox/filters/` | Filter marker files (`<filter>.applied`) |
 
-Instance disks are raw-format APFS clones (`cp -c`) of the base image — effectively copy-on-write with no runtime overhead.
+Instance disks are raw-format APFS clones (`cp -c`) of the base image — effectively copy-on-write with no runtime overhead. The config/keys/logs are in `~/.local/share/abox/` (XDG data home); disk images are in `~/Library/Application Support/abox/images/` (the macOS-appropriate backend storage root).
 
 ## See Also
 
