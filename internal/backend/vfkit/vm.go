@@ -38,17 +38,67 @@ func loadInstanceState(name string) (*config.Instance, *config.Paths, error) {
 	return inst, paths, nil
 }
 
+// pidFileName builds the per-instance PID file basename for a given component.
+func pidFileName(name, component string) string {
+	return fmt.Sprintf("abox-%s-%s.pid", name, component)
+}
+
+// legacyPIDDir is where PID files used to live: the per-user runtime dir, which
+// on macOS resolves to $TMPDIR and is purged by the OS after ~3 idle days
+// (finding F12). PID files now live under the instance directory (see
+// instanceRunDir), but we still read-fall-back here so a VM that was started
+// under the old layout stays manageable across the upgrade.
+func legacyPIDDir() string {
+	return config.RuntimeDirOr(os.TempDir())
+}
+
+// instanceRunDir returns the per-instance directory that holds PID files. It
+// lives under the instance's on-disk data directory (paths.Instance/run) so it
+// survives macOS's periodic purge of $TMPDIR, unlike legacyPIDDir. The dir is
+// created if missing. On any failure resolving the instance path it falls back
+// to the legacy runtime dir so liveness tracking never silently breaks.
+func instanceRunDir(name string) string {
+	paths, err := config.GetPaths(name)
+	if err != nil {
+		return legacyPIDDir()
+	}
+	runDir := filepath.Join(paths.Instance, "run")
+	if mkErr := os.MkdirAll(runDir, 0o700); mkErr != nil {
+		logging.Debug("failed to create instance run dir, falling back to runtime dir",
+			"instance", name, "dir", runDir, "error", mkErr)
+		return legacyPIDDir()
+	}
+	return runDir
+}
+
+// resolvePIDFile returns the active PID file path for a component, preferring
+// the persistent per-instance run dir. If no file exists there but a legacy
+// $TMPDIR file does, it returns the legacy path so an already-running VM stays
+// manageable. New writers always use the per-instance path.
+func resolvePIDFile(name, component string) string {
+	base := pidFileName(name, component)
+	primary := filepath.Join(instanceRunDir(name), base)
+	if _, err := os.Stat(primary); err == nil {
+		return primary
+	}
+	legacy := filepath.Join(legacyPIDDir(), base)
+	if primary != legacy {
+		if _, err := os.Stat(legacy); err == nil {
+			return legacy
+		}
+	}
+	return primary
+}
+
 // vfkitPIDFile returns the path to the vfkit PID file for the given instance.
 func vfkitPIDFile(name string) string {
-	runtimeDir := config.RuntimeDirOr(os.TempDir())
-	return filepath.Join(runtimeDir, fmt.Sprintf("abox-%s-vfkit.pid", name))
+	return resolvePIDFile(name, "vfkit")
 }
 
 // vmnetHelperPIDFile returns the path to the vmnet-helper PID file for the
 // given instance. Each VM has its own helper process (= its own bridgeN).
 func vmnetHelperPIDFile(name string) string {
-	runtimeDir := config.RuntimeDirOr(os.TempDir())
-	return filepath.Join(runtimeDir, fmt.Sprintf("abox-%s-vmnethelper.pid", name))
+	return resolvePIDFile(name, "vmnethelper")
 }
 
 // deriveVMNetAddresses computes the vmnet-helper --subnet-mask and
@@ -290,23 +340,7 @@ func (m *VMManager) Start(_ context.Context, name string) error {
 		return fmt.Errorf("VM %q is already running", name)
 	}
 
-	// At this point vfkit is NOT running. vmnet-helper does not auto-exit when
-	// vfkit dies, so a prior crash can leave an orphaned helper holding our
-	// pinned subnet/interface-id. Launching a second helper on top of it hangs
-	// (it never emits its start JSON), so reclaim the orphan first: stop it
-	// gracefully, force-kill on failure, then clear its PID file.
-	if vmnethelper.IsRunning(helperPID) {
-		logging.Warn("found orphaned vmnet-helper from a previous crash, stopping it",
-			"instance", name)
-		if herr := vmnethelper.Stop(helperPID); herr != nil {
-			logging.Warn("graceful stop of orphaned vmnet-helper failed, force-killing",
-				"instance", name, "error", herr)
-			if ferr := vmnethelper.ForceStop(helperPID); ferr != nil {
-				logging.Warn("failed to force-stop orphaned vmnet-helper",
-					"instance", name, "error", ferr)
-			}
-		}
-	}
+	reclaimOrphanedHelper(name, helperPID)
 
 	// Clean up stale PID files from a previous crash.
 	_ = vfkit.CleanupPIDFile(pidFile)
@@ -372,6 +406,22 @@ func (m *VMManager) Start(_ context.Context, name string) error {
 			res.StartAddress, name, inst.Gateway, inst.Subnet)
 	}
 
+	// Allocate a fresh REST port at every Start rather than reusing the one
+	// persisted at Create (finding F14). The Create-time port is bound and
+	// released immediately, so anything could have claimed it in the interim;
+	// reusing it risks vfkit dying right after a "successful" start. Allocate
+	// now, persist it (other code reads rest_port from BackendConfig to talk to
+	// the VM), and feed it into the launch config.
+	port, err := vfkit.AllocateRESTPort()
+	if err != nil {
+		_ = vmnethelper.ForceStop(helperPID)
+		return fmt.Errorf("failed to allocate REST port: %w", err)
+	}
+	if inst.BackendConfig == nil {
+		inst.BackendConfig = make(map[string]any)
+	}
+	inst.BackendConfig["rest_port"] = port
+
 	cfg := buildVMConfig(inst, paths)
 	cfg.NetFD = vfkit.NetFDChild
 
@@ -383,14 +433,33 @@ func (m *VMManager) Start(_ context.Context, name string) error {
 	}
 	launched = true
 
-	// Persist the resolved bridge so the post-boot pf step can scope the
-	// per-VM IPv6 block to this interface.
-	if inst.BackendConfig == nil {
-		inst.BackendConfig = make(map[string]any)
+	// vfkit was launched detached; exec.Start() succeeding only means the fork
+	// happened, not that vfkit is healthy (finding F13). An instant death — a
+	// taken REST port, corrupt disk, EFI store error — would otherwise sail
+	// through as a "successful" start, leaving a helper + bridge up for a dead
+	// VM. Verify liveness within a short grace window before declaring success;
+	// on failure, tear everything down and surface the vfkit.log tail.
+	if err := vfkit.VerifyLive(cfg.PIDFile, cfg.RESTfulURI, vmStartGraceWindow); err != nil {
+		_ = vfkit.ForceStopVM(cfg.PIDFile)
+		_ = vmnethelper.ForceStop(helperPID)
+		tail := vfkit.LogTail(cfg.LogFile, vfkitLogTailLines)
+		if tail != "" {
+			return fmt.Errorf("VM %q died immediately after launch: %w\nvfkit.log:\n%s", name, err, tail)
+		}
+		return fmt.Errorf("VM %q died immediately after launch: %w", name, err)
 	}
+
+	// Persist the resolved bridge (for post-boot pf scoping) and the fresh REST
+	// port. This must succeed: without the bridge, setupPostBootFirewall hard-
+	// fails with the VM already up and the entire per-instance pf ruleset (DNS
+	// redirect, default-deny, IPv6 block) never applied, leaving a running VM
+	// with zero egress filtering and no self-heal on retry (finding F11). Treat
+	// it as fatal and tear down vfkit + helper, mirroring the StartVM error path.
 	inst.BackendConfig["bridge"] = res.BridgeInterface
 	if err := config.Save(inst, paths); err != nil {
-		logging.Warn("failed to persist bridge interface", "instance", name, "error", err)
+		_ = vfkit.ForceStopVM(cfg.PIDFile)
+		_ = vmnethelper.ForceStop(helperPID)
+		return fmt.Errorf("failed to persist bridge interface for instance %q (VM torn down to keep the sandbox closed): %w", name, err)
 	}
 
 	logging.Debug("VM started",
@@ -399,9 +468,41 @@ func (m *VMManager) Start(_ context.Context, name string) error {
 		"helper_pid", res.PID,
 		"bridge", res.BridgeInterface,
 		"gateway", res.StartAddress,
+		"rest_port", port,
 	)
 	return nil
 }
+
+// reclaimOrphanedHelper stops a vmnet-helper left over from a previous crash.
+// vmnet-helper does not auto-exit when vfkit dies, so an orphan can survive
+// holding our pinned subnet/interface-id. Launching a second helper on top of
+// it hangs (it never emits its start JSON), so reclaim the orphan first: stop
+// it gracefully, force-kill on failure.
+func reclaimOrphanedHelper(name, helperPID string) {
+	if !vmnethelper.IsRunning(helperPID) {
+		return
+	}
+	logging.Warn("found orphaned vmnet-helper from a previous crash, stopping it",
+		"instance", name)
+	if herr := vmnethelper.Stop(helperPID); herr != nil {
+		logging.Warn("graceful stop of orphaned vmnet-helper failed, force-killing",
+			"instance", name, "error", herr)
+		if ferr := vmnethelper.ForceStop(helperPID); ferr != nil {
+			logging.Warn("failed to force-stop orphaned vmnet-helper",
+				"instance", name, "error", ferr)
+		}
+	}
+}
+
+// vmStartGraceWindow bounds how long Start waits, after launching vfkit, to
+// confirm the process is alive and its REST API answers before declaring the
+// start a success. A short window is enough to catch instant deaths (taken REST
+// port, corrupt disk, EFI store error) without slowing the common path.
+const vmStartGraceWindow = 2 * time.Second
+
+// vfkitLogTailLines is how many trailing vfkit.log lines to surface when a
+// launch dies, enough to show the fatal error without dumping the whole boot.
+const vfkitLogTailLines = 20
 
 // gracefulStopWindow bounds how long Stop waits for vfkit to exit on its own
 // after a REST/ACPI shutdown request before falling back to signals. It sits

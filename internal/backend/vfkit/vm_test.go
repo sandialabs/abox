@@ -190,6 +190,10 @@ func TestRestfulURI(t *testing.T) {
 }
 
 func TestVfkitPIDFile(t *testing.T) {
+	// Pin the data dir so the per-instance run dir resolves under a temp tree
+	// rather than the developer's real ~/.local/share/abox (finding F12).
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
 	pidFile := vfkitPIDFile("myvm")
 	if !filepath.IsAbs(pidFile) {
 		t.Errorf("vfkitPIDFile() should return absolute path, got %q", pidFile)
@@ -197,15 +201,50 @@ func TestVfkitPIDFile(t *testing.T) {
 	if filepath.Base(pidFile) != "abox-myvm-vfkit.pid" {
 		t.Errorf("vfkitPIDFile() basename = %q, want %q", filepath.Base(pidFile), "abox-myvm-vfkit.pid")
 	}
+	// New PID files must live under the persistent instance run dir, not $TMPDIR.
+	if filepath.Base(filepath.Dir(pidFile)) != "run" {
+		t.Errorf("vfkitPIDFile() should live under the instance run dir, got %q", pidFile)
+	}
 }
 
 func TestVMNetHelperPIDFile(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
 	pidFile := vmnetHelperPIDFile("myvm")
 	if !filepath.IsAbs(pidFile) {
 		t.Errorf("vmnetHelperPIDFile() should return absolute path, got %q", pidFile)
 	}
 	if filepath.Base(pidFile) != "abox-myvm-vmnethelper.pid" {
 		t.Errorf("vmnetHelperPIDFile() basename = %q, want %q", filepath.Base(pidFile), "abox-myvm-vmnethelper.pid")
+	}
+	if filepath.Base(filepath.Dir(pidFile)) != "run" {
+		t.Errorf("vmnetHelperPIDFile() should live under the instance run dir, got %q", pidFile)
+	}
+}
+
+// TestResolvePIDFile_LegacyFallback verifies that when a VM was started under
+// the old $TMPDIR layout (legacy PID file present, new one absent),
+// resolvePIDFile returns the legacy path so the running VM stays manageable.
+func TestResolvePIDFile_LegacyFallback(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	// Force the legacy dir to a known temp location by pinning XDG_RUNTIME_DIR.
+	legacy := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", legacy)
+
+	// No PID file anywhere yet: resolve points at the new per-instance run dir.
+	primary := resolvePIDFile("myvm", "vfkit")
+	if filepath.Base(filepath.Dir(primary)) != "run" {
+		t.Fatalf("expected new per-instance path, got %q", primary)
+	}
+
+	// Simulate a VM started under the old layout: write only the legacy file.
+	legacyFile := filepath.Join(legacy, "abox-myvm-vfkit.pid")
+	if err := os.WriteFile(legacyFile, []byte("123\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolvePIDFile("myvm", "vfkit"); got != legacyFile {
+		t.Errorf("resolvePIDFile() = %q, want legacy %q", got, legacyFile)
 	}
 }
 

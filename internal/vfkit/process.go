@@ -104,6 +104,59 @@ func StartVM(cfg VMConfig, netFD *os.File) (int, error) {
 	return pid, nil
 }
 
+// VerifyLive confirms a freshly launched vfkit is actually running rather than
+// having died instantly (finding F13). exec.Start() returning success only means
+// the fork happened; a taken REST port, corrupt disk, or EFI store error can
+// kill vfkit microseconds later. VerifyLive polls until either the REST API
+// answers (definitive: the process is up and serving) or the grace window
+// elapses, and fails fast if the process disappears in the meantime.
+//
+// If restfulURI is empty (no REST API configured) it can only check that the
+// process stayed alive for the duration of the window.
+func VerifyLive(pidFile, restfulURI string, grace time.Duration) error {
+	deadline := time.Now().Add(grace)
+	for {
+		if !IsRunning(pidFile) {
+			return errors.New("vfkit process exited immediately after launch")
+		}
+		if restfulURI != "" {
+			if _, err := VMState(restfulURI); err == nil {
+				// REST answered: vfkit is up and its lifecycle API works.
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			// Process is still alive at the deadline. With a REST URI configured
+			// we never got a clean answer, but a live process that simply hasn't
+			// finished bringing up its API yet is the common case — treat the
+			// surviving process as success rather than tearing down a healthy VM.
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// LogTail returns up to the last n lines of the named file, for surfacing in
+// error messages when a launch fails. Returns "" if the file can't be read or
+// is empty; callers treat an empty tail as "nothing to show".
+func LogTail(path string, n int) string {
+	if path == "" || n <= 0 {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
+		return ""
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
 // StopVM sends SIGTERM to the vfkit process, waits up to 5 seconds for it to
 // exit, then sends SIGKILL if it's still alive. Cleans up the PID file.
 func StopVM(pidFile string) error {

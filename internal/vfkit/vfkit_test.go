@@ -256,6 +256,65 @@ func TestAllocateRESTPort(t *testing.T) {
 	}
 }
 
+func TestVerifyLive_ProcessDied(t *testing.T) {
+	// A missing PID file means the process is gone — VerifyLive must fail fast
+	// rather than waiting out the grace window (finding F13).
+	f := filepath.Join(t.TempDir(), "nonexistent.pid")
+	start := time.Now()
+	err := VerifyLive(f, "", 2*time.Second)
+	if err == nil {
+		t.Error("VerifyLive() = nil, want error for a dead/missing process")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("VerifyLive() took %v, expected near-instant failure", elapsed)
+	}
+}
+
+func TestVerifyLive_StalePID(t *testing.T) {
+	// A PID file referencing a non-vfkit PID counts as not running.
+	f := filepath.Join(t.TempDir(), "stale.pid")
+	if err := os.WriteFile(f, []byte("999999999\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyLive(f, "", 500*time.Millisecond); err == nil {
+		t.Error("VerifyLive() = nil, want error for a stale PID")
+	}
+}
+
+func TestLogTail(t *testing.T) {
+	dir := t.TempDir()
+
+	// Missing file → empty tail.
+	if got := LogTail(filepath.Join(dir, "missing.log"), 5); got != "" {
+		t.Errorf("LogTail(missing) = %q, want empty", got)
+	}
+
+	// Empty path or non-positive n → empty tail.
+	if got := LogTail("", 5); got != "" {
+		t.Errorf("LogTail(\"\") = %q, want empty", got)
+	}
+
+	f := filepath.Join(dir, "vfkit.log")
+	if err := os.WriteFile(f, []byte("l1\nl2\nl3\nl4\nl5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := LogTail(f, 2), "l4\nl5"; got != want {
+		t.Errorf("LogTail(2) = %q, want %q", got, want)
+	}
+	if got, want := LogTail(f, 100), "l1\nl2\nl3\nl4\nl5"; got != want {
+		t.Errorf("LogTail(100) = %q, want %q", got, want)
+	}
+
+	// A file with only a trailing newline yields no content.
+	empty := filepath.Join(dir, "empty.log")
+	if err := os.WriteFile(empty, []byte("\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := LogTail(empty, 5); got != "" {
+		t.Errorf("LogTail(empty) = %q, want empty", got)
+	}
+}
+
 func TestRestBaseURL(t *testing.T) {
 	tests := []struct {
 		input string
