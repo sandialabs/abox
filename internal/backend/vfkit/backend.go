@@ -127,6 +127,15 @@ func (b *Backend) StorageDir() string {
 	return storageDir()
 }
 
+// CreateRequiresPrivilege returns false — instance creation on macOS touches only
+// user-owned storage (~/Library/Application Support/abox) and uses APFS clones, so
+// no privileged operations occur at create time. This implements
+// backend.CreatePrivilegeProvider so create skips the privilege helper (and its
+// sudo prompt); privileges are first acquired at `abox start`.
+func (b *Backend) CreateRequiresPrivilege() bool {
+	return false
+}
+
 // DiskFormat returns "raw" — vfkit (Apple Virtualization.framework) only supports raw disk images.
 func (b *Backend) DiskFormat() string {
 	return "raw"

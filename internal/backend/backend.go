@@ -251,6 +251,18 @@ type SubnetProvider interface {
 	NetworkDefaults() (gateway, subnet string)
 }
 
+// CreatePrivilegeProvider is an optional interface for backends that can report
+// whether `abox create` needs the privilege helper. Backends with user-owned
+// storage and no privileged create-time operations (e.g., vfkit on macOS) return
+// false so create does not trigger a sudo prompt. Backends that do not implement
+// this interface default to requiring privileges (Linux/libvirt unchanged).
+// Check support via type assertion: cpp, ok := be.(CreatePrivilegeProvider)
+type CreatePrivilegeProvider interface {
+	// CreateRequiresPrivilege reports whether instance creation performs
+	// operations that require the privilege helper.
+	CreateRequiresPrivilege() bool
+}
+
 // TemplateValidator is an optional interface for backends that support custom templates.
 // Check support via type assertion: tv, ok := be.(TemplateValidator)
 type TemplateValidator interface {

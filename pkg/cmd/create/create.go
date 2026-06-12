@@ -164,12 +164,25 @@ func (c *cleanupState) cleanupDomain(ctx context.Context) {
 	}
 }
 
-// cleanupDisk removes the disk directory via the privileged helper.
+// cleanupDisk removes the disk directory. For backends that need the privilege
+// helper it goes through the helper; for backends with user-owned storage
+// (e.g., vfkit on macOS) it removes the directory directly.
 func (c *cleanupState) cleanupDisk(ctx context.Context) {
-	if !c.diskCreated || c.factory == nil || c.paths.DiskDir == "" || c.inst == nil {
+	if !c.diskCreated || c.paths.DiskDir == "" || c.inst == nil {
 		return
 	}
 	fmt.Fprintln(c.out, "  Removing disk...")
+
+	if c.backend != nil && !createRequiresPrivilege(c.backend) {
+		if err := os.RemoveAll(c.paths.DiskDir); err != nil {
+			logging.Debug("cleanup: failed to remove disk", "path", c.paths.DiskDir, "error", err)
+		}
+		return
+	}
+
+	if c.factory == nil {
+		return
+	}
 	client, err := c.factory.PrivilegeClientFor(c.inst.Name)
 	if err != nil {
 		return
@@ -309,6 +322,16 @@ func executeCreate(
 	return nil
 }
 
+// createRequiresPrivilege reports whether the backend needs the privilege helper
+// during create. Backends that don't implement backend.CreatePrivilegeProvider
+// default to requiring privileges (Linux/libvirt unchanged).
+func createRequiresPrivilege(be backend.Backend) bool {
+	if cpp, ok := be.(backend.CreatePrivilegeProvider); ok {
+		return cpp.CreateRequiresPrivilege()
+	}
+	return true
+}
+
 // initInstance sets up the privilege client, directories, subnet, instance config,
 // and saves it. Returns the privilege client, instance, subnet string, and any error.
 func initInstance(
@@ -320,10 +343,16 @@ func initInstance(
 	templateSupported bool,
 	cs *cleanupState,
 ) (rpc.PrivilegeClient, *config.Instance, string, error) {
-	// Get privilege client early - this is where the single password prompt happens
-	client, err := opts.Factory.PrivilegeClientFor(name)
-	if err != nil {
-		return nil, nil, "", fmt.Errorf("failed to get privilege client: %w", err)
+	// Get privilege client early - this is where the single password prompt happens.
+	// Backends with user-owned storage and no privileged create-time operations
+	// (e.g., vfkit on macOS) skip this so create does not trigger a sudo prompt.
+	var client rpc.PrivilegeClient
+	if createRequiresPrivilege(be) {
+		c, err := opts.Factory.PrivilegeClientFor(name)
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("failed to get privilege client: %w", err)
+		}
+		client = c
 	}
 
 	if err := config.EnsureDirs(paths); err != nil {
