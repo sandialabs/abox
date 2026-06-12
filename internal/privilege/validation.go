@@ -8,10 +8,10 @@ import (
 	"strings"
 )
 
-// safePathChars matches strings containing ONLY safe path characters.
-// Using an allowlist instead of a denylist to avoid missing dangerous characters
-// (e.g., null bytes, newlines, glob characters).
-var safePathChars = regexp.MustCompile(`^[a-zA-Z0-9/_.\-+:=@ ]+$`)
+// safePathChars is defined per-platform in validation_linux.go and
+// validation_darwin.go because the allowed character set differs:
+// macOS abox storage lives under "~/Library/Application Support/abox",
+// which contains a space, while the Linux setuid helper keeps the strict set.
 
 // safeBridgeChars matches strings containing ONLY valid bridge name characters.
 var safeBridgeChars = regexp.MustCompile(`^[a-zA-Z0-9\-]+$`)

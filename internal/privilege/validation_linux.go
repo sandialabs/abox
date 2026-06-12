@@ -6,8 +6,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// safePathChars matches strings containing ONLY safe path characters.
+// Using an allowlist instead of a denylist to avoid missing dangerous characters
+// (e.g., null bytes, newlines, glob characters).
+// Spaces are intentionally excluded: the Linux setuid helper manages root-owned
+// storage under /var/lib/libvirt/images/abox, which never contains spaces.
+// (The macOS variant in validation_darwin.go permits spaces for
+// "~/Library/Application Support/abox".)
+var safePathChars = regexp.MustCompile(`^[a-zA-Z0-9/_.\-+:=@]+$`)
 
 // libvirtImagesDir is the privileged-helper-managed disk image storage root.
 // Mirrors config.LibvirtImagesDir; kept local to avoid importing config from

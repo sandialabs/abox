@@ -53,19 +53,24 @@ func (s *PrivilegeServer) Shutdown(_ context.Context, _ *rpc.Empty) (*rpc.Empty,
 }
 
 // QemuImgCreate creates a qemu disk image.
-// On macOS, storage is user-owned so symlink/TOCTOU protections are less critical
-// than on Linux (where storage is root-owned). Basic validation is still applied.
+// On macOS, storage is user-owned so symlink/TOCTOU *pinning* is dropped
+// relative to Linux (where storage is root-owned). Path *containment* is kept:
+// both the output and any backing file are confined to the per-user abox
+// storage root, mirroring helper_linux.go's QemuImgCreate/validateBackingFile.
 func (s *PrivilegeServer) QemuImgCreate(_ context.Context, req *rpc.QemuImgReq) (*rpc.Empty, error) {
 	if !strings.HasSuffix(req.Output, ".qcow2") {
 		return nil, fmt.Errorf("output must end with .qcow2: %s", req.Output)
+	}
+	if err := s.ValidatePathNoSymlinks(req.Output); err != nil {
+		return nil, err
 	}
 
 	if req.BackingFile != "" {
 		if !strings.HasSuffix(req.BackingFile, ".qcow2") {
 			return nil, fmt.Errorf("backing file must be .qcow2: %s", req.BackingFile)
 		}
-		if strings.Contains(req.BackingFile, "..") {
-			return nil, fmt.Errorf("path traversal not allowed in backing file: %s", req.BackingFile)
+		if err := s.ValidatePathNoSymlinks(req.BackingFile); err != nil {
+			return nil, err
 		}
 	}
 
@@ -89,20 +94,18 @@ func (s *PrivilegeServer) QemuImgCreate(_ context.Context, req *rpc.QemuImgReq) 
 }
 
 // Chmod changes file permissions.
+// Path is confined to the per-user abox storage root (no-symlinks variant).
+// Like Linux, the mode itself is not restricted — confining the path is what
+// contains the root-privileged surface (setuid-bit chmod outside abox storage
+// is what an attacker would want, and the path check already blocks that).
 func (s *PrivilegeServer) Chmod(_ context.Context, req *rpc.ChmodReq) (*rpc.Empty, error) {
 	if err := ValidateChmodMode(req.Mode); err != nil {
 		return nil, err
 	}
 
-	if err := ValidateArgs([]string{req.Path}); err != nil {
+	if err := s.ValidatePathNoSymlinks(req.Path); err != nil {
 		return nil, err
 	}
-
-	mode, err := os.Stat(req.Path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to stat: %w", err)
-	}
-	_ = mode
 
 	parsed, err := parseOctalMode(req.Mode)
 	if err != nil {
@@ -117,8 +120,9 @@ func (s *PrivilegeServer) Chmod(_ context.Context, req *rpc.ChmodReq) (*rpc.Empt
 }
 
 // MkdirAll creates directories.
+// Path is confined to the per-user abox storage root (no-symlinks variant).
 func (s *PrivilegeServer) MkdirAll(_ context.Context, req *rpc.MkdirReq) (*rpc.Empty, error) {
-	if err := ValidateArgs([]string{req.Path}); err != nil {
+	if err := s.ValidatePathNoSymlinks(req.Path); err != nil {
 		return nil, err
 	}
 
@@ -139,13 +143,15 @@ func (s *PrivilegeServer) MkdirAll(_ context.Context, req *rpc.MkdirReq) (*rpc.E
 }
 
 // RemoveAll removes a directory tree.
+// Confined to the per-user abox storage root with a minimum-depth guard so the
+// root itself (or an ancestor) can never be removed. Mirrors Linux RemoveAll.
 func (s *PrivilegeServer) RemoveAll(_ context.Context, req *rpc.PathReq) (*rpc.Empty, error) {
-	if err := ValidateArgs([]string{req.Path}); err != nil {
+	if err := s.ValidateRemoveAllPath(req.Path); err != nil {
 		return nil, err
 	}
 
-	if strings.Contains(req.Path, "..") {
-		return nil, fmt.Errorf("path traversal not allowed: %s", req.Path)
+	if err := s.ValidatePathNoSymlinks(req.Path); err != nil {
+		return nil, err
 	}
 
 	if err := os.RemoveAll(req.Path); err != nil {
@@ -156,8 +162,18 @@ func (s *PrivilegeServer) RemoveAll(_ context.Context, req *rpc.PathReq) (*rpc.E
 }
 
 // CopyFile copies a file.
+// Both src and dst are confined to the per-user abox storage root. Mirroring
+// helper_linux.go's validateCopySource spirit, the source must be an abox disk
+// or ISO image (.qcow2/.iso); the destination is confined with the no-symlinks
+// variant.
 func (s *PrivilegeServer) CopyFile(_ context.Context, req *rpc.CopyReq) (*rpc.Empty, error) {
-	if err := ValidateArgs([]string{req.Src, req.Dst}); err != nil {
+	if !strings.HasSuffix(req.Src, ".qcow2") && !strings.HasSuffix(req.Src, ".iso") {
+		return nil, fmt.Errorf("source must be .qcow2 or .iso file: %s", req.Src)
+	}
+	if err := s.ValidatePathNoSymlinks(req.Src); err != nil {
+		return nil, err
+	}
+	if err := s.ValidatePathNoSymlinks(req.Dst); err != nil {
 		return nil, err
 	}
 
@@ -170,7 +186,7 @@ func (s *PrivilegeServer) CopyFile(_ context.Context, req *rpc.CopyReq) (*rpc.Em
 		return nil, fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	if err := os.WriteFile(req.Dst, data, 0o600); err != nil { //nolint:gosec // path validated via ValidateArgs
+	if err := os.WriteFile(req.Dst, data, 0o600); err != nil { //nolint:gosec // path confined via ValidatePathNoSymlinks
 		return nil, fmt.Errorf("failed to write destination: %w", err)
 	}
 
