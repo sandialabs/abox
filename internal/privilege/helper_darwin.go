@@ -281,8 +281,13 @@ func (s *PrivilegeServer) PfctlLoadAnchor(_ context.Context, req *rpc.PfctlAncho
 		return nil, err
 	}
 
-	if req.RulesContent == "" {
-		return nil, errors.New("rules content is required")
+	// Re-validate the rule content server-side. The unprivileged firewall
+	// package builds these rules, but client-side validation is not a trust
+	// boundary: a token-holding caller could otherwise load arbitrary pf text
+	// (rdr hijacks, nested anchor/load/include) into a root anchor. See
+	// validatePFRules.
+	if err := validatePFRules(req.RulesContent); err != nil {
+		return nil, fmt.Errorf("invalid PF rules: %w", err)
 	}
 
 	// Write rules to a temp file
