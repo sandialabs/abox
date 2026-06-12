@@ -506,23 +506,9 @@ func warnCustomTemplate(opts *Options, be backend.Backend) {
 // If the backend implements SubnetProvider (e.g., macOS vmnet), its managed network
 // is used instead of the abox subnet pool.
 func allocateSubnet(opts *Options, be backend.Backend) (string, string, error) {
-	if opts.Subnet != "" {
-		gateway, _, err := config.ValidateSubnet(opts.Subnet)
-		if err != nil {
-			return "", "", fmt.Errorf("invalid subnet: %w", err)
-		}
-		return opts.Subnet, gateway, nil
-	}
-
-	// Use backend-managed network if available (e.g., vmnet shared mode on macOS).
-	if sp, ok := be.(backend.SubnetProvider); ok {
-		gateway, subnet := sp.NetworkDefaults()
-		return subnet, gateway, nil
-	}
-
-	subnet, gateway, _, err := config.AllocateSubnet("")
+	subnet, gateway, _, err := backend.ResolveNetwork(be, opts.Subnet)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to allocate subnet: %w", err)
+		return "", "", err
 	}
 	return subnet, gateway, nil
 }

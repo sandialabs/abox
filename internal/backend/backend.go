@@ -241,6 +241,19 @@ type DiskFormatProvider interface {
 	DiskFormat() string
 }
 
+// SelfContainedExporter is an optional interface for backends whose disk export
+// is always a single self-contained image with no backing-file/CoW-delta concept
+// (e.g. vfkit on macOS, which stores raw disks). For such backends the
+// `--snapshot` export flag cannot be honored: there is no delta to export, so a
+// snapshot request must be rejected rather than silently producing a full image
+// mislabeled as a snapshot. Check support via type assertion:
+// sce, ok := be.Disk().(SelfContainedExporter).
+type SelfContainedExporter interface {
+	// SelfContainedExport reports whether this backend's Export always produces a
+	// self-contained image (true) such that snapshot/CoW-delta export is impossible.
+	SelfContainedExport() bool
+}
+
 // SubnetProvider is an optional interface for backends that manage their own
 // networking subnet (e.g., macOS vmnet shared mode). When implemented, the
 // create flow uses this instead of the default subnet pool allocation.

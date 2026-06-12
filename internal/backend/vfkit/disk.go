@@ -4,6 +4,7 @@ package vfkit
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -58,13 +59,29 @@ func (m *DiskManager) Create(ctx context.Context, _ rpc.PrivilegeClient, inst *c
 		return fmt.Errorf("failed to clone base image: %w", err)
 	}
 
-	// Extend disk to requested size (base image may be smaller)
+	// Extend disk to requested size (base image may be smaller). Only ever grow:
+	// the clone already contains the full base filesystem, GPT, and backup header,
+	// so truncating below the clone's current size would silently lop off the tail
+	// of the filesystem and the GPT backup header, corrupting the disk.
 	diskBytes, err := parseDiskSize(inst.Disk)
 	if err != nil {
 		return fmt.Errorf("failed to parse disk size %q: %w", inst.Disk, err)
 	}
-	if err := os.Truncate(paths.Disk, diskBytes); err != nil {
-		return fmt.Errorf("failed to resize disk to %s: %w", inst.Disk, err)
+	cloneInfo, err := os.Stat(paths.Disk)
+	if err != nil {
+		return fmt.Errorf("failed to stat cloned disk: %w", err)
+	}
+	if diskBytes < cloneInfo.Size() {
+		return &errhint.ErrHint{
+			Err: fmt.Errorf("requested disk size %s (%d bytes) is smaller than the %q base image (%d bytes)",
+				inst.Disk, diskBytes, inst.Base, cloneInfo.Size()),
+			Hint: fmt.Sprintf("Choose a disk size of at least %s.", humanizeBytes(cloneInfo.Size())),
+		}
+	}
+	if diskBytes > cloneInfo.Size() {
+		if err := os.Truncate(paths.Disk, diskBytes); err != nil {
+			return fmt.Errorf("failed to resize disk to %s: %w", inst.Disk, err)
+		}
 	}
 
 	// Set permissions (644 matches libvirt backend; disk must be readable by vfkit)
@@ -143,9 +160,26 @@ func (m *DiskManager) Import(ctx context.Context, _ rpc.PrivilegeClient, src str
 		return fmt.Errorf("failed to create disk directory: %w", err)
 	}
 
-	// Convert imported qcow2 to raw
-	// The snapshot parameter is ignored — raw disks are always self-contained
-	// (no backing-file concept at the format level).
+	// A qcow2 with a backing-file reference is a snapshot/CoW-delta archive
+	// produced by the Linux backend's `--snapshot` export. It cannot be opened
+	// on macOS: qemu-img convert would die trying to open the (absent) backing
+	// file with an opaque "Could not open backing file" error. Detect this up
+	// front and fail with actionable guidance instead.
+	backing, err := qcow2BackingFile(ctx, src)
+	if err != nil {
+		return fmt.Errorf("failed to inspect imported disk: %w", err)
+	}
+	if backing != "" {
+		return &errhint.ErrHint{
+			Err: fmt.Errorf("archive is a snapshot disk referencing backing file %q, which the macOS backend cannot import", backing),
+			Hint: "Snapshot archives are not portable to macOS (raw disks have no backing-file concept).\n" +
+				"Re-export the instance as a full archive (without --snapshot) and import that.",
+		}
+	}
+
+	// Convert imported qcow2 to raw. The snapshot parameter is ignored — raw
+	// disks are always self-contained (no backing-file concept at the format
+	// level), and any backing-file archive was already rejected above.
 	if err := convertQcow2ToRaw(ctx, src, paths.Disk); err != nil {
 		return fmt.Errorf("failed to convert imported disk to raw: %w", err)
 	}
@@ -156,8 +190,19 @@ func (m *DiskManager) Import(ctx context.Context, _ rpc.PrivilegeClient, src str
 // Export exports a disk image to a local destination path.
 // Converts the raw disk to compressed qcow2 for portable archives.
 // The snapshot parameter is ignored — raw disks are always self-contained.
+// The export command rejects --snapshot before reaching here (see
+// SelfContainedExport), so the resulting manifest never lies about being a
+// snapshot.
 func (m *DiskManager) Export(ctx context.Context, _ rpc.PrivilegeClient, dst string, paths *config.Paths, _ bool) error {
 	return convertRawToQcow2(ctx, paths.Disk, dst)
+}
+
+// SelfContainedExport reports that vfkit exports are always self-contained:
+// raw disks have no backing-file/CoW-delta concept, so a snapshot (delta-only)
+// export is impossible. The export command uses this to reject --snapshot
+// rather than emit a full image mislabeled as a snapshot.
+func (m *DiskManager) SelfContainedExport() bool {
+	return true
 }
 
 // convertQcow2ToRaw converts a qcow2 disk image to raw format using qemu-img.
@@ -184,6 +229,42 @@ func convertRawToQcow2(ctx context.Context, src, dst string) error {
 		return fmt.Errorf("qemu-img convert (raw→qcow2) failed: %s: %w", string(output), err)
 	}
 	return nil
+}
+
+// qcow2BackingFile returns the backing-file path recorded in a qcow2 image, or
+// the empty string if the image is self-contained. It shells out to
+// `qemu-img info --output=json` and parses the "backing-filename" field.
+func qcow2BackingFile(ctx context.Context, src string) (string, error) {
+	infoCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(infoCtx, "qemu-img", "info", "--output=json", src)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("qemu-img info failed: %s: %w", string(output), err)
+	}
+	return parseBackingFilename(output)
+}
+
+// parseBackingFilename extracts the backing-filename from `qemu-img info
+// --output=json` output. Returns the empty string when no backing file is set.
+func parseBackingFilename(jsonOutput []byte) (string, error) {
+	var info struct {
+		BackingFilename string `json:"backing-filename"`
+	}
+	if err := json.Unmarshal(jsonOutput, &info); err != nil {
+		return "", fmt.Errorf("failed to parse qemu-img info output: %w", err)
+	}
+	return info.BackingFilename, nil
+}
+
+// humanizeBytes formats a byte count as a rounded-up disk-size string (e.g.
+// "4G") suitable for use as a --disk argument. It rounds up to the next whole
+// gigabyte so the suggested size is always large enough.
+func humanizeBytes(b int64) string {
+	const gib = 1024 * 1024 * 1024
+	g := max((b+gib-1)/gib, 1)
+	return fmt.Sprintf("%dG", g)
 }
 
 // cloneFile creates an APFS copy-on-write clone of src at dst.

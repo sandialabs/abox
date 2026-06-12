@@ -196,6 +196,25 @@ The underlying gRPC privilege server and its security boundary (token authentica
 
 The `abox.yaml` `monitor.enabled: true` field is rejected at `abox start` time with a clear error on macOS.
 
+## Export and Import
+
+The macOS backend (vfkit) stores instance disks as raw images, which have no
+backing-file or copy-on-write-delta concept. As a result:
+
+- **`abox export --snapshot` is not supported on macOS.** Snapshot mode exports
+  only the CoW delta against a base image, which raw disks cannot produce.
+  `abox export` rejects the `--snapshot`/`-s` flag and asks you to export a full,
+  self-contained archive instead (the default). Full archives are fully portable
+  and do not require the base image on the target machine.
+
+- **Snapshot archives produced on Linux cannot be imported on macOS.** A Linux
+  `--snapshot` archive is a qcow2 that references a separate base image. `abox
+  import` detects this backing-file reference up front and fails with guidance to
+  re-export the instance as a full archive (without `--snapshot`) and import that.
+
+Full (non-snapshot) archives move freely in both directions between Linux and
+macOS.
+
 ## Storage Layout
 
 Base images and instance data live under your home directory (no `/var/lib/libvirt/images` equivalent):

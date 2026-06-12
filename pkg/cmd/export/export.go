@@ -111,6 +111,20 @@ func runExport(ctx context.Context, opts *Options, name, outputPath string) erro
 		return fmt.Errorf("failed to get backend: %w", err)
 	}
 
+	// Reject --snapshot on backends whose export is always self-contained (e.g.
+	// vfkit on macOS, which stores raw disks). Honoring it would produce a full
+	// image with a manifest that lies (Snapshot: true) — a Linux import would
+	// then run an unsafe rebase against a self-contained image and silently read
+	// base-image bytes into formerly-zero clusters (corruption).
+	if opts.Snapshot {
+		if sce, ok := be.Disk().(backend.SelfContainedExporter); ok && sce.SelfContainedExport() {
+			return &cmdutil.ErrHint{
+				Err:  fmt.Errorf("the %s backend does not support snapshot (CoW-delta) export", be.Name()),
+				Hint: "Export a full, self-contained archive instead: drop the --snapshot/-s flag.",
+			}
+		}
+	}
+
 	// Check VM is stopped
 	if be.VM().IsRunning(name) {
 		return &cmdutil.ErrHint{

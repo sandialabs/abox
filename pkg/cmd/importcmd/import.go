@@ -301,9 +301,15 @@ func allocateResources(opts *Options, name string, manifest *export.Manifest, w 
 
 	cleanup := &cleanupState{paths: paths, name: name, errOut: w}
 
-	subnet, gateway, thirdOctet, err := config.AllocateSubnet("")
+	// Resolve networking through the shared helper so imported instances honor
+	// a backend that manages its own subnets (e.g. vfkit/vmnet host mode on
+	// macOS). Calling config.AllocateSubnet directly here would hand a macOS
+	// import a 10.10.x.0/24 subnet from the Linux pool, which then boots
+	// vmnet-helper outside the locked host-mode pool or trips the start-time
+	// determinism guard.
+	subnet, gateway, ipAddress, err := backend.ResolveNetwork(be, "")
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to allocate subnet: %w", err)
+		return nil, nil, nil, nil, err
 	}
 
 	cpus := manifest.Instance.CPUs
@@ -337,7 +343,7 @@ func allocateResources(opts *Options, name string, manifest *export.Manifest, w 
 		SSHKey:     paths.SSHKey,
 		Disk:       manifest.Instance.Disk,
 		MACAddress: be.GenerateMAC(),
-		IPAddress:  fmt.Sprintf("10.10.%d.10", thirdOctet),
+		IPAddress:  ipAddress,
 		StorageDir: be.StorageDir(),
 	}
 
