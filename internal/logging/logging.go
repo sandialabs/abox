@@ -60,9 +60,10 @@ var DefaultOptions = Options{
 
 // InitWithOptions initializes the global logger with the specified options.
 // If LogFile is set, logs are written to the file in addition to stderr.
-// Audit logging to syslog is always enabled at INFO level.
+// Audit logging is always enabled at INFO level; the sink is platform-specific
+// (syslog on Linux, rotating file on macOS).
 func InitWithOptions(opts Options) error {
-	// Close any existing log file
+	// Close any existing log file (and audit sink on darwin)
 	CloseLogFile()
 
 	// Set the initial level from options
@@ -85,11 +86,16 @@ func InitWithOptions(opts Options) error {
 		handlers = append(handlers, fileHandler)
 	}
 
-	// Create syslog handler for audit logging (always INFO level, never disabled)
-	syslogHandler := newSyslogHandler()
-	if syslogHandler != nil {
-		handlers = append(handlers, syslogHandler)
-		auditLogger = slog.New(syslogHandler)
+	// Create platform-specific audit handler (syslog on Linux, file on macOS).
+	auditHandler := newAuditHandler()
+	if auditHandler != nil {
+		auditLogger = slog.New(auditHandler)
+		// On Linux the syslog handler historically also receives the default
+		// logger's INFO+ output, so journalctl -t abox shows operational logs
+		// alongside audit events. The macOS audit file carries audit events only.
+		if auditHandlerInDefaultLogger {
+			handlers = append(handlers, auditHandler)
+		}
 	} else {
 		auditLogger = slog.New(discardHandler{})
 	}
@@ -146,7 +152,7 @@ func newLogHandler(w io.Writer, opts *slog.HandlerOptions, format string) slog.H
 	return slog.NewTextHandler(w, opts)
 }
 
-// CloseLogFile closes the log file if one is open.
+// CloseLogFile closes the log file and platform audit sink if open.
 func CloseLogFile() {
 	if logFileHandle != nil {
 		if err := logFileHandle.Close(); err != nil {
@@ -154,6 +160,7 @@ func CloseLogFile() {
 		}
 		logFileHandle = nil
 	}
+	closeAuditSink()
 }
 
 const (

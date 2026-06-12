@@ -510,9 +510,12 @@ tail -f ~/.local/share/abox/instances/dev/logs/console.log
 # Active PF rules for an instance
 sudo pfctl -a abox/dev -s rules
 sudo pfctl -a abox/dev -s nat
+
+# Audit events (instance create/start/stop, SSH access, filter changes, etc.)
+tail -f ~/.local/share/abox/logs/audit.log
 ```
 
-`journalctl` is not available on macOS — audit output lands in the per-instance `privilege-helper.log` instead of a system journal.
+`journalctl` is not available on macOS, and macOS Unified Logging is not reachable from Go without CGO, so abox writes audit events to a rotating file instead: `~/.local/share/abox/logs/audit.log` (up to 3 rotated copies of 10 MB each, named `audit.log.1` …). Each line is a key=value record with an RFC3339 timestamp. The per-instance `privilege-helper.log` additionally records the privileged operations (pfctl, file ops) executed for that instance.
 
 ## Getting Help
 

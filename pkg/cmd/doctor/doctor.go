@@ -174,12 +174,7 @@ func runDoctor(w io.Writer, name string) error {
 	// Phase 5: Security Status (informational)
 	fmt.Fprintln(w, "\n[Security]")
 
-	names := be.ResourceNames(name)
-	if ti := be.TrafficInterceptor(); ti != nil && ti.FilterExists(names.Filter) {
-		fmt.Fprintf(w, "  nwfilter: defined (%s)\n", names.Filter)
-	} else {
-		fmt.Fprintln(w, "  nwfilter: not defined")
-	}
+	printTrafficFilterStatus(w, be, name)
 
 	printSummary(w, results)
 	return nil
@@ -286,7 +281,7 @@ func runInVMChecks(w io.Writer, paths *config.Paths, inst *config.Instance, vmIP
 		result.Details = inst.Gateway
 	default:
 		result.Details = "cannot reach gateway " + inst.Gateway
-		result.Hint = "Check network configuration and nwfilter rules"
+		result.Hint = "Check network configuration and " + trafficFilterRulesHint
 	}
 	printResult(w, result)
 	results = append(results, result)
@@ -339,7 +334,7 @@ func checkInVMDNS(paths *config.Paths, inst *config.Instance, vmIP string, sshWo
 	if testTCPConnect(paths, inst.GetUser(), vmIP, inst.Gateway, 53) {
 		result.Hint = "TCP connection to DNS port 53 works but dig query failed - check dnsfilter or the host DNS redirect rules (iptables on Linux, pfctl on macOS)"
 	} else {
-		result.Hint = "Cannot establish TCP connection to gateway:53 - check nwfilter rules"
+		result.Hint = "Cannot establish TCP connection to gateway:53 - " + trafficFilterRulesHint
 	}
 	return result
 }
@@ -358,7 +353,7 @@ func checkInVMHTTP(paths *config.Paths, inst *config.Instance, vmIP string, sshW
 	if testTCPConnect(paths, inst.GetUser(), vmIP, inst.Gateway, inst.HTTP.Port) {
 		result.Hint = "TCP connection to HTTP proxy works but proxy not responding correctly - check httpfilter configuration"
 	} else {
-		result.Hint = fmt.Sprintf("Cannot establish TCP connection to gateway:%d - check nwfilter rules", inst.HTTP.Port)
+		result.Hint = fmt.Sprintf("Cannot establish TCP connection to gateway:%d - %s", inst.HTTP.Port, trafficFilterRulesHint)
 	}
 	return result
 }
