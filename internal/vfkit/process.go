@@ -309,13 +309,27 @@ func processAlive(proc *os.Process) bool {
 	return proc.Signal(syscall.Signal(0)) == nil
 }
 
-// isVfkitProcess checks that a PID belongs to a vfkit process.
-// On macOS, /proc doesn't exist, so we use the ps command.
-func isVfkitProcess(pid int) bool {
+// lookupComm returns the command name (comm) of a PID. It is a package
+// variable so tests can substitute a deterministic implementation without
+// shelling out to ps or depending on what processes happen to be running.
+// It defaults to the real ps-based lookup below.
+var lookupComm = psComm
+
+// psComm reads a PID's command name via `ps -p <pid> -o comm=`. On macOS,
+// /proc doesn't exist, so ps is how we identify a process by name.
+func psComm(pid int) (string, error) {
 	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// isVfkitProcess checks that a PID belongs to a vfkit process.
+func isVfkitProcess(pid int) bool {
+	comm, err := lookupComm(pid)
 	if err != nil {
 		return false
 	}
-	comm := strings.TrimSpace(string(out))
 	return strings.Contains(comm, "vfkit")
 }

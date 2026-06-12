@@ -276,17 +276,30 @@ func processAlive(proc *os.Process) bool {
 	return proc.Signal(syscall.Signal(0)) == nil
 }
 
-// isHelperProcess checks that a PID's comm is "vmnet-helper" or "sudo"
-// via `ps -p <pid> -o comm=`. Two names because on macOS 15 we spawn
-// `sudo -n vmnet-helper …` and the recorded PID is sudo's (which
-// propagates SIGTERM to its child). On macOS 26+ the recorded PID is
-// vmnet-helper directly.
-func isHelperProcess(pid int) bool {
+// lookupComm returns the command name (comm) of a PID. It is a package
+// variable so tests can substitute a deterministic implementation without
+// shelling out to ps or depending on what processes happen to be running.
+// It defaults to the real ps-based lookup below.
+var lookupComm = psComm
+
+// psComm reads a PID's command name via `ps -p <pid> -o comm=`.
+func psComm(pid int) (string, error) {
 	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// isHelperProcess checks that a PID's comm is "vmnet-helper" or "sudo".
+// Two names because on macOS 15 we spawn `sudo -n vmnet-helper …` and the
+// recorded PID is sudo's (which propagates SIGTERM to its child). On macOS
+// 26+ the recorded PID is vmnet-helper directly.
+func isHelperProcess(pid int) bool {
+	comm, err := lookupComm(pid)
 	if err != nil {
 		return false
 	}
-	comm := strings.TrimSpace(string(out))
 	return strings.Contains(comm, "vmnet-helper") || strings.HasSuffix(comm, "/"+cmdSudo) || comm == cmdSudo
 }
 

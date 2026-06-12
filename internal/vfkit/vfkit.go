@@ -1,5 +1,7 @@
 //go:build darwin
 
+// Package vfkit provides a wrapper around the vfkit CLI for managing
+// macOS VMs using Apple's Virtualization.framework.
 package vfkit
 
 import (
