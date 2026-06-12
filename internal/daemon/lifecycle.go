@@ -53,21 +53,29 @@ func cleanupDaemonFiles(daemonName, pidFile, socketPath string) error {
 	return errors.Join(errs...)
 }
 
-// IsAboxProcess verifies that a PID belongs to an abox process.
-// This prevents signaling unrelated processes if the PID was reused.
-func IsAboxProcess(pid int) bool {
-	// Check /proc/{pid}/exe symlink to verify the process is running our executable.
-	// This is more secure than checking cmdline, which could match any process
-	// that happens to have "abox" in its arguments (e.g., "cat /home/abox/file").
-	exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
-	if err != nil {
-		return false
-	}
-	currentExe, err := os.Executable()
-	if err != nil {
-		return false
-	}
-	return exePath == currentExe
+// sameExe reports whether an observed executable path refers to the same
+// binary as our own resolved executable. The kernel appends " (deleted)" to
+// /proc/<pid>/exe after the on-disk binary is replaced (e.g. an in-place abox
+// upgrade); strip that suffix so a still-running daemon launched from the old
+// inode is still recognized as ours.
+func sameExe(observed, self string) bool {
+	observed = strings.TrimSuffix(observed, " (deleted)")
+	return observed == self
+}
+
+// IsAboxProcess verifies that a PID belongs to an abox process, preventing us
+// from signaling unrelated processes if the PID was reused. It reports:
+//
+//	(true,  nil): the PID is confirmed to be running our executable.
+//	(false, nil): the PID is confirmed NOT to be our executable.
+//	(false, err): identity could NOT be determined (the process may or may not
+//	              be ours). Callers MUST treat this as "do not signal / do not
+//	              delete state" rather than as a confirmed mismatch.
+//
+// The platform-specific implementation lives in lifecycle_<os>.go; this wrapper
+// only documents the shared contract.
+func IsAboxProcess(pid int) (bool, error) {
+	return isAboxProcess(pid)
 }
 
 // signalFallback reads a PID file and sends SIGTERM, then SIGKILL if needed.
@@ -82,7 +90,15 @@ func signalFallback(pidFile string) {
 	if err != nil || pid <= 0 {
 		return
 	}
-	if !IsAboxProcess(pid) {
+	// Only signal a PID we can positively confirm is ours. A mismatch (the PID
+	// was reused by something else) or an unverifiable identity both mean "don't
+	// signal": killing a reused PID would be worse than leaking a stale file.
+	isAbox, idErr := IsAboxProcess(pid)
+	if idErr != nil {
+		logging.Warn("could not verify PID identity, skipping signal", "pid", pid, "error", idErr)
+		return
+	}
+	if !isAbox {
 		logging.Warn("PID is not an abox process, skipping signal", "pid", pid)
 		return
 	}
