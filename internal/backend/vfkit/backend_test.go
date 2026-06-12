@@ -1,6 +1,6 @@
 //go:build darwin
 
-package darwin
+package vfkit
 
 import (
 	"os"

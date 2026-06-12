@@ -103,7 +103,7 @@ func runImport(ctx context.Context, opts *Options, archivePath, newName string) 
 		if err != nil {
 			return err
 		}
-		baseImage := filepath.Join(paths.BaseImages, manifest.Instance.Base+".qcow2")
+		baseImage := filepath.Join(paths.BaseImages, config.UserBaseImageName(manifest.Instance.Base))
 		if _, err := os.Stat(baseImage); os.IsNotExist(err) {
 			return &cmdutil.ErrHint{
 				Err:  fmt.Errorf("base image %q not found", manifest.Instance.Base),

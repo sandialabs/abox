@@ -9,8 +9,8 @@ import (
 	"github.com/sandialabs/abox/pkg/cmd/helper"
 	"github.com/sandialabs/abox/pkg/cmd/teardownpf"
 
-	// Register the macOS backend on darwin.
-	_ "github.com/sandialabs/abox/internal/backend/darwin"
+	// Register the macOS (vfkit) backend on darwin.
+	_ "github.com/sandialabs/abox/internal/backend/vfkit"
 )
 
 // addPlatformCommands registers macOS-specific subcommands.

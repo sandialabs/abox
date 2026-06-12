@@ -207,7 +207,7 @@ type Paths struct {
 	Config           string // ~/.local/share/abox/instances/<name>/config.yaml
 	Allowlist        string // ~/.local/share/abox/instances/<name>/allowlist.conf
 	DiskDir          string // <storage_dir>/instances/<name>
-	Disk             string // <storage_dir>/instances/<name>/disk.qcow2 (or disk.raw for darwin)
+	Disk             string // <storage_dir>/instances/<name>/disk.qcow2 (or disk.raw for vfkit/macOS)
 	CloudInitISO     string // <storage_dir>/instances/<name>/cidata.iso
 	SSHKey           string // ~/.local/share/abox/instances/<name>/id_ed25519
 	KnownHosts       string // ~/.local/share/abox/instances/<name>/known_hosts

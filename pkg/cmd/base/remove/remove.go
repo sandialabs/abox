@@ -187,7 +187,7 @@ func instancesUsingBase(baseImagePath string) ([]string, error) {
 			continue
 		}
 
-		// Check for both qcow2 (libvirt) and raw (darwin/vfkit) disk formats
+		// Check for both qcow2 (libvirt) and raw (vfkit) disk formats
 		diskPath := filepath.Join(instancesDir, entry.Name(), "disk.qcow2")
 		if _, err := os.Stat(diskPath); os.IsNotExist(err) {
 			diskPath = filepath.Join(instancesDir, entry.Name(), "disk.raw")

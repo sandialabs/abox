@@ -200,7 +200,7 @@ func validatePfctlArgs(name, vmIP, gateway, bridge string, dnsPort, httpPort int
 }
 
 // filterName returns the backend-resource filter name for an instance.
-// Kept in sync with darwin backend ResourceNames.
+// Kept in sync with vfkit backend ResourceNames.
 func filterName(instance string) string {
 	return "abox-" + instance + "-traffic"
 }
@@ -239,7 +239,7 @@ func removeFilterMarker(filter string) error {
 }
 
 // FilterMarkerExists reports whether the per-filter state marker is present.
-// This is the source of truth for TrafficInterceptor.FilterExists on darwin.
+// This is the source of truth for TrafficInterceptor.FilterExists on the vfkit backend.
 func FilterMarkerExists(filter string) bool {
 	path, err := filterMarkerPath(filter)
 	if err != nil {

@@ -1,8 +1,8 @@
 //go:build darwin
 
-// Package darwin implements the backend interface for macOS using vfkit
+// Package vfkit implements the backend interface for macOS using vfkit
 // and Apple's Virtualization.framework.
-package darwin
+package vfkit
 
 import (
 	"fmt"
