@@ -91,7 +91,15 @@ func runStart(ctx context.Context, opts *Options, name string) error {
 		// (panic, OOM, kill -9). Recover any that died so the user doesn't
 		// have to abox stop && abox start to get filtering back. Each
 		// start* call is a no-op when its daemon is alive.
-		return recoverDaemons(w, name, inst, paths)
+		if err := recoverDaemons(w, name, inst, paths); err != nil {
+			return err
+		}
+		// On darwin the pf anchor (DNS redirect, IPv6 block, default deny) can
+		// be lost without the VM dying — e.g. an earlier start that failed to
+		// get an IP, or an external `pfctl -F` — and recoverDaemons does not
+		// touch it. Re-apply it if the on-disk marker says it is missing so a
+		// plain `abox start` restores filtering. No-op on linux.
+		return recoverFirewall(ctx, w, opts.Factory, be, name, inst)
 	}
 
 	if err := ensureNetwork(ctx, w, be, inst); err != nil {
@@ -116,7 +124,13 @@ func runStart(ctx context.Context, opts *Options, name string) error {
 	// its IP is known (vmnet assigns IPs dynamically). On Linux this is a no-op
 	// since iptables rules are set up pre-boot via setupHostFirewall.
 	if err := setupPostBootFirewall(w, opts.Factory, inst, name, ip); err != nil {
-		return err
+		// Fail closed: the VM booted but we could not install egress
+		// enforcement (darwin), so the sandbox is wide open. Force-stop the VM
+		// — nothing of value is running in it yet — rather than leave the user
+		// with an unfiltered instance. ForceStop is best-effort; if it fails
+		// the original (more actionable) error is still surfaced.
+		failClosedStopVM(ctx, w, be, name)
+		return fmt.Errorf("%w; VM stopped to keep the sandbox closed — retry with `abox start %s`, or run `abox stop %s` to clean up remaining resources", err, name, name)
 	}
 
 	if !opts.Brief {
@@ -252,6 +266,21 @@ func waitForIP(w io.Writer, be backend.Backend, name string) string {
 	}
 	fmt.Fprintln(w)
 	return ip
+}
+
+// failClosedStopVM force-stops the VM after egress enforcement could not be
+// installed, so the user is never left with a running but unfiltered sandbox.
+// It is best-effort: a force-stop failure is logged and reported to the user
+// but does not replace the original (more actionable) firewall error. Filter
+// and monitor daemons spawned earlier in the start flow are left running — they
+// are inert without a VM to filter, and `abox stop <name>` reaps them; killing
+// them here would add failure modes without closing the security gap.
+func failClosedStopVM(ctx context.Context, w io.Writer, be backend.Backend, name string) {
+	fmt.Fprintln(w, "Stopping VM to keep the sandbox closed...")
+	if err := be.VM().ForceStop(ctx, name); err != nil {
+		logging.Warn("failed to stop VM after firewall setup failed; instance may be running without traffic filtering", "instance", name, "error", err)
+		fmt.Fprintf(w, "Warning: could not stop VM %q (%v); run `abox stop %s` to ensure it is not running unfiltered\n", name, err, name)
+	}
 }
 
 func startDNSFilter(w io.Writer, name string, paths *config.Paths, logLevel string) error {

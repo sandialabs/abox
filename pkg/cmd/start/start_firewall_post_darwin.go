@@ -8,7 +8,6 @@ import (
 
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/firewall"
-	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 )
 
@@ -28,8 +27,12 @@ import (
 //   - Block everything else from the VM (default deny, matching libvirt nwfilter)
 func setupPostBootFirewall(w io.Writer, f *factory.Factory, _ *config.Instance, name string, vmIP string) error {
 	if vmIP == "" {
-		logging.Warn("VM IP not available — traffic filter will not be active until VM gets an IP", "instance", name)
-		return nil
+		// Every egress control on darwin (DNS redirect, IPv6 block, default
+		// deny) lives in the per-instance pf anchor and is scoped by the VM's
+		// source IP — without that IP we can install no enforcement at all.
+		// Fail closed: a booted VM with no pf rules is an open sandbox, so the
+		// caller force-stops the VM rather than leaving it running unfiltered.
+		return fmt.Errorf("VM IP not available; cannot install traffic filter for instance %q", name)
 	}
 
 	// Reload from disk: VMManager.Start persists the resolved bridge interface
