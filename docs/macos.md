@@ -189,6 +189,7 @@ The underlying gRPC privilege server and its security boundary (token authentica
 |---------|----------------|--------|
 | Snapshots (`abox snapshot …`) | Not supported | vfkit has no native snapshot support |
 | Monitor / Tetragon events | Not supported | Tetragon relies on eBPF, which is Linux-only |
+| `abox tap` | Supported | Captures on the vmnet bridge interface (e.g. `bridge100`); requires sudo for `/dev/bpf*` access (escalated automatically) |
 | libvirt / nwfilter | Not used | Replaced by vfkit + vmnet-helper + pfctl |
 | Setuid privilege helper | Not available | macOS uses sudo only |
 | x86_64 guests | Not supported | Apple Silicon only; arm64 base images |

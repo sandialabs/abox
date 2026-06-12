@@ -54,11 +54,7 @@ By default, SSH management traffic between the host and VM (used by
 "abox ssh") is excluded from the capture. Use --include-ssh to include it.
 
 When stdout is a terminal, tcpdump shows decoded packets interactively.
-When stdout is piped, raw PCAP binary is written for tool consumption.
-
-Requires tcpdump to be installed (sudo apt install tcpdump). On most
-Linux distributions, tcpdump has the necessary capture permissions by
-default. If not, see the error message for remediation steps.`,
+When stdout is piped, raw PCAP binary is written for tool consumption.` + tcpdumpInstallHint,
 		Example: `  abox tap dev                                 # Interactive decoded output
   abox tap dev -o capture.pcap                 # Write PCAP to file
   abox tap dev | wireshark -k -i -             # Pipe to Wireshark
@@ -125,8 +121,16 @@ func runTap(opts *Options, extraArgs []string) error {
 	if err != nil {
 		return &errhint.ErrHint{
 			Err:  errors.New("tcpdump not found"),
-			Hint: "Install tcpdump: sudo apt install tcpdump",
+			Hint: tcpdumpNotFoundHint,
 		}
+	}
+
+	// Resolve the host capture interface (platform-specific).
+	// On Linux this is inst.Bridge (a real bridge device).
+	// On macOS this is the vmnet bridgeN interface persisted by VMManager.Start.
+	captureIface, err := captureInterface(inst)
+	if err != nil {
+		return fmt.Errorf("cannot determine capture interface: %w", err)
 	}
 
 	// Connect to httpfilter and start TLS key logging
@@ -147,12 +151,12 @@ func runTap(opts *Options, extraArgs []string) error {
 		_ = client.StopKeyLog(stopCtx)
 	}()
 
-	// Build tcpdump arguments
-	args := buildTcpdumpArgs(opts, f, inst, extraArgs)
+	// Build tcpdump arguments using the resolved capture interface.
+	args := buildTcpdumpArgs(opts, f, captureIface, inst.Gateway, extraArgs)
 
-	printCaptureInfo(opts, inst, paths)
+	printCaptureInfo(opts, captureIface, inst.Gateway, paths)
 
-	logging.AuditInstance(name, logging.ActionTap, "bridge", inst.Bridge)
+	logging.AuditInstance(name, logging.ActionTap, "bridge", captureIface)
 
 	return runTcpdump(tcpdumpBin, args, opts, paths)
 }
@@ -169,8 +173,10 @@ func startKeyLogging(client *httpfilter.Client, keyLogPath string) error {
 }
 
 // buildTcpdumpArgs constructs the tcpdump command-line arguments.
-func buildTcpdumpArgs(opts *Options, f *factory.Factory, inst *config.Instance, extraArgs []string) []string {
-	args := []string{"-i", inst.Bridge, "-n"}
+// captureIface is the resolved host interface name (platform-specific; see captureInterface).
+// gateway is used to build the SSH-exclusion BPF filter.
+func buildTcpdumpArgs(opts *Options, f *factory.Factory, captureIface, gateway string, extraArgs []string) []string {
+	args := []string{"-i", captureIface, "-n"}
 
 	if opts.Output != "" {
 		args = append(args, "-w", opts.Output)
@@ -191,7 +197,7 @@ func buildTcpdumpArgs(opts *Options, f *factory.Factory, inst *config.Instance, 
 	args = append(args, extraArgs...)
 
 	// BPF filter must be last
-	if filter := buildBPFFilter(opts.Filter, inst.Gateway, opts.IncludeSSH); filter != "" {
+	if filter := buildBPFFilter(opts.Filter, gateway, opts.IncludeSSH); filter != "" {
 		args = append(args, filter)
 	}
 
@@ -199,14 +205,15 @@ func buildTcpdumpArgs(opts *Options, f *factory.Factory, inst *config.Instance, 
 }
 
 // printCaptureInfo prints capture information to stderr.
-func printCaptureInfo(opts *Options, inst *config.Instance, paths *config.Paths) {
-	fmt.Fprintf(os.Stderr, "Capturing on bridge %s (Ctrl+C to stop)\n", inst.Bridge)
+// captureIface is the resolved host interface name; gateway is the VM gateway address.
+func printCaptureInfo(opts *Options, captureIface, gateway string, paths *config.Paths) {
+	fmt.Fprintf(os.Stderr, "Capturing on %s (Ctrl+C to stop)\n", captureIface)
 	fmt.Fprintf(os.Stderr, "TLS key log: %s\n", paths.KeyLog)
 	if opts.Output != "" {
 		fmt.Fprintf(os.Stderr, "PCAP output: %s\n", opts.Output)
 	}
-	if !opts.IncludeSSH && inst.Gateway != "" {
-		fmt.Fprintf(os.Stderr, "Excluding SSH traffic from %s (use --include-ssh to include)\n", inst.Gateway)
+	if !opts.IncludeSSH && gateway != "" {
+		fmt.Fprintf(os.Stderr, "Excluding SSH traffic from %s (use --include-ssh to include)\n", gateway)
 	}
 	fmt.Fprintf(os.Stderr, "\n")
 }
@@ -221,7 +228,7 @@ func runTcpdump(tcpdumpBin string, args []string, opts *Options, paths *config.P
 		if err != nil {
 			return &errhint.ErrHint{
 				Err:  errors.New("tcpdump requires capture privileges"),
-				Hint: "Grant tcpdump capabilities:\n  sudo setcap cap_net_raw,cap_net_admin=eip " + tcpdumpBin,
+				Hint: privilegeFailureHint(tcpdumpBin),
 			}
 		}
 		cmd = exec.Command(tool, append([]string{tcpdumpBin}, args...)...)
@@ -278,15 +285,6 @@ func handleTcpdumpExit(err error, escalated bool, tcpdumpBin string) error {
 	return fmt.Errorf("tcpdump exited: %w", err)
 }
 
-// hintForTcpdumpError returns a remediation hint for common tcpdump failures.
-func hintForTcpdumpError(tcpdumpBin string) string {
-	var hints []string
-	hints = append(hints, "This may be a permission issue. Try:")
-	hints = append(hints, "  sudo setcap cap_net_raw,cap_net_admin=eip "+tcpdumpBin)
-	hints = append(hints, "If using a BPF filter, check the filter syntax.")
-	return strings.Join(hints, "\n")
-}
-
 // buildBPFFilter constructs the effective BPF filter expression.
 // By default, SSH management traffic (host <-> gateway on port 22) is excluded
 // to reduce noise from abox ssh sessions. The exclusion is skipped when
@@ -303,17 +301,4 @@ func buildBPFFilter(userFilter, gateway string, includeSSH bool) string {
 	}
 
 	return strings.Join(parts, " and ")
-}
-
-// needsEscalation checks whether tcpdump needs privilege escalation to capture.
-func needsEscalation(tcpdumpBin string) bool {
-	if os.Getuid() == 0 {
-		return false
-	}
-	out, err := exec.Command("getcap", tcpdumpBin).Output()
-	if err != nil {
-		return true
-	}
-	s := string(out)
-	return !strings.Contains(s, "cap_net_raw") || !strings.Contains(s, "cap_net_admin")
 }
