@@ -4,6 +4,7 @@ package logs
 import (
 	"github.com/spf13/cobra"
 
+	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 )
 
@@ -19,9 +20,8 @@ For filter-specific logs, use:
   abox http logs <instance>      HTTP traffic logs
   abox monitor logs <instance>   Tetragon events
 
-For audit logs, use journalctl:
-  journalctl -t abox             All abox audit events
-  journalctl -t abox --since "1 hour ago"`,
+For audit logs, use:
+  ` + logging.AuditLogHint(),
 	}
 
 	return cmd

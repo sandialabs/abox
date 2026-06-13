@@ -373,13 +373,12 @@ func ValidateLogFormat(format string) error {
 }
 
 // validBackends contains the set of valid VM backend values.
-// Currently only libvirt is implemented; other backends are planned for future.
 var validBackends = map[string]bool{
 	"libvirt": true,
+	"vfkit":   true,
 }
 
 // ValidateBackend validates a VM backend name.
-// Currently only "libvirt" is supported.
 // An empty string is valid and means "auto-detect".
 // Returns nil if valid, or an error describing the problem.
 func ValidateBackend(backend string) error {
@@ -387,7 +386,7 @@ func ValidateBackend(backend string) error {
 		return nil // empty is valid (auto-detect)
 	}
 	if !validBackends[strings.ToLower(backend)] {
-		return fmt.Errorf("invalid backend %q: must be libvirt", backend)
+		return fmt.Errorf("invalid backend %q: must be one of: libvirt, vfkit", backend)
 	}
 	return nil
 }

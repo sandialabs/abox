@@ -6,6 +6,7 @@
 |------|----------|
 | Quick start | [Quickstart Guide](quickstart.md) |
 | System requirements | [Requirements](requirements.md) |
+| macOS setup and notes | [macOS Support](macos.md) |
 | Shell completion | [Shell Completion](shell-completion.md) |
 
 ## Configuration
@@ -28,7 +29,7 @@
 
 | Topic | Document |
 |-------|----------|
-| SSH, SCP, mounts | [VM Access](vm-access.md) |
+| SSH, SCP, git remotes, mounts | [VM Access](vm-access.md) |
 | Export/import | [Export & Import](export-import.md) |
 | Problem solving | [Troubleshooting](troubleshooting.md) |
 

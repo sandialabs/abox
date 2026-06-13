@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/sandialabs/abox/internal/backend"
@@ -175,12 +174,7 @@ func runDoctor(w io.Writer, name string) error {
 	// Phase 5: Security Status (informational)
 	fmt.Fprintln(w, "\n[Security]")
 
-	names := be.ResourceNames(name)
-	if ti := be.TrafficInterceptor(); ti != nil && ti.FilterExists(names.Filter) {
-		fmt.Fprintf(w, "  nwfilter: defined (%s)\n", names.Filter)
-	} else {
-		fmt.Fprintln(w, "  nwfilter: not defined")
-	}
+	printTrafficFilterStatus(w, be, name)
 
 	printSummary(w, results)
 	return nil
@@ -265,6 +259,12 @@ func runHostChecks(w io.Writer, name string) (results []CheckResult, inst *confi
 	printResult(w, result)
 	results = append(results, result)
 
+	// Platform-specific host checks (macOS: PF anchors wired in /etc/pf.conf).
+	for _, r := range platformHostChecks() {
+		printResult(w, r)
+		results = append(results, r)
+	}
+
 	return results, inst, paths, be, vmIP, vmRunning
 }
 
@@ -281,7 +281,7 @@ func runInVMChecks(w io.Writer, paths *config.Paths, inst *config.Instance, vmIP
 		result.Details = inst.Gateway
 	default:
 		result.Details = "cannot reach gateway " + inst.Gateway
-		result.Hint = "Check network configuration and nwfilter rules"
+		result.Hint = "Check network configuration and " + trafficFilterRulesHint
 	}
 	printResult(w, result)
 	results = append(results, result)
@@ -332,9 +332,9 @@ func checkInVMDNS(paths *config.Paths, inst *config.Instance, vmIP string, sshWo
 	}
 	result.Details = fmt.Sprintf("DNS query to %s failed", dnsfilter.HealthcheckDomain)
 	if testTCPConnect(paths, inst.GetUser(), vmIP, inst.Gateway, 53) {
-		result.Hint = "TCP connection to DNS port 53 works but dig query failed - check dnsfilter or iptables NAT rules"
+		result.Hint = "TCP connection to DNS port 53 works but dig query failed - check dnsfilter or the host DNS redirect rules (iptables on Linux, pfctl on macOS)"
 	} else {
-		result.Hint = "Cannot establish TCP connection to gateway:53 - check nwfilter rules"
+		result.Hint = "Cannot establish TCP connection to gateway:53 - " + trafficFilterRulesHint
 	}
 	return result
 }
@@ -353,7 +353,7 @@ func checkInVMHTTP(paths *config.Paths, inst *config.Instance, vmIP string, sshW
 	if testTCPConnect(paths, inst.GetUser(), vmIP, inst.Gateway, inst.HTTP.Port) {
 		result.Hint = "TCP connection to HTTP proxy works but proxy not responding correctly - check httpfilter configuration"
 	} else {
-		result.Hint = fmt.Sprintf("Cannot establish TCP connection to gateway:%d - check nwfilter rules", inst.HTTP.Port)
+		result.Hint = fmt.Sprintf("Cannot establish TCP connection to gateway:%d - %s", inst.HTTP.Port, trafficFilterRulesHint)
 	}
 	return result
 }
@@ -471,14 +471,12 @@ func checkHostDiskSpace(paths *config.Paths) CheckResult {
 
 	// Check the instances directory which is under ~/.local/share/abox/
 	dataDir := paths.Instances
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(dataDir, &stat); err != nil {
+	availableBytes, err := statfsAvailableBytes(dataDir)
+	if err != nil {
 		result.Passed = false
 		result.Details = fmt.Sprintf("failed to check disk space: %v", err)
 		return result
 	}
-
-	availableBytes := stat.Bavail * uint64(stat.Bsize) //nolint:gosec // Bsize is always positive on Linux
 	availableMB := availableBytes / (1024 * 1024)
 
 	if availableBytes < minHostDiskSpaceBytes {

@@ -157,3 +157,34 @@ func TestRemotePath(t *testing.T) {
 		})
 	}
 }
+
+func TestParseRemotePath(t *testing.T) {
+	tests := []struct {
+		name       string
+		path       string
+		wantInst   string
+		wantPath   string
+		wantRemote bool
+	}{
+		{"remote path", "dev:/home/ubuntu/", "dev", "/home/ubuntu/", true},
+		{"remote relative path", "dev:projects/my-project", "dev", "projects/my-project", true},
+		{"local path", "./local/file.txt", "", "./local/file.txt", false},
+		{"no colon", "localfile", "", "localfile", false},
+		{"absolute path not remote", "/etc/hosts", "", "/etc/hosts", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inst, path, isRemote := ParseRemotePath(tt.path)
+			if inst != tt.wantInst {
+				t.Errorf("instance = %q, want %q", inst, tt.wantInst)
+			}
+			if path != tt.wantPath {
+				t.Errorf("path = %q, want %q", path, tt.wantPath)
+			}
+			if isRemote != tt.wantRemote {
+				t.Errorf("isRemote = %v, want %v", isRemote, tt.wantRemote)
+			}
+		})
+	}
+}

@@ -9,7 +9,6 @@ import (
 	"github.com/sandialabs/abox/internal/backend"
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/daemon"
-	"github.com/sandialabs/abox/internal/firewall"
 	"github.com/sandialabs/abox/internal/instance"
 	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/pkg/cmd/completion"
@@ -146,16 +145,7 @@ func gracefulStop(ctx context.Context, w io.Writer, be backend.Backend, name str
 
 // cleanupAfterStop removes firewall rules, stops daemons, and cleans up UFW.
 func cleanupAfterStop(w io.Writer, opts *Options, inst *config.Instance, name string) {
-	// Remove iptables DNS redirect rules (flush all rules for this bridge).
-	// Privilege is acquired lazily (best-effort) so stop succeeds even
-	// without sudo — the VM shuts down regardless and firewall rules
-	// become inert.
-	if opts.Factory != nil {
-		if client, err := opts.Factory.PrivilegeClientFor(name); err == nil {
-			fmt.Fprintln(w, "Removing DNS redirect rules...")
-			firewall.NewIPTablesClient(client).Flush(inst.Bridge)
-		}
-	}
+	cleanupFirewallPre(w, opts, inst, name)
 
 	if inst.Monitor.Enabled {
 		fmt.Fprintln(w, "Stopping monitor daemon...")
@@ -168,9 +158,5 @@ func cleanupAfterStop(w io.Writer, opts *Options, inst *config.Instance, name st
 	fmt.Fprintln(w, "Stopping DNS filter...")
 	daemon.StopDNSFilter(name)
 
-	if opts.Factory != nil {
-		if client, err := opts.Factory.PrivilegeClientFor(name); err == nil {
-			firewall.NewUFWClient(client).Cleanup(w, inst.Bridge, "")
-		}
-	}
+	cleanupFirewallPost(w, opts, inst, name)
 }

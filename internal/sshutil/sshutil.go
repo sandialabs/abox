@@ -4,11 +4,28 @@ package sshutil
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/logging"
 )
+
+// ParseRemotePath parses a path that may be in <instance>:<path> format.
+// Returns (instance, path, isRemote). When the path is not in remote form,
+// it returns ("", path, false).
+//
+// It is careful not to treat Windows drive letters (e.g. "C:\...") or
+// absolute paths (e.g. "/etc") as remote targets.
+func ParseRemotePath(path string) (instance, remotePath string, isRemote bool) {
+	if idx := strings.Index(path, ":"); idx > 0 {
+		// Make sure it's not a Windows drive letter (single char before colon)
+		if idx > 1 || (idx == 1 && path[0] != '/') {
+			return path[:idx], path[idx+1:], true
+		}
+	}
+	return "", path, false
+}
 
 // CommonOptions returns the standard SSH options used by abox.
 // Uses TOFU (Trust On First Use) model with per-instance known_hosts.

@@ -210,7 +210,7 @@ func pruneImages(opts *Options, referenced map[string]bool) (bool, int, error) {
 	}
 	var totalBytes int64
 	for _, name := range unused {
-		imagePath := filepath.Join(paths.UserBaseImages, name+".qcow2")
+		imagePath := filepath.Join(paths.UserBaseImages, config.UserBaseImageName(name))
 		info, err := os.Stat(imagePath)
 		size := "unknown size"
 		if err == nil {
@@ -258,9 +258,10 @@ func findUnusedImages(baseDir string, referenced map[string]bool) ([]string, err
 		return nil, fmt.Errorf("failed to read base images directory: %w", err)
 	}
 
+	ext := config.UserBaseImageExt()
 	var unused []string
 	for _, entry := range entries {
-		name, ok := strings.CutSuffix(entry.Name(), ".qcow2")
+		name, ok := strings.CutSuffix(entry.Name(), ext)
 		if !ok {
 			continue
 		}
@@ -277,7 +278,7 @@ func removeUnusedImages(opts *Options, baseDir string, unused []string) int {
 	fmt.Fprintln(w)
 	removed := 0
 	for _, name := range unused {
-		imagePath := filepath.Join(baseDir, name+".qcow2")
+		imagePath := filepath.Join(baseDir, config.UserBaseImageName(name))
 		if err := os.Remove(imagePath); err != nil {
 			fmt.Fprintf(opts.Factory.IO.ErrOut, "  warning: failed to remove %s: %v\n", imagePath, err)
 			continue

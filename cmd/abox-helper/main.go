@@ -1,3 +1,5 @@
+//go:build linux
+
 // abox-helper is a minimal setuid root binary for the abox privilege helper.
 //
 // It is designed to be installed as:
@@ -122,7 +124,7 @@ func run() error {
 
 	// Step 10: Run the privilege helper (reads token from stdin, starts gRPC).
 	// Use the kernel-provided real UID directly — unforgeable in setuid context.
-	return privilege.RunHelper(socketPath, ruid)
+	return privilege.RunHelper(socketPath, ruid, privilege.RegisterServer)
 }
 
 // closeInheritedFDs marks all file descriptors > 2 as close-on-exec.

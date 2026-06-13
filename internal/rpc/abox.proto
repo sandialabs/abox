@@ -17,6 +17,10 @@ service Privilege {
   rpc IptablesAdd(IptablesReq) returns (Empty);
   rpc IptablesRemove(IptablesReq) returns (Empty);
   rpc IptablesFlush(IptablesFlushReq) returns (Empty);
+  rpc PfctlEnable(Empty) returns (Empty);
+  rpc PfctlLoadAnchor(PfctlAnchorReq) returns (Empty);
+  rpc PfctlFlushAnchor(PfctlAnchorReq) returns (Empty);
+  rpc PfctlTeardownConfig(Empty) returns (Empty);
 }
 
 // DNS Filter Service - manages DNS filtering
@@ -96,6 +100,11 @@ message IptablesReq {
 
 message IptablesFlushReq {
   string bridge = 1;
+}
+
+message PfctlAnchorReq {
+  string instance_name = 1;
+  string rules_content = 2;  // PF rules to load (only used by PfctlLoadAnchor)
 }
 
 // DNS-specific messages

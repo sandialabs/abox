@@ -308,6 +308,96 @@ This checks: host configuration, VM state, network, DNS/HTTP filter services, SS
    sudo umount -l ~/mnt/dev
    ```
 
+### macOS-Specific Issues
+
+#### abox is "killed" Immediately on Launch
+
+**Symptoms:**
+- Running `abox` (e.g. `abox version`) prints `killed` and exits with code 137
+- This happens right after building/installing from source
+- A crash report under `~/Library/Logs/DiagnosticReports/abox-*.ips` shows
+  `SIGKILL (Code Signature Invalid)`
+
+**Cause:** With `CGO_ENABLED=0`, Go's internal linker applies an ad-hoc
+signature flagged `linker-signed`. macOS 26's hardened Code Signing Monitor
+rejects that signature at `exec()` and kills the process — even though
+`codesign -v` validates the binary at rest.
+
+**Resolution:** re-sign the binary with a plain ad-hoc signature:
+
+```bash
+codesign --force --sign - ~/.local/bin/abox
+```
+
+`make build` and `make install` do this automatically on macOS, so this only
+affects binaries built with a bare `go build`.
+
+#### VM Exits Immediately After Start
+
+**Symptoms:**
+- `abox start dev` returns quickly; `abox status dev` shows the VM is stopped
+- `logs/console.log` is empty or contains no kernel output
+
+**Cause:** The base image architecture does not match the host.
+Apple Silicon requires **arm64** guests. `abox base pull` downloads
+arm64 on macOS automatically, but a base image imported via
+`abox base import` from an amd64 source will boot-loop silently.
+
+**Resolution:** re-pull the image or import an arm64 variant:
+
+```bash
+abox base remove ubuntu-24.04
+abox base pull ubuntu-24.04     # arm64 on macOS
+```
+
+#### VM Can Reach Blocked Domains
+
+**Symptoms:**
+- `abox dns status dev` shows the filter running
+- `curl` from inside the VM still reaches non-allowlisted hosts
+- Filter logs show no blocked queries
+
+**Cause:** abox's PF anchor references are not wired into `/etc/pf.conf`,
+so per-instance `pfctl` rules load but the kernel never evaluates them.
+
+**Resolution:** run the doctor check and follow its hint:
+
+```bash
+abox doctor dev
+```
+
+The PF anchors check reports one of three states:
+
+| State | Meaning | Fix |
+|-------|---------|-----|
+| Passed | Wired correctly | — |
+| Missing, auto-wire available | Apple markers present; first `abox start` will wire automatically | Next `abox start` (may prompt for sudo) |
+| Missing, custom pf.conf | Apple markers absent | Edit `/etc/pf.conf` manually — see [macOS Support: Custom or MDM-Managed pf.conf](macos.md#custom-or-mdm-managed-pfconf) |
+
+#### abox start Prompts for sudo Every Time
+
+This is expected. macOS does not support the setuid `abox-helper` path,
+so every privilege helper launch goes through `sudo`. The helper is
+launched per privileged command and exits when that command finishes;
+repeat prompts are suppressed by sudo's credential cache (typically 5
+minutes), so most sessions see only a single prompt. See
+[macOS Support: Privilege Escalation](macos.md#privilege-escalation).
+
+#### Other VMs Lost Network After abox start
+
+**Symptoms:**
+- Docker Desktop / OrbStack / Podman Machine lose connectivity
+  immediately after the very first `abox start` on a fresh install
+- Only happens once — subsequent `abox start` invocations have no effect
+
+**Cause:** the first `abox start` runs `pfctl -f /etc/pf.conf`, which
+discards the in-memory rules vmnet installed at runtime for the other
+VM runtimes.
+
+**Resolution:** restart the affected VM runtime once. Subsequent abox
+starts do not reload the main ruleset. See [macOS Support: One-Time
+Network Disruption Warning](macos.md#one-time-network-disruption-warning).
+
 ### Provision Script Fails
 
 **Symptoms:**
@@ -341,13 +431,16 @@ Instance data is stored at `~/.local/share/abox/instances/<name>/`.
 
 Key logs for troubleshooting:
 
-| File | Content |
-|------|---------|
-| `logs/dns.log` | DNS allow/block decisions |
-| `logs/http.log` | HTTP allow/block decisions |
-| `logs/monitor.log` | Tetragon events (when enabled) |
-| `logs/keys.log` | TLS session keys for `abox tap` decryption |
-| `logs/*-service.log` | Daemon stderr logs |
+| File | Content | Platform |
+|------|---------|----------|
+| `logs/dns.log` | DNS allow/block decisions | all |
+| `logs/http.log` | HTTP allow/block decisions | all |
+| `logs/monitor.log` | Tetragon events (when enabled) | Linux only |
+| `logs/keys.log` | TLS session keys for `abox tap` decryption | all |
+| `logs/*-service.log` | Daemon stderr logs | all |
+| `logs/console.log` | vfkit serial console output (guest kernel + boot) | macOS |
+| `logs/vfkit.log` | vfkit process stderr | macOS |
+| `logs/privilege-helper.log` | Per-instance privilege helper stderr | macOS |
 
 **Log rotation:** Log files are automatically rotated at 10MB with 3 backups kept (e.g., `dns.log`, `dns.log.1`, `dns.log.2`, `dns.log.3`).
 
@@ -389,6 +482,8 @@ abox monitor serve dev
 These commands run the filter in the foreground with direct log output, useful for diagnosing startup failures.
 
 ### System Logs
+
+**Linux:**
 ```bash
 # libvirt logs
 journalctl -u libvirtd
@@ -402,6 +497,25 @@ virsh dumpxml abox-dev
 ```
 
 The `journalctl -t abox` audit log records: instance create, start, stop, remove, import, export, SSH access, SCP transfers, provision runs, mount/unmount, and filter mode changes.
+
+**macOS:**
+```bash
+# Per-instance privilege helper stderr (audit of pfctl, file ops, etc.)
+tail -f ~/.local/share/abox/instances/dev/logs/privilege-helper.log
+
+# vfkit process and guest console
+tail -f ~/.local/share/abox/instances/dev/logs/vfkit.log
+tail -f ~/.local/share/abox/instances/dev/logs/console.log
+
+# Active PF rules for an instance
+sudo pfctl -a abox/dev -s rules
+sudo pfctl -a abox/dev -s nat
+
+# Audit events (instance create/start/stop, SSH access, filter changes, etc.)
+tail -f ~/.local/share/abox/logs/audit.log
+```
+
+`journalctl` is not available on macOS, and macOS Unified Logging is not reachable from Go without CGO, so abox writes audit events to a rotating file instead: `~/.local/share/abox/logs/audit.log` (up to 3 rotated copies of 10 MB each, named `audit.log.1` …). Each line is a key=value record with an RFC3339 timestamp. The per-instance `privilege-helper.log` additionally records the privileged operations (pfctl, file ops) executed for that instance.
 
 ## Getting Help
 
@@ -427,5 +541,6 @@ If you can't resolve an issue:
 ## See Also
 
 - [System Requirements](requirements.md) - Supported platforms and dependencies
+- [macOS Support](macos.md) - macOS install, PF anchors, platform limitations
 - [Filtering](filtering.md) - DNS and HTTP proxy filtering details
 - [Privilege Helper](privilege-helper.md) - Passwordless privilege escalation
