@@ -231,7 +231,8 @@ func TestRequestStop_SendsCorrectBody(t *testing.T) {
 		if body.State != "Stop" {
 			t.Errorf("state = %q, want Stop", body.State)
 		}
-		w.WriteHeader(http.StatusOK)
+		// Real vfkit answers POST /vm/state with 202 Accepted, not 200.
+		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer srv.Close()
 
@@ -248,7 +249,7 @@ func TestRequestHardStop_Body(t *testing.T) {
 		}
 		_ = decodeJSON(r, &body)
 		got = body.State
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer srv.Close()
 
@@ -260,14 +261,14 @@ func TestRequestHardStop_Body(t *testing.T) {
 	}
 }
 
-func TestRequestStop_Non200(t *testing.T) {
+func TestRequestStop_ErrorStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "nope", http.StatusBadRequest)
 	}))
 	defer srv.Close()
 
 	if err := RequestStop(httpToRESTfulURI(srv.URL)); err == nil {
-		t.Error("RequestStop() should error on a non-200 response")
+		t.Error("RequestStop() should error on a non-2xx response")
 	}
 }
 

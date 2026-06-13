@@ -110,7 +110,10 @@ func postVMState(restfulURI, state, description string) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	// vfkit answers POST /vm/state with 202 Accepted, so accept any 2xx —
+	// treating 202 as failure made every stop skip the graceful window and
+	// fall back to SIGTERM, force-killing the guest mid-shutdown.
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("vfkit %s returned %d: %s", description, resp.StatusCode, string(body))
 	}
