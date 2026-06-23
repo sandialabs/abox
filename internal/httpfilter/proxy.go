@@ -34,6 +34,7 @@ const (
 const (
 	protoHTTP11 = "http/1.1" // ALPN protocol id for HTTP/1.1
 	schemeHTTP  = "http"     // URL scheme and traffic-logger label
+	schemeHTTPS = "https"    // URL scheme
 )
 
 // requestDecision is the verdict for a fully-parsed inbound request (forward
@@ -215,7 +216,7 @@ func (h *handler) requestHandler(connectTarget string) http.Handler {
 		// requests; the reverse proxy needs them populated.
 		if r.URL.Scheme == "" {
 			if connectTarget != "" {
-				r.URL.Scheme = "https"
+				r.URL.Scheme = schemeHTTPS
 			} else {
 				r.URL.Scheme = schemeHTTP
 			}
@@ -244,11 +245,12 @@ func (h *handler) requestHandler(connectTarget string) http.Handler {
 // in-flight tunnels. The outer server's WriteTimeout is cleared after Hijack
 // for the same reason as intercept.
 func (h *handler) tunnel(w http.ResponseWriter, r *http.Request) {
-	// DialContext (not DialTimeout) so Shutdown cancels a slow dial promptly via
-	// hijackCtx — the dial runs before trackConn, so it is otherwise uncounted.
-	dialer := &net.Dialer{Timeout: 30 * time.Second}
-	upstream, err := dialer.DialContext(h.s.hijackCtx, "tcp", r.Host)
+	// hijackCtx-aware dial so Shutdown cancels a slow dial promptly — the dial
+	// runs before trackConn, so it is otherwise uncounted. Routed through
+	// dialUpstreamTunnel so an upstream proxy (https_proxy) is honored.
+	upstream, err := h.s.dialUpstreamTunnel(h.s.hijackCtx, r.Host)
 	if err != nil {
+		logging.Debug("tunnel upstream dial failed", "host", r.Host, "err", err)
 		http.Error(w, "Bad gateway", http.StatusBadGateway)
 		return
 	}

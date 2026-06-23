@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/net/http/httpproxy"
 	"golang.org/x/net/http2"
 
 	"github.com/sandialabs/abox/internal/allowlist"
@@ -51,6 +53,12 @@ type Server struct {
 	listener     net.Listener
 	proxyHandler http.Handler
 	transport    *http.Transport
+	// proxyForURL resolves the upstream proxy for a target URL, captured once
+	// in NewServer from http_proxy/https_proxy/no_proxy. Both the transport
+	// path and the non-MITM tunnel path consult it; nil result = dial direct.
+	// Tests inject a fake before Start (httpproxy never proxies loopback, so
+	// env vars can't drive the proxied path against 127.0.0.1 origins).
+	proxyForURL  func(*url.URL) (*url.URL, error)
 	reverseProxy *httputil.ReverseProxy
 	http1Server  *http.Server  // used as BaseConfig for h2 and as the per-conn http.Server template for h1
 	http2Server  *http2.Server // h2 server for intercepted MITM connections
@@ -135,7 +143,11 @@ func NewServer(filter *allowlist.Filter, passive bool) *Server {
 	}
 	s.SetActive(!passive)
 
+	// httpproxy.FromEnvironment (not http.ProxyFromEnvironment) because the
+	// stdlib func caches the environment in a package-level sync.Once.
+	s.proxyForURL = httpproxy.FromEnvironment().ProxyFunc()
 	s.transport = &http.Transport{
+		Proxy:                 func(r *http.Request) (*url.URL, error) { return s.proxyForURL(r.URL) },
 		DialContext:           (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,

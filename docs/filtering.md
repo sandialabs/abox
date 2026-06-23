@@ -101,6 +101,20 @@ origins. Per-request filtering (allowlist, SSRF, domain fronting) applies
 identically to both protocols, so gRPC-based tools (including
 [dolt](https://github.com/dolthub/dolt)) work through the proxy.
 
+### Upstream proxy chaining
+
+When the host itself sits behind a proxy, httpfilter honors the standard
+`http_proxy`, `https_proxy`, and `no_proxy` environment variables from the
+daemon's environment (inherited from the shell that ran `abox start`).
+Proxy URLs may use the `http://`, `https://`, `socks5://`, or `socks5h://`
+schemes. Forwarded and MITM'd requests are sent via the upstream proxy, and
+non-MITM CONNECT tunnels chain through it (HTTP CONNECT or a SOCKS5 handshake,
+per the scheme). Allowlist and SSRF policy still apply to the requested
+target — the proxy hop never relaxes filtering.
+
+Note these are distinct from the proxy variables *inside* the VM, which point
+the guest at abox's own httpfilter.
+
 ### HTTP/HTTPS Request Flow
 
 ```mermaid
