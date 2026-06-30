@@ -275,6 +275,9 @@ func validateLibvirtAccess(w io.Writer, quiet bool) error {
 		} else {
 			fmt.Fprintln(w, "  libvirt images access: ok")
 		}
+		fmt.Fprintln(w, "  monitor (if enabled): also requires membership in the libvirt")
+		fmt.Fprintln(w, "    socket group (usually 'kvm' or 'libvirt-qemu', varies by distro);")
+		fmt.Fprintln(w, "    'abox start' reports the exact group if you're not a member.")
 		fmt.Fprintln(w)
 	}
 	return nil

@@ -270,13 +270,27 @@ func TestMonitorEventTypes(t *testing.T) {
 		ti.triggerSSH(t, "sentinel-done", "touch", "/tmp/abox-sentinel-done")
 
 		deadline := time.Now().Add(15 * time.Second)
+		sentinelSeen := false
 		for time.Now().Before(deadline) {
 			if lines := monitorQuery(env, name,
 				`select(.type == "file" and .path == "/tmp/abox-sentinel-done")`); len(lines) > 0 {
 				t.Log("Pipeline sync: sentinel-done seen in monitor log")
+				sentinelSeen = true
 				break
 			}
 			time.Sleep(1 * time.Second)
+		}
+
+		// The sentinel is a touch (a default, always-on file kprobe). If it never
+		// reaches the host monitor log, the entire VM->host event pipeline is dead
+		// (e.g. the daemon can't connect to the virtio-serial socket because the
+		// invoking user isn't in the socket's group). Fail loudly here rather than
+		// letting every downstream verify-* subtest fail with cryptic empty logs.
+		if !sentinelSeen {
+			dumpMonitorDiagnostics(t, env, ti)
+			t.Fatal("monitor pipeline produced no events: sentinel-done never reached the host " +
+				"monitor log within 15s. Check that the invoking user is in the monitor socket's " +
+				"owning group (see 'abox monitor status' and the socket owner via ls -l).")
 		}
 	})
 

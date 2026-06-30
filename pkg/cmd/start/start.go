@@ -18,6 +18,7 @@ import (
 	"github.com/sandialabs/abox/internal/instance"
 	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/monitor"
+	"github.com/sandialabs/abox/internal/privilege"
 	"github.com/sandialabs/abox/internal/rpc"
 	"github.com/sandialabs/abox/internal/tetragon"
 	"github.com/sandialabs/abox/pkg/cmd/completion"
@@ -163,6 +164,8 @@ func recoverDaemons(w io.Writer, name string, inst *config.Instance, paths *conf
 		if err := startMonitorDaemon(w, name, paths); err != nil {
 			return fmt.Errorf("failed to recover monitor daemon: %w", err)
 		}
+		// VM is already running, so the socket exists; warn if it's unreachable.
+		warnIfMonitorSocketInaccessible(w, paths)
 	}
 	return nil
 }
@@ -229,6 +232,12 @@ func startVMAndApplyFilter(ctx context.Context, w io.Writer, be backend.Backend,
 		return fmt.Errorf("failed to start VM: %w", err)
 	}
 
+	// The monitor socket is created by libvirt during VM start; warn now if its
+	// owning group makes it unreachable to the monitor daemon.
+	if inst.Monitor.Enabled {
+		warnIfMonitorSocketInaccessible(w, paths)
+	}
+
 	// Apply nwfilter to the running VM so traffic rules are enforced
 	if ti := be.TrafficInterceptor(); ti != nil {
 		fmt.Fprintln(w, "Applying network filter...")
@@ -281,6 +290,34 @@ func startMonitorDaemon(w io.Writer, name string, paths *config.Paths) error {
 		Socket:  paths.MonitorRPCSocket,
 		PIDFile: paths.MonitorPIDFile,
 	})
+}
+
+// warnIfMonitorSocketInaccessible warns (non-fatally) when the libvirt-created
+// monitor virtio-serial socket is owned by a group the invoking user isn't in.
+// In that case the monitor daemon silently can't connect and no events are
+// captured. libvirt creates the socket at VM start owned by qemu's group (e.g.
+// kvm/libvirt-qemu, varying by distro), so the only point we can read the real
+// group is after the VM is up. The daemon itself keeps retrying, so this is
+// purely an early, actionable heads-up.
+func warnIfMonitorSocketInaccessible(w io.Writer, paths *config.Paths) {
+	// Wait briefly for libvirt to create the socket after VM start.
+	deadline := time.Now().Add(5 * time.Second)
+	for !monitor.IsAvailable(paths.MonitorSocket) {
+		if time.Now().After(deadline) {
+			return // never appeared; the daemon's own retry/logging covers this
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	access, err := privilege.CheckSocketGroupAccess(paths.MonitorSocket)
+	if err != nil || access.IsMember {
+		return
+	}
+
+	fmt.Fprintln(w, "Warning: monitor events may not be captured.")
+	fmt.Fprintf(w, "  The monitor socket is owned by group %q, which you are not a member of,\n", access.Group)
+	fmt.Fprintln(w, "  so the monitor daemon cannot connect to it.")
+	fmt.Fprintf(w, "  Fix: sudo usermod -aG %s \"$USER\"  (then start a new login session)\n", access.Group)
 }
 
 // setupDNSResources queries dnsfilter for the actual port and updates config.
