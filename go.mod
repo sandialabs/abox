@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	charm.land/bubbletea/v2 v2.0.7
-	charm.land/lipgloss/v2 v2.0.4
+	charm.land/lipgloss/v2 v2.0.5
 	github.com/armon/go-radix v1.0.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/itchyny/gojq v0.12.19
