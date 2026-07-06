@@ -344,8 +344,8 @@ func TestDefaultInstance(t *testing.T) {
 	if inst.Base != "ubuntu-24.04" {
 		t.Errorf("DefaultInstance().Base = %q, want %q", inst.Base, "ubuntu-24.04")
 	}
-	if inst.DNS.Upstream != "8.8.8.8:53" {
-		t.Errorf("DefaultInstance().DNS.Upstream = %q, want %q", inst.DNS.Upstream, "8.8.8.8:53")
+	if inst.DNS.Upstream != "" {
+		t.Errorf("DefaultInstance().DNS.Upstream = %q, want %q (empty = host system resolver)", inst.DNS.Upstream, "")
 	}
 	if inst.Disk != "20G" {
 		t.Errorf("DefaultInstance().Disk = %q, want %q", inst.Disk, "20G")

@@ -1,11 +1,57 @@
 package dnsfilter
 
 import (
+	"net"
 	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
 )
+
+// fallbackUpstream is used when the upstream is unset and the host's system
+// resolver cannot be determined (e.g. /etc/resolv.conf is missing or empty).
+const fallbackUpstream = "8.8.8.8:53"
+
+// resolvConfPath is the file consulted to discover the host's system resolver.
+// It is a package variable so tests can point it at a fixture, and so a future
+// OS-specific implementation has a single seam to replace.
+var resolvConfPath = "/etc/resolv.conf"
+
+// systemUpstream returns the host's first configured IPv4 nameserver as
+// "ip:53", read from resolvConfPath at call time. The second return value is
+// false if the file is missing/unreadable or lists no IPv4 nameservers.
+//
+// IPv6 nameservers are skipped: the upstream validation and forwarding path
+// only support IPv4, so returning an IPv6 address would fail NewServer and
+// prevent the daemon from starting. Falling back to the public resolver is
+// preferable to a hard failure on IPv6-first hosts.
+func systemUpstream() (string, bool) {
+	cfg, err := dns.ClientConfigFromFile(resolvConfPath)
+	if err != nil {
+		return "", false
+	}
+	for _, server := range cfg.Servers {
+		// ClientConfigFromFile returns bare IPs (e.g. "127.0.0.53"); abox always
+		// forwards to port 53, matching the normalization applied elsewhere.
+		if ip := net.ParseIP(server); ip != nil && ip.To4() != nil {
+			return net.JoinHostPort(server, "53"), true
+		}
+	}
+	return "", false
+}
+
+// ResolveUpstream returns the upstream address to forward queries to. A
+// non-empty upstream is returned unchanged. An empty upstream means "use the
+// host's system resolver"; if that cannot be determined, fallback is returned.
+func ResolveUpstream(upstream, fallback string) string {
+	if upstream != "" {
+		return upstream
+	}
+	if sys, ok := systemUpstream(); ok {
+		return sys
+	}
+	return fallback
+}
 
 // Resolver is an interface for DNS resolution.
 // This abstraction enables mocking DNS queries in tests.

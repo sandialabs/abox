@@ -99,7 +99,7 @@ as an argument (overrides the name in the file) or read from the file.`,
 	cmd.Flags().IntVarP(&opts.CPUs, "cpus", "c", 2, "Number of CPUs")
 	cmd.Flags().IntVarP(&opts.Memory, "memory", "m", 4096, "Memory in MB")
 	cmd.Flags().StringVarP(&opts.Base, "base", "b", "ubuntu-24.04", "Base image name")
-	cmd.Flags().StringVarP(&opts.Upstream, "upstream", "u", "8.8.8.8:53", "Upstream DNS server")
+	cmd.Flags().StringVarP(&opts.Upstream, "upstream", "u", "", "Upstream DNS server (default: host system resolver from /etc/resolv.conf)")
 	cmd.Flags().StringVar(&opts.Disk, "disk", "20G", "Disk size")
 	cmd.Flags().StringVar(&opts.Subnet, "subnet", "", "Subnet to use (e.g., 192.168.50.0/24)")
 	cmd.Flags().StringVar(&opts.User, "user", "", "SSH username (auto-detected from base image if not specified)")

@@ -20,7 +20,7 @@ FIELDS
   allowlist        []string Domain allowlist entries (shared by DNS and HTTP filters)
 
   dns:                      DNS configuration object
-    upstream       string   Upstream DNS server (default: "8.8.8.8:53")
+    upstream       string   Upstream DNS server (default: host system resolver from /etc/resolv.conf)
 
   http:                     HTTP proxy configuration object
     mitm           bool     Enable TLS MITM for HTTPS inspection (default: true)

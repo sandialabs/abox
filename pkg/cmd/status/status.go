@@ -249,7 +249,11 @@ func runStatus(opts *Options, name string) error {
 	// DNS Filter Status
 	fmt.Fprintln(w, "\n[DNS Filter]")
 	fmt.Fprintf(w, "  Port:     %d\n", inst.DNS.Port)
-	fmt.Fprintf(w, "  Upstream: %s\n", inst.DNS.Upstream)
+	if inst.DNS.Upstream == "" {
+		fmt.Fprintf(w, "  Upstream: %s (host system resolver)\n", dnsfilter.ResolveUpstream("", "8.8.8.8:53"))
+	} else {
+		fmt.Fprintf(w, "  Upstream: %s\n", inst.DNS.Upstream)
+	}
 
 	if dnsStatus != nil {
 		fmt.Fprintf(w, "  Status:   running (%s mode)\n", dnsStatus.Mode)

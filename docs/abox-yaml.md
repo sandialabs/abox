@@ -110,7 +110,7 @@ monitor:
 | `overlay` | string | "" | Directory to copy into the VM at /tmp/abox/overlay during provisioning |
 | `allowlist` | []string | [] | Domain allowlist entries (shared by DNS and HTTP filters) |
 | `dns` | object | {} | DNS configuration (see below) |
-| `dns.upstream` | string | "8.8.8.8:53" | Upstream DNS server for allowed queries. Port defaults to 53 if not specified (e.g., "8.8.8.8" is valid). |
+| `dns.upstream` | string | host system resolver | Upstream DNS server for allowed queries. When unset, abox uses the host's system resolver from `/etc/resolv.conf` (falling back to `8.8.8.8:53` if it can't be determined). Port defaults to 53 if not specified (e.g., "8.8.8.8" is valid). |
 | `http` | object | {} | HTTP proxy configuration (see below) |
 | `http.mitm` | bool | true | Enable TLS MITM for HTTPS inspection and domain fronting protection |
 | `http.max_connections` | int | 512 | Cap on concurrent client connections to the HTTP proxy, bounding host fd/goroutine use against a runaway or hostile VM. Raise for heavy parallel workloads; keep below the host's `ulimit -n`. Existing instances without this key use the default automatically. |

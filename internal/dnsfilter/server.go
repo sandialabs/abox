@@ -45,6 +45,14 @@ type Server struct {
 
 // NewServer creates a new DNS server.
 func NewServer(filter *allowlist.Filter, upstream string, passive bool) (*Server, error) {
+	// An empty upstream means "use the host's system resolver" (read from
+	// /etc/resolv.conf at daemon start), falling back to a public resolver if
+	// that cannot be determined.
+	if upstream == "" {
+		upstream = ResolveUpstream("", fallbackUpstream)
+		logging.Debug("resolved DNS upstream from host system resolver", "upstream", upstream)
+	}
+
 	// Validate and normalize upstream DNS server format
 	normalizedUpstream, err := validation.NormalizeUpstreamDNS(upstream)
 	if err != nil {
