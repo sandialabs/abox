@@ -233,7 +233,12 @@ func promptDisk(f *factory.Factory, p cmdutil.Prompter, defaultDisk string) stri
 // promptUpstreamDNS prompts for and validates the upstream DNS server.
 func promptUpstreamDNS(f *factory.Factory, p cmdutil.Prompter, defaultUpstream string) string {
 	for {
-		upstream := p.Input("Upstream DNS server", defaultUpstream)
+		upstream := p.Input("Upstream DNS server (empty = host system resolver)", defaultUpstream)
+		// An empty value means "use the host's system resolver", resolved at
+		// daemon start; accept it without validation.
+		if upstream == "" {
+			return ""
+		}
 		normalized, err := validation.NormalizeUpstreamDNS(upstream)
 		if err != nil {
 			fmt.Fprintf(f.IO.ErrOut, "  %v\n", err)

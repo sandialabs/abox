@@ -543,10 +543,9 @@ func checkGuestDiskSpace(paths *config.Paths, user, ip string) CheckResult {
 func checkDNSUpstream(inst *config.Instance) CheckResult {
 	result := CheckResult{Name: CheckNameDNSUpstream}
 
-	upstream := inst.DNS.Upstream
-	if upstream == "" {
-		upstream = "8.8.8.8:53"
-	}
+	// An empty upstream means "use the host's system resolver"; resolve it the
+	// same way the DNS daemon does so the check reflects real behavior.
+	upstream := dnsfilter.ResolveUpstream(inst.DNS.Upstream, "8.8.8.8:53")
 
 	// Use dig to test upstream DNS
 	cmd := exec.Command("dig", "@"+strings.Split(upstream, ":")[0], "google.com", "+short", "+time=2", "+tries=1")

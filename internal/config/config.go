@@ -23,9 +23,13 @@ const LibvirtImagesDir = "/var/lib/libvirt/images/abox"
 
 // Default values for new instances.
 const (
-	DefaultBase     = "ubuntu-24.04"
-	DefaultDisk     = "20G"
-	DefaultUpstream = "8.8.8.8:53"
+	DefaultBase = "ubuntu-24.04"
+	DefaultDisk = "20G"
+	// DefaultUpstream is empty, meaning "use the host's system resolver" (read
+	// from /etc/resolv.conf at daemon start). This lets instances resolve DNS on
+	// networks where public resolvers like 8.8.8.8 are unreachable. An explicit
+	// upstream (IP:port or hostname) overrides it.
+	DefaultUpstream = ""
 
 	// DefaultHTTPMaxConnections caps concurrent client connections to the HTTP
 	// filter proxy, bounding host fd/goroutine use against a hostile VM. A

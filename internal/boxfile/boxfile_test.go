@@ -30,8 +30,8 @@ func TestDefaultBoxfile(t *testing.T) {
 	if box.User != "ubuntu" {
 		t.Errorf("DefaultBoxfile().User = %q, want %q", box.User, "ubuntu")
 	}
-	if box.DNS.Upstream != "8.8.8.8:53" {
-		t.Errorf("DefaultBoxfile().DNS.Upstream = %q, want %q", box.DNS.Upstream, "8.8.8.8:53")
+	if box.DNS.Upstream != "" {
+		t.Errorf("DefaultBoxfile().DNS.Upstream = %q, want %q (empty = host system resolver)", box.DNS.Upstream, "")
 	}
 }
 

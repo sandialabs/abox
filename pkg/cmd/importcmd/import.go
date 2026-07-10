@@ -327,7 +327,7 @@ func allocateResources(opts *Options, name string, manifest *export.Manifest, w 
 		Bridge:  bridge,
 		DNS: config.DNSConfig{
 			Port:     0,
-			Upstream: "8.8.8.8:53",
+			Upstream: config.DefaultUpstream,
 		},
 		SSHKey:     paths.SSHKey,
 		Disk:       manifest.Instance.Disk,

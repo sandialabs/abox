@@ -2,6 +2,8 @@ package dnsfilter
 
 import (
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -40,7 +42,6 @@ func TestNewServer(t *testing.T) {
 		{"valid-passive", "8.8.8.8:53", true, false},
 		{"valid-hostname", "dns.google:53", false, false},
 		{"valid-no-port", "8.8.8.8", false, false},
-		{"empty-upstream", "", false, true},
 		{"invalid-port", "8.8.8.8:0", false, true},
 		{"invalid-port-high", "8.8.8.8:99999", false, true},
 	}
@@ -66,6 +67,56 @@ func TestNewServer(t *testing.T) {
 				t.Errorf("NewServer() IsActive() = %v, want %v", server.IsActive(), !tt.passive)
 			}
 		})
+	}
+}
+
+func TestNewServer_EmptyUpstreamResolvesSystem(t *testing.T) {
+	filter := allowlist.NewFilter()
+
+	origPath := resolvConfPath
+	t.Cleanup(func() { resolvConfPath = origPath })
+
+	// A resolv.conf with a nameserver: empty upstream resolves to that server:53.
+	withNS := filepath.Join(t.TempDir(), "resolv.conf")
+	if err := os.WriteFile(withNS, []byte("nameserver 10.0.0.53\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	resolvConfPath = withNS
+	server, err := NewServer(filter, "", false)
+	if err != nil {
+		t.Fatalf("NewServer(empty) error = %v", err)
+	}
+	if server.upstream != "10.0.0.53:53" {
+		t.Errorf("upstream = %q, want %q", server.upstream, "10.0.0.53:53")
+	}
+
+	// IPv6 nameservers are skipped in favor of the first IPv4 one, since the
+	// upstream path only supports IPv4.
+	mixed := filepath.Join(t.TempDir(), "resolv.conf")
+	if err := os.WriteFile(mixed, []byte("nameserver ::1\nnameserver 10.0.0.53\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	resolvConfPath = mixed
+	server, err = NewServer(filter, "", false)
+	if err != nil {
+		t.Fatalf("NewServer(empty, ipv6+ipv4) error = %v", err)
+	}
+	if server.upstream != "10.0.0.53:53" {
+		t.Errorf("upstream = %q, want %q (IPv6 skipped)", server.upstream, "10.0.0.53:53")
+	}
+
+	// A resolv.conf with no usable (IPv4) nameservers: empty upstream falls back.
+	noNS := filepath.Join(t.TempDir(), "resolv.conf")
+	if err := os.WriteFile(noNS, []byte("nameserver ::1\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	resolvConfPath = noNS
+	server, err = NewServer(filter, "", false)
+	if err != nil {
+		t.Fatalf("NewServer(empty, no ipv4 ns) error = %v", err)
+	}
+	if server.upstream != fallbackUpstream {
+		t.Errorf("upstream = %q, want fallback %q", server.upstream, fallbackUpstream)
 	}
 }
 
