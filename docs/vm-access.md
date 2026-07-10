@@ -69,6 +69,61 @@ Use `<instance>:<path>` for VM paths:
 - `dev:myfile.txt` - Relative to home directory
 - `./local-file.txt` - Local path (no colon)
 
+## Git Remotes (`abox remote`)
+
+To work with a git repository **inside** an instance directly from a host clone —
+for example to pull changes an agent made in the box — add a git remote that
+routes through `abox ssh`:
+
+```bash
+# In a host clone, add a remote named "dev" for the "dev" box.
+# The path is on the VM, relative to the SSH user's home (same as abox scp),
+# or absolute if it starts with "/".
+abox remote add dev:projects/my-project
+
+# Use a custom remote name instead of the instance name:
+abox remote add box dev:projects/my-project
+
+# Then fetch / pull / push as usual:
+git fetch dev
+git pull  dev main
+git push  dev main
+```
+
+This works identically on **macOS and Linux** and is the recommended way to sync
+a repository on macOS, where filesystem mounting
+([below](#mounting-filesystems-sshfs)) is unavailable.
+
+### Why use this instead of a plain SSH remote
+
+The remote routes every git operation through `abox ssh`, so it reuses the
+instance's scoped SSH key and per-instance `known_hosts`, and resolves the VM's
+**current** IP each time. Nothing is written to your host SSH configuration
+(`~/.ssh/config`, `known_hosts`), and the remote keeps working across instance
+restarts even if the VM's IP address changes — neither of which is true for a
+hand-added `git@<ip>:repo` remote.
+
+### How It Works
+
+`abox remote add` creates a remote using git's built-in
+[`ext::` transport](https://git-scm.com/docs/git-remote-ext): the stored URL is
+`ext::abox ssh <instance> -- %S '<path>'`, where git substitutes `%S` with the
+service (`git-upload-pack` for fetch, `git-receive-pack` for push). The `ext::`
+transport itself ships with git and is available everywhere.
+
+git **blocks the `ext::` transport by default** (its built-in policy for `ext`
+is `never`), so `abox remote add` also sets `protocol.ext.allow=user` in the
+**local repo config** so the remote works. The `user` policy permits `ext::`
+for commands you run directly (`fetch`/`pull`/`push`) while still blocking it
+inside recursive/submodule fetches (the case the gate protects against). If the
+repo already allows `ext::` (`user` or `always`), abox leaves your config alone.
+
+> **Submodules:** if you ever need an abox remote to resolve *inside* a
+> recursive submodule fetch, raise the policy to `always` with
+> `git config protocol.ext.allow always`. Do this only in repos you trust —
+> `always` lets any `ext::` URL (e.g. from a malicious `.gitmodules`) run
+> arbitrary commands.
+
 ## Port Forwarding
 
 Expose VM services on your host using SSH tunnels. Useful for accessing web servers, databases, or development servers running in the VM.
@@ -172,6 +227,11 @@ curl http://localhost:3000/api/health
 ## Mounting Filesystems (SSHFS)
 
 For more seamless file access, mount the VM's filesystem on your host.
+
+> **Linux only.** `abox mount`/`abox unmount` depend on FUSE/SSHFS and are not
+> available on macOS. On macOS, use [`abox scp`](#file-transfer-scp) to move
+> files, or [`abox remote`](#git-remotes-abox-remote) to work with a git
+> repository inside the VM.
 
 ### Mount
 

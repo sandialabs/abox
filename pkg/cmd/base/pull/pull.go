@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/sandialabs/abox/internal/config"
@@ -105,7 +106,7 @@ func pickImage(ctx context.Context, w io.Writer, prompter cmdutil.Prompter) (*im
 
 		for _, img := range providerImages {
 			status := ""
-			imagePath := filepath.Join(paths.UserBaseImages, img.Name+".qcow2")
+			imagePath := filepath.Join(paths.UserBaseImages, config.UserBaseImageName(img.Name))
 			if _, err := os.Stat(imagePath); err == nil {
 				status = "[downloaded]"
 			}
@@ -175,7 +176,7 @@ func runPullImage(ctx context.Context, f *factory.Factory, img *images.ImageInfo
 		return err
 	}
 
-	destPath := filepath.Join(paths.UserBaseImages, img.Name+".qcow2")
+	destPath := filepath.Join(paths.UserBaseImages, config.UserBaseImageName(img.Name))
 
 	// Check if already exists
 	if _, err := os.Stat(destPath); err == nil {
@@ -248,7 +249,7 @@ func runPullImageTUI(ctx context.Context, f *factory.Factory, img *images.ImageI
 	steps := []tui.Step{
 		{Name: "Download image"},
 		{Name: "Verify checksum"},
-		{Name: "Convert to qcow2"},
+		{Name: convertStepName()},
 	}
 
 	done := tui.DoneConfig{
@@ -409,11 +410,40 @@ func verifyChecksum(w io.Writer, img *images.ImageInfo, computedHash string) err
 	return nil
 }
 
-// convertImage converts the downloaded image to qcow2 format.
+// convertStepName returns the user-facing step name for the convert phase,
+// matching the target format for the current host.
+func convertStepName() string {
+	if runtime.GOOS == "darwin" {
+		return "Convert to raw"
+	}
+	return "Convert to qcow2"
+}
+
+// convertImage converts the downloaded image to the host's expected base-image format.
+//
+// On macOS the target format is raw (vfkit does not support qcow2); upstream
+// cloud images are qcow2, so we run qemu-img convert to transform them once
+// here rather than paying the cost every time a VM is created.
+//
+// On Linux the target is qcow2 (the download format); we still invoke qemu-img
+// convert as a normalization pass (strips backing-file references, unifies the
+// qcow2 version). If that fails for any reason, fall back to a rename.
 func convertImage(w io.Writer, src, dst string) error {
+	if runtime.GOOS == "darwin" {
+		fmt.Fprintln(w, "Converting to raw format...")
+		cmd := exec.Command("qemu-img", "convert", "-f", "qcow2", "-O", "raw", src, dst)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			// Clean up any partially-written output so a retry isn't blocked
+			// by the existence check in runPullImage.
+			os.Remove(dst)
+			return fmt.Errorf("failed to convert image to raw: %s: %w", string(output), err)
+		}
+		return nil
+	}
+
 	fmt.Fprintln(w, "Converting to qcow2 format...")
-	convertCmd := exec.Command("qemu-img", "convert", "-f", "qcow2", "-O", "qcow2", src, dst)
-	if output, err := convertCmd.CombinedOutput(); err != nil {
+	cmd := exec.Command("qemu-img", "convert", "-f", "qcow2", "-O", "qcow2", src, dst)
+	if output, err := cmd.CombinedOutput(); err != nil {
 		// Try just renaming if conversion fails (might already be qcow2)
 		if renameErr := os.Rename(src, dst); renameErr != nil {
 			return fmt.Errorf("failed to convert image: %s: %w", string(output), err)

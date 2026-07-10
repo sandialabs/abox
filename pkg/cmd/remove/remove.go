@@ -11,7 +11,6 @@ import (
 	"github.com/sandialabs/abox/internal/backend"
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/daemon"
-	"github.com/sandialabs/abox/internal/firewall"
 	"github.com/sandialabs/abox/internal/instance"
 	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/rpc"
@@ -178,12 +177,9 @@ func stopServices(w io.Writer, opts *Options, name string, paths *config.Paths) 
 	}
 }
 
-// cleanupBackendResources removes UFW rules, the VM, nwfilter, and network.
+// cleanupBackendResources removes firewall rules, the VM, nwfilter, and network.
 func cleanupBackendResources(ctx context.Context, w io.Writer, opts *Options, be backend.Backend, inst *config.Instance, name string) {
-	// Remove UFW rule if UFW is active
-	if client, err := opts.Factory.PrivilegeClientFor(name); err == nil {
-		firewall.NewUFWClient(client).Cleanup(w, inst.Bridge, "  ")
-	}
+	cleanupFirewallRules(w, opts, inst, name)
 
 	// Delete VM
 	if be.VM().Exists(name) {

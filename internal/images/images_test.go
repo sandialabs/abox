@@ -96,7 +96,7 @@ func TestUbuntuParseCatalog(t *testing.T) {
 		},
 	}
 
-	images, err := parseCatalog(catalog)
+	images, err := parseCatalog(catalog, "amd64")
 	if err != nil {
 		t.Fatalf("parseCatalog failed: %v", err)
 	}
@@ -133,12 +133,60 @@ func TestUbuntuParseCatalog(t *testing.T) {
 	}
 }
 
+func TestUbuntuParseCatalogARM64(t *testing.T) {
+	catalog := &ubuntuCatalog{
+		Products: map[string]ubuntuProduct{
+			"com.ubuntu.cloud:server:24.04:amd64": {
+				Arch:            "amd64",
+				Version:         "24.04",
+				Release:         "noble",
+				ReleaseCodename: "Noble Numbat",
+				ReleaseTitle:    "24.04 LTS",
+				Supported:       true,
+				Versions: map[string]ubuntuVersionInfo{
+					"20260225": {Items: map[string]ubuntuItem{
+						"disk1.img": {SHA256: "amdsha", Path: "server/releases/noble/release-20260225/ubuntu-24.04-server-cloudimg-amd64.img"},
+					}},
+				},
+			},
+			"com.ubuntu.cloud:server:24.04:arm64": {
+				Arch:            "arm64",
+				Version:         "24.04",
+				Release:         "noble",
+				ReleaseCodename: "Noble Numbat",
+				ReleaseTitle:    "24.04 LTS",
+				Supported:       true,
+				Versions: map[string]ubuntuVersionInfo{
+					"20260225": {Items: map[string]ubuntuItem{
+						"disk1.img": {SHA256: "armsha", Path: "server/releases/noble/release-20260225/ubuntu-24.04-server-cloudimg-arm64.img"},
+					}},
+				},
+			},
+		},
+	}
+
+	images, err := parseCatalog(catalog, "arm64")
+	if err != nil {
+		t.Fatalf("parseCatalog failed: %v", err)
+	}
+
+	if len(images) != 1 {
+		t.Fatalf("expected 1 arm64 image, got %d", len(images))
+	}
+	if images[0].Hash != "armsha" {
+		t.Errorf("expected arm64 hash 'armsha', got %q", images[0].Hash)
+	}
+	if !strings.Contains(images[0].URL, "arm64.img") {
+		t.Errorf("expected arm64 URL, got %q", images[0].URL)
+	}
+}
+
 func TestUbuntuParseCatalogEmpty(t *testing.T) {
 	catalog := &ubuntuCatalog{
 		Products: map[string]ubuntuProduct{},
 	}
 
-	_, err := parseCatalog(catalog)
+	_, err := parseCatalog(catalog, "amd64")
 	if err == nil {
 		t.Error("expected error for empty catalog, got nil")
 	}

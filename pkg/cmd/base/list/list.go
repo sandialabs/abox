@@ -114,7 +114,7 @@ func exportImagesJSON(out io.Writer, exporter *cmdutil.Exporter, allImages []ima
 			Description: img.Description,
 			Provider:    img.Provider,
 		}
-		imagePath := filepath.Join(paths.UserBaseImages, img.Name+".qcow2")
+		imagePath := filepath.Join(paths.UserBaseImages, config.UserBaseImageName(img.Name))
 		if info, err := os.Stat(imagePath); err == nil {
 			item.Downloaded = true
 			item.Size = info.Size()
@@ -123,21 +123,23 @@ func exportImagesJSON(out io.Writer, exporter *cmdutil.Exporter, allImages []ima
 	}
 
 	// Add custom images
+	ext := config.UserBaseImageExt()
 	if entries, err := os.ReadDir(paths.UserBaseImages); err == nil {
 		for _, entry := range entries {
-			name := strings.TrimSuffix(entry.Name(), ".qcow2")
-			if !knownImages[name] && strings.HasSuffix(entry.Name(), ".qcow2") {
-				info, err := entry.Info()
-				if err != nil {
-					continue
-				}
-				items = append(items, imageJSON{
-					Name:       name,
-					Downloaded: true,
-					Size:       info.Size(),
-					Custom:     true,
-				})
+			name, ok := strings.CutSuffix(entry.Name(), ext)
+			if !ok || knownImages[name] {
+				continue
 			}
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			items = append(items, imageJSON{
+				Name:       name,
+				Downloaded: true,
+				Size:       info.Size(),
+				Custom:     true,
+			})
 		}
 	}
 
@@ -157,7 +159,7 @@ func displayImagesByProvider(out io.Writer, allImages []images.ImageInfo, paths 
 		fmt.Fprintf(out, "%s:\n", images.ProviderDisplayName(provider))
 		for _, img := range providerImages {
 			knownImages[img.Name] = true
-			imagePath := filepath.Join(paths.UserBaseImages, img.Name+".qcow2")
+			imagePath := filepath.Join(paths.UserBaseImages, config.UserBaseImageName(img.Name))
 			status := ""
 			if info, err := os.Stat(imagePath); err == nil {
 				status = fmt.Sprintf("[downloaded, %s]", images.FormatSize(info.Size()))
@@ -176,18 +178,20 @@ func displayCustomImages(out io.Writer, knownImages map[string]bool, paths *conf
 		return
 	}
 
+	ext := config.UserBaseImageExt()
 	var customImages []os.DirEntry
 	for _, entry := range entries {
-		name := strings.TrimSuffix(entry.Name(), ".qcow2")
-		if !knownImages[name] && strings.HasSuffix(entry.Name(), ".qcow2") {
-			customImages = append(customImages, entry)
+		name, ok := strings.CutSuffix(entry.Name(), ext)
+		if !ok || knownImages[name] {
+			continue
 		}
+		customImages = append(customImages, entry)
 	}
 
 	if len(customImages) > 0 {
 		fmt.Fprintln(out, "Custom images:")
 		for _, entry := range customImages {
-			name := strings.TrimSuffix(entry.Name(), ".qcow2")
+			name := strings.TrimSuffix(entry.Name(), ext)
 			info, err := entry.Info()
 			if err != nil {
 				continue
@@ -211,9 +215,10 @@ func listDownloadedOnly(f *factory.Factory, paths *config.Paths) error {
 	}
 
 	fmt.Fprintln(out, "Downloaded images:")
+	ext := config.UserBaseImageExt()
 	hasImages := false
 	for _, entry := range entries {
-		if before, ok := strings.CutSuffix(entry.Name(), ".qcow2"); ok {
+		if before, ok := strings.CutSuffix(entry.Name(), ext); ok {
 			name := before
 			info, err := entry.Info()
 			if err != nil {

@@ -164,12 +164,25 @@ func (c *cleanupState) cleanupDomain(ctx context.Context) {
 	}
 }
 
-// cleanupDisk removes the disk directory via the privileged helper.
+// cleanupDisk removes the disk directory. For backends that need the privilege
+// helper it goes through the helper; for backends with user-owned storage
+// (e.g., vfkit on macOS) it removes the directory directly.
 func (c *cleanupState) cleanupDisk(ctx context.Context) {
-	if !c.diskCreated || c.factory == nil || c.paths.DiskDir == "" || c.inst == nil {
+	if !c.diskCreated || c.paths.DiskDir == "" || c.inst == nil {
 		return
 	}
 	fmt.Fprintln(c.out, "  Removing disk...")
+
+	if c.backend != nil && !createRequiresPrivilege(c.backend) {
+		if err := os.RemoveAll(c.paths.DiskDir); err != nil {
+			logging.Debug("cleanup: failed to remove disk", "path", c.paths.DiskDir, "error", err)
+		}
+		return
+	}
+
+	if c.factory == nil {
+		return
+	}
 	client, err := c.factory.PrivilegeClientFor(c.inst.Name)
 	if err != nil {
 		return
@@ -229,8 +242,12 @@ func runCreate(ctx context.Context, opts *Options, name string) error {
 		return fmt.Errorf("failed to detect backend: %w", err)
 	}
 
-	// Get paths using the backend's storage directory
-	paths, err := config.GetPathsWithStorage(name, be.StorageDir())
+	// Get paths using the backend's storage directory and disk format
+	diskFormat := ""
+	if dfp, ok := be.(backend.DiskFormatProvider); ok {
+		diskFormat = dfp.DiskFormat()
+	}
+	paths, err := config.GetPathsWithOptions(name, be.StorageDir(), diskFormat)
 	if err != nil {
 		return err
 	}
@@ -305,6 +322,16 @@ func executeCreate(
 	return nil
 }
 
+// createRequiresPrivilege reports whether the backend needs the privilege helper
+// during create. Backends that don't implement backend.CreatePrivilegeProvider
+// default to requiring privileges (Linux/libvirt unchanged).
+func createRequiresPrivilege(be backend.Backend) bool {
+	if cpp, ok := be.(backend.CreatePrivilegeProvider); ok {
+		return cpp.CreateRequiresPrivilege()
+	}
+	return true
+}
+
 // initInstance sets up the privilege client, directories, subnet, instance config,
 // and saves it. Returns the privilege client, instance, subnet string, and any error.
 func initInstance(
@@ -316,17 +343,23 @@ func initInstance(
 	templateSupported bool,
 	cs *cleanupState,
 ) (rpc.PrivilegeClient, *config.Instance, string, error) {
-	// Get privilege client early - this is where the single password prompt happens
-	client, err := opts.Factory.PrivilegeClientFor(name)
-	if err != nil {
-		return nil, nil, "", fmt.Errorf("failed to get privilege client: %w", err)
+	// Get privilege client early - this is where the single password prompt happens.
+	// Backends with user-owned storage and no privileged create-time operations
+	// (e.g., vfkit on macOS) skip this so create does not trigger a sudo prompt.
+	var client rpc.PrivilegeClient
+	if createRequiresPrivilege(be) {
+		c, err := opts.Factory.PrivilegeClientFor(name)
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("failed to get privilege client: %w", err)
+		}
+		client = c
 	}
 
 	if err := config.EnsureDirs(paths); err != nil {
 		return nil, nil, "", err
 	}
 
-	subnet, gateway, err := allocateSubnet(opts)
+	subnet, gateway, err := allocateSubnet(opts, be)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -470,25 +503,19 @@ func warnCustomTemplate(opts *Options, be backend.Backend) {
 }
 
 // allocateSubnet validates or allocates a subnet and returns subnet, gateway, and any error.
-func allocateSubnet(opts *Options) (string, string, error) {
-	if opts.Subnet != "" {
-		gateway, _, err := config.ValidateSubnet(opts.Subnet)
-		if err != nil {
-			return "", "", fmt.Errorf("invalid subnet: %w", err)
-		}
-		return opts.Subnet, gateway, nil
-	}
-
-	subnet, gateway, _, err := config.AllocateSubnet("")
+// If the backend implements SubnetProvider (e.g., macOS vmnet), its managed network
+// is used instead of the abox subnet pool.
+func allocateSubnet(opts *Options, be backend.Backend) (string, string, error) {
+	subnet, gateway, _, err := backend.ResolveNetwork(be, opts.Subnet)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to allocate subnet: %w", err)
+		return "", "", err
 	}
 	return subnet, gateway, nil
 }
 
 // buildInstanceConfig constructs the instance configuration struct.
 func buildInstanceConfig(opts *Options, name string, paths *config.Paths, be backend.Backend, gateway, subnet string) *config.Instance {
-	return &config.Instance{
+	inst := &config.Instance{
 		Version:    config.CurrentInstanceVersion,
 		Name:       name,
 		Backend:    be.Name(),
@@ -520,6 +547,13 @@ func buildInstanceConfig(opts *Options, name string, paths *config.Paths, be bac
 		MACAddress: be.GenerateMAC(),
 		IPAddress:  deriveIPAddress(gateway),
 	}
+
+	// Set disk format if the backend requires a non-default format (e.g., "raw" for vfkit)
+	if dfp, ok := be.(backend.DiskFormatProvider); ok {
+		inst.DiskFormat = dfp.DiskFormat()
+	}
+
+	return inst
 }
 
 // createInstanceResources creates SSH keys, CA cert, allowlist, network, disk, and VM.
@@ -739,8 +773,12 @@ func runDryRun(opts *Options, name string, paths *config.Paths, be backend.Backe
 	var gateway string
 	var err error
 	if subnet == "" {
-		subnet = "10.10.10.0/24"
-		gateway = "10.10.10.1"
+		if sp, ok := be.(backend.SubnetProvider); ok {
+			gateway, subnet = sp.NetworkDefaults()
+		} else {
+			subnet = "10.10.10.0/24"
+			gateway = "10.10.10.1"
+		}
 	} else {
 		// Validate the provided subnet
 		gateway, _, err = config.ValidateSubnet(opts.Subnet)

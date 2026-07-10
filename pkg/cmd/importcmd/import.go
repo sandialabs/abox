@@ -103,7 +103,7 @@ func runImport(ctx context.Context, opts *Options, archivePath, newName string) 
 		if err != nil {
 			return err
 		}
-		baseImage := filepath.Join(paths.BaseImages, manifest.Instance.Base+".qcow2")
+		baseImage := filepath.Join(paths.BaseImages, config.UserBaseImageName(manifest.Instance.Base))
 		if _, err := os.Stat(baseImage); os.IsNotExist(err) {
 			return &cmdutil.ErrHint{
 				Err:  fmt.Errorf("base image %q not found", manifest.Instance.Base),
@@ -287,7 +287,11 @@ func allocateResources(opts *Options, name string, manifest *export.Manifest, w 
 		return nil, nil, nil, nil, fmt.Errorf("failed to get backend: %w", err)
 	}
 
-	paths, err := config.GetPathsWithStorage(name, be.StorageDir())
+	diskFormat := ""
+	if dfp, ok := be.(backend.DiskFormatProvider); ok {
+		diskFormat = dfp.DiskFormat()
+	}
+	paths, err := config.GetPathsWithOptions(name, be.StorageDir(), diskFormat)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -297,9 +301,15 @@ func allocateResources(opts *Options, name string, manifest *export.Manifest, w 
 
 	cleanup := &cleanupState{paths: paths, name: name, errOut: w}
 
-	subnet, gateway, thirdOctet, err := config.AllocateSubnet("")
+	// Resolve networking through the shared helper so imported instances honor
+	// a backend that manages its own subnets (e.g. vfkit/vmnet host mode on
+	// macOS). Calling config.AllocateSubnet directly here would hand a macOS
+	// import a 10.10.x.0/24 subnet from the Linux pool, which then boots
+	// vmnet-helper outside the locked host-mode pool or trips the start-time
+	// determinism guard.
+	subnet, gateway, ipAddress, err := backend.ResolveNetwork(be, "")
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to allocate subnet: %w", err)
+		return nil, nil, nil, nil, err
 	}
 
 	cpus := manifest.Instance.CPUs
@@ -316,15 +326,16 @@ func allocateResources(opts *Options, name string, manifest *export.Manifest, w 
 	cleanup.be = be
 
 	inst := &config.Instance{
-		Version: config.CurrentInstanceVersion,
-		Name:    name,
-		Backend: be.Name(),
-		CPUs:    cpus,
-		Memory:  memory,
-		Base:    manifest.Instance.Base,
-		Subnet:  subnet,
-		Gateway: gateway,
-		Bridge:  bridge,
+		Version:    config.CurrentInstanceVersion,
+		Name:       name,
+		Backend:    be.Name(),
+		DiskFormat: diskFormat,
+		CPUs:       cpus,
+		Memory:     memory,
+		Base:       manifest.Instance.Base,
+		Subnet:     subnet,
+		Gateway:    gateway,
+		Bridge:     bridge,
 		DNS: config.DNSConfig{
 			Port:     0,
 			Upstream: config.DefaultUpstream,
@@ -332,7 +343,7 @@ func allocateResources(opts *Options, name string, manifest *export.Manifest, w 
 		SSHKey:     paths.SSHKey,
 		Disk:       manifest.Instance.Disk,
 		MACAddress: be.GenerateMAC(),
-		IPAddress:  fmt.Sprintf("10.10.%d.10", thirdOctet),
+		IPAddress:  ipAddress,
 		StorageDir: be.StorageDir(),
 	}
 

@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -141,9 +142,10 @@ type MonitorConfig struct {
 type Instance struct {
 	Version       int            `yaml:"version"`
 	Name          string         `yaml:"name"`
-	Backend       string         `yaml:"backend,omitempty"`        // VM backend (libvirt, proxmox, macos); auto-detected if empty
+	Backend       string         `yaml:"backend,omitempty"`        // VM backend (libvirt, proxmox, vfkit); auto-detected if empty
 	BackendConfig map[string]any `yaml:"backend_config,omitempty"` // backend-specific overrides (each backend owns its keys)
 	StorageDir    string         `yaml:"storage_dir,omitempty"`    // backend storage root for disk images; set at creation time
+	DiskFormat    string         `yaml:"disk_format,omitempty"`    // disk image format: "qcow2" (default) or "raw" (vfkit/macOS)
 	CPUs          int            `yaml:"cpus"`
 	Memory        int            `yaml:"memory"` // MB
 	Base          string         `yaml:"base"`
@@ -209,7 +211,7 @@ type Paths struct {
 	Config           string // ~/.local/share/abox/instances/<name>/config.yaml
 	Allowlist        string // ~/.local/share/abox/instances/<name>/allowlist.conf
 	DiskDir          string // <storage_dir>/instances/<name>
-	Disk             string // <storage_dir>/instances/<name>/disk.qcow2
+	Disk             string // <storage_dir>/instances/<name>/disk.qcow2 (or disk.raw for vfkit/macOS)
 	CloudInitISO     string // <storage_dir>/instances/<name>/cidata.iso
 	SSHKey           string // ~/.local/share/abox/instances/<name>/id_ed25519
 	KnownHosts       string // ~/.local/share/abox/instances/<name>/known_hosts
@@ -265,7 +267,16 @@ func GetPaths(name string) (*Paths, error) {
 // GetPathsWithStorage returns all paths for the given instance name,
 // using storageDir as the root for backend-managed disk images.
 // If storageDir is empty, falls back to LibvirtImagesDir.
+// Disk format defaults to "qcow2". Use GetPathsWithOptions for raw format.
 func GetPathsWithStorage(name, storageDir string) (*Paths, error) {
+	return GetPathsWithOptions(name, storageDir, "")
+}
+
+// GetPathsWithOptions returns all paths for the given instance name,
+// using storageDir as the root and diskFormat for the disk image extension.
+// If storageDir is empty, falls back to LibvirtImagesDir.
+// If diskFormat is empty, defaults to "qcow2".
+func GetPathsWithOptions(name, storageDir, diskFormat string) (*Paths, error) {
 	if storageDir == "" {
 		storageDir = LibvirtImagesDir
 	}
@@ -296,6 +307,12 @@ func GetPathsWithStorage(name, storageDir string) (*Paths, error) {
 	// Disk images stored in backend-accessible location
 	diskDir := filepath.Join(storageDir, "instances", name)
 
+	// Determine disk filename from format
+	diskFilename := "disk.qcow2"
+	if diskFormat == "raw" {
+		diskFilename = "disk.raw"
+	}
+
 	// Logs directory under instance
 	logsDir := filepath.Join(cleanInstanceDir, "logs")
 
@@ -309,7 +326,7 @@ func GetPathsWithStorage(name, storageDir string) (*Paths, error) {
 		Config:           filepath.Join(cleanInstanceDir, "config.yaml"),
 		Allowlist:        filepath.Join(cleanInstanceDir, "allowlist.conf"),
 		DiskDir:          diskDir,
-		Disk:             filepath.Join(diskDir, "disk.qcow2"),
+		Disk:             filepath.Join(diskDir, diskFilename),
 		CloudInitISO:     filepath.Join(diskDir, "cidata.iso"),
 		SSHKey:           filepath.Join(cleanInstanceDir, "id_ed25519"),
 		KnownHosts:       filepath.Join(cleanInstanceDir, "known_hosts"),
@@ -352,12 +369,15 @@ func getBaseDir() (string, error) {
 }
 
 // RuntimeDir returns the user's runtime directory for sockets and temp files.
-// Uses XDG_RUNTIME_DIR if set, otherwise falls back to /run/user/<uid>.
+// Uses XDG_RUNTIME_DIR if set, otherwise falls back to a platform-specific default:
+//   - Linux: /run/user/<uid>
+//   - macOS: os.TempDir() (typically /var/folders/xx/.../T/, private to the user)
+//
 // Returns an error if the directory doesn't exist.
 func RuntimeDir() (string, error) {
 	dir := fsys.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {
-		dir = fmt.Sprintf("/run/user/%d", os.Getuid())
+		dir = runtimeDirFallback()
 	}
 	if _, err := fsys.Stat(dir); os.IsNotExist(err) {
 		return "", fmt.Errorf("runtime directory %s does not exist; ensure you are logged in or set XDG_RUNTIME_DIR", dir)
@@ -373,6 +393,30 @@ func RuntimeDirOr(fallback string) string {
 		return fallback
 	}
 	return dir
+}
+
+// UserBaseImageExt returns the file extension (including the leading dot) for
+// base images on this host. The same extension applies to both the user
+// cache (paths.UserBaseImages) and the backend storage dir (paths.BaseImages)
+// because the backend format is fixed per-platform:
+//   - Linux (libvirt/KVM): ".qcow2"
+//   - macOS (vfkit):       ".raw" (Apple Virtualization.framework cannot read qcow2)
+//
+// `abox base pull` produces files with this extension, backends clone/copy
+// using the same extension, and callers that look up base images by name
+// (list, remove, prune, EnsureBaseImage) should all use this helper.
+func UserBaseImageExt() string {
+	if runtime.GOOS == "darwin" {
+		return ".raw"
+	}
+	return ".qcow2"
+}
+
+// UserBaseImageName returns the canonical base image filename for this host
+// (e.g., "ubuntu-24.04.raw" on macOS, "ubuntu-24.04.qcow2" on Linux). Applies
+// to both user cache and backend storage — see UserBaseImageExt.
+func UserBaseImageName(base string) string {
+	return base + UserBaseImageExt()
 }
 
 // EnsureDirs creates user-writable directories for an instance.
@@ -429,10 +473,14 @@ func Load(name string) (*Instance, *Paths, error) {
 		return nil, nil, fmt.Errorf("invalid config: %w", err)
 	}
 
-	// Recompute paths with the instance's storage dir if it differs from default
+	// Recompute paths with the instance's storage dir and disk format
 	paths := initialPaths
-	if inst.StorageDir != "" && inst.StorageDir != LibvirtImagesDir {
-		paths, err = GetPathsWithStorage(name, inst.StorageDir)
+	if inst.StorageDir != "" || inst.DiskFormat != "" {
+		storageDir := inst.StorageDir
+		if storageDir == "" {
+			storageDir = LibvirtImagesDir
+		}
+		paths, err = GetPathsWithOptions(name, storageDir, inst.DiskFormat)
 		if err != nil {
 			return nil, nil, err
 		}

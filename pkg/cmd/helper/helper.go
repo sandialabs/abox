@@ -21,7 +21,7 @@ func NewCmdHelper() *cobra.Command {
 			if err := privilege.ValidateSocketPath(socketPath); err != nil {
 				return fmt.Errorf("--socket: %w", err)
 			}
-			return privilege.RunHelper(socketPath, allowedUID)
+			return privilege.RunHelper(socketPath, allowedUID, privilege.RegisterServer)
 		},
 	}
 

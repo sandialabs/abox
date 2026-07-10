@@ -197,6 +197,18 @@ Each instance runs its own httpfilter process:
 - In closed mode: blocks ALL outbound traffic
 - Applied when instance is "filtered" or "closed"
 
+### Platform Differences
+
+On macOS, `pfctl` replaces both iptables (for DNS redirection) and
+nwfilter (for default-deny egress). Per-instance rules live in a
+`pfctl` sub-anchor named `abox/<name>` that combines the DNS rdr,
+DHCP/HTTP-proxy/ICMP allows, and a terminal `block drop quick`. The
+same filtering guarantees apply — only the kernel mechanism differs.
+
+For the sub-anchors to actually be evaluated by the kernel, abox
+inserts two anchor references into `/etc/pf.conf` on first start. See
+[macOS Support: PF Anchor Wiring](macos.md#pf-anchor-wiring).
+
 ## Default Allowlist
 
 New instances have an **empty allowlist** — no domains are allowed by default. All outbound network access is blocked until you explicitly add domains:
@@ -359,4 +371,5 @@ For troubleshooting DNS, HTTP proxy, and domain blocking issues, see the [Troubl
 
 - [Security Design](security.md) - Defense-in-depth architecture and threat model
 - [Configuration Reference](abox-yaml.md) - Allowlist configuration in abox.yaml
+- [macOS Support](macos.md) - pfctl anchors and macOS-specific filtering behavior
 - [Troubleshooting](troubleshooting.md) - DNS and HTTP filtering issues

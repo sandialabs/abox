@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 	"syscall"
 
 	"github.com/sandialabs/abox/internal/config"
@@ -62,22 +61,6 @@ Multiple source files can be specified in a single command.`,
 	return cmd
 }
 
-// parseRemotePath parses a path that may be in <instance>:<path> format.
-// Returns (instance, path, isRemote).
-func parseRemotePath(path string) (string, string, bool) {
-	// Check for instance:path format
-	// Be careful not to match Windows drive letters or absolute paths
-	if idx := strings.Index(path, ":"); idx > 0 {
-		// Make sure it's not a Windows drive letter (single char before colon)
-		if idx > 1 || (idx == 1 && path[0] != '/') {
-			instName := path[:idx]
-			remotePath := path[idx+1:]
-			return instName, remotePath, true
-		}
-	}
-	return "", path, false
-}
-
 // parsedSource holds a parsed source path with its instance, path, and remote flag.
 type parsedSource struct {
 	instance string
@@ -95,11 +78,11 @@ type parsedArgs struct {
 
 // parseAndValidateArgs parses and validates the source and destination arguments.
 func parseAndValidateArgs(srcs []string, dst string) (*parsedArgs, error) {
-	dstInstance, dstPath, dstRemote := parseRemotePath(dst)
+	dstInstance, dstPath, dstRemote := sshutil.ParseRemotePath(dst)
 
 	sources := make([]parsedSource, len(srcs))
 	for i, s := range srcs {
-		inst, path, remote := parseRemotePath(s)
+		inst, path, remote := sshutil.ParseRemotePath(s)
 		sources[i] = parsedSource{inst, path, remote}
 	}
 

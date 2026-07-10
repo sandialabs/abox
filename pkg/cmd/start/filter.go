@@ -53,9 +53,18 @@ type daemonOptions struct {
 // It validates the log level, creates the log file, spawns the process with
 // restrictive umask for socket creation, and waits for the socket to appear.
 func startFilter(w io.Writer, name string, filterType FilterType, paths FilterPaths, logLevel string) error {
-	if checkAlreadyRunning(w, string(filterType), paths.PIDFile, paths.Socket) {
+	running, err := checkAlreadyRunning(w, string(filterType), paths.PIDFile, paths.Socket)
+	if err != nil {
+		return err
+	}
+	if running {
 		return nil
 	}
+
+	// PID file was missing/stale but a matching daemon process may still be
+	// orphaned (crash before the PID file was written/cleaned). Reclaim it so we
+	// don't spawn a second daemon that dies on "address already in use".
+	reclaimOrphanedFilterDaemon(w, name, string(filterType))
 
 	// Validate log level before using it in command args
 	if err := validation.ValidateLogLevel(logLevel); err != nil {
@@ -96,9 +105,15 @@ func startFilter(w io.Writer, name string, filterType FilterType, paths FilterPa
 // startDaemon starts a generic daemon as a background process.
 // Used for daemons like monitor that don't need log level validation.
 func startDaemon(w io.Writer, name string, daemonType string, paths DaemonPaths) error {
-	if checkAlreadyRunning(w, daemonType, paths.PIDFile, paths.Socket) {
+	running, err := checkAlreadyRunning(w, daemonType, paths.PIDFile, paths.Socket)
+	if err != nil {
+		return err
+	}
+	if running {
 		return nil
 	}
+
+	reclaimOrphanedFilterDaemon(w, name, daemonType)
 
 	args := []string{daemonType, "serve", name}
 
@@ -171,7 +186,14 @@ func startDaemonProcess(opts daemonOptions) error {
 
 		// Check if process is still running
 		if !isProcessRunning(pid) {
-			return fmt.Errorf("%s daemon exited immediately after starting", opts.daemonType)
+			// The most common immediate-exit cause is a bind failure ("address
+			// already in use") when a prior daemon still holds the port. The
+			// daemon's own log records the exact error; point the user there
+			// instead of leaving them with an opaque message.
+			return fmt.Errorf(
+				"%s daemon exited immediately after starting (often a port already in "+
+					"use by a leftover daemon); see the %s daemon log for the exact error",
+				opts.daemonType, opts.daemonType)
 		}
 
 		if info, err := os.Stat(opts.socketPath); err == nil {
@@ -179,45 +201,100 @@ func startDaemonProcess(opts daemonOptions) error {
 		}
 	}
 
-	return fmt.Errorf("%s daemon started but socket not ready", opts.daemonType)
+	return fmt.Errorf(
+		"%s daemon started but its socket %s never appeared; the daemon may be failing "+
+			"to bind its port (check the %s daemon log)",
+		opts.daemonType, opts.socketPath, opts.daemonType)
 }
+
+// daemonState classifies what the PID file tells us about a daemon.
+type daemonState int
+
+const (
+	// daemonDead: no PID file, an unparseable PID, or a PID confirmed not
+	// running / confirmed not an abox process. Safe to clean up and respawn.
+	daemonDead daemonState = iota
+	// daemonAlive: the PID file holds a live, confirmed-abox process.
+	daemonAlive
+	// daemonUnverifiable: a live process holds this PID but we could not confirm
+	// whether it is ours (e.g. ps/identity lookup errored). We must NOT delete
+	// its socket/PID files or respawn on top of it — doing so is exactly the bug
+	// that, on a misbehaving identity check, nukes a healthy daemon's files and
+	// spins respawning into "address already in use". Fail loud instead.
+	daemonUnverifiable
+)
 
 // checkAlreadyRunning reports whether a daemon is already alive based on its
 // PID file. If the PID is dead but socket/PID files remain (an ungraceful
 // previous exit), it removes the stale files, prints a user-visible recovery
-// notice, and returns false so the caller can start a fresh daemon.
-func checkAlreadyRunning(w io.Writer, daemonType, pidFile, socketPath string) bool {
+// notice, and returns (false, nil) so the caller can start a fresh daemon. If a
+// live process holds the PID but its identity can't be confirmed, it returns an
+// error rather than risk deleting a possibly-live daemon's state.
+func checkAlreadyRunning(w io.Writer, daemonType, pidFile, socketPath string) (bool, error) {
 	if w == nil {
 		w = io.Discard
 	}
-	if isDaemonAlive(pidFile) {
+	switch daemonStateOf(pidFile) {
+	case daemonAlive:
 		logging.Warn("daemon already running", "type", daemonType)
-		return true
+		return true, nil
+	case daemonUnverifiable:
+		return false, fmt.Errorf(
+			"%s daemon PID file points at a running process whose identity could not be "+
+				"verified; refusing to delete its state or start a second daemon. "+
+				"Stop the existing process or remove %s if it is stale, then retry",
+			daemonType, pidFile)
+	case daemonDead:
+		// Clean up any leftover state from an ungraceful exit, then let the
+		// caller start fresh.
+		_, socketErr := os.Stat(socketPath)
+		_, pidErr := os.Stat(pidFile)
+		if socketErr == nil || pidErr == nil {
+			fmt.Fprintf(w, "  %s daemon from previous run did not exit cleanly, restarting...\n", daemonType)
+			logging.Warn("cleaning up stale daemon files from previous crash", "type", daemonType)
+			_ = os.Remove(socketPath)
+			_ = os.Remove(pidFile)
+		}
 	}
-	_, socketErr := os.Stat(socketPath)
-	_, pidErr := os.Stat(pidFile)
-	if socketErr == nil || pidErr == nil {
-		fmt.Fprintf(w, "  %s daemon from previous run did not exit cleanly, restarting...\n", daemonType)
-		logging.Warn("cleaning up stale daemon files from previous crash", "type", daemonType)
-		_ = os.Remove(socketPath)
-		_ = os.Remove(pidFile)
-	}
-	return false
+	return false, nil
 }
 
-// isDaemonAlive returns true only if pidFile holds a live abox process.
-// Any read/parse error, dead PID, or non-abox PID is treated as "not alive"
-// since each leads to the same caller action: clean up and start fresh.
-func isDaemonAlive(pidFile string) bool {
+// processRunningFn and isAboxProcessFn are package-level seams so tests can
+// drive daemonStateOf deterministically without spawning real processes. They
+// default to the real implementations.
+var (
+	processRunningFn = isProcessRunning
+	isAboxProcessFn  = daemon.IsAboxProcess
+)
+
+// daemonStateOf classifies the daemon referenced by pidFile. A missing/garbage
+// PID file or a dead/not-abox PID is daemonDead; a confirmed-abox live PID is
+// daemonAlive; a live PID whose identity can't be confirmed is
+// daemonUnverifiable.
+func daemonStateOf(pidFile string) daemonState {
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
-		return false
+		return daemonDead
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil || pid <= 0 {
-		return false
+		return daemonDead
 	}
-	return isProcessRunning(pid) && daemon.IsAboxProcess(pid)
+	if !processRunningFn(pid) {
+		return daemonDead
+	}
+	isAbox, idErr := isAboxProcessFn(pid)
+	if idErr != nil {
+		// Process is alive but we couldn't confirm whether it is ours. Distinct
+		// from a confirmed mismatch: do not touch its files.
+		return daemonUnverifiable
+	}
+	if !isAbox {
+		// Live, but confirmed to be some other program (PID reuse). Treat like a
+		// stale file: safe to clean up and respawn.
+		return daemonDead
+	}
+	return daemonAlive
 }
 
 // isProcessRunning checks if a process with the given PID is still running.

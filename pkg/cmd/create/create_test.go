@@ -3,10 +3,39 @@ package create
 import (
 	"testing"
 
+	"github.com/sandialabs/abox/internal/backend/mock"
 	"github.com/sandialabs/abox/internal/iostreams"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 	"github.com/sandialabs/abox/pkg/cmdutil"
 )
+
+// createPrivilegeProvider is a mock backend that implements
+// backend.CreatePrivilegeProvider, reporting the configured value.
+type createPrivilegeProvider struct {
+	*mock.Backend
+	requires bool
+}
+
+func (b *createPrivilegeProvider) CreateRequiresPrivilege() bool {
+	return b.requires
+}
+
+func TestCreateRequiresPrivilege_DefaultsToTrue(t *testing.T) {
+	// A backend that does not implement CreatePrivilegeProvider must default
+	// to requiring privileges (Linux/libvirt behavior).
+	if !createRequiresPrivilege(&mock.Backend{}) {
+		t.Error("expected createRequiresPrivilege to default to true for a backend without the interface")
+	}
+}
+
+func TestCreateRequiresPrivilege_HonorsProvider(t *testing.T) {
+	if createRequiresPrivilege(&createPrivilegeProvider{Backend: &mock.Backend{}, requires: false}) {
+		t.Error("expected createRequiresPrivilege to be false when the backend reports no privilege need")
+	}
+	if !createRequiresPrivilege(&createPrivilegeProvider{Backend: &mock.Backend{}, requires: true}) {
+		t.Error("expected createRequiresPrivilege to be true when the backend reports a privilege need")
+	}
+}
 
 func TestNewCmdCreate_FlagParsing(t *testing.T) {
 	ios, _, _, _ := iostreams.Test()

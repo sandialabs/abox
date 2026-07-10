@@ -18,7 +18,6 @@ import (
 	"github.com/sandialabs/abox/pkg/cmd/export"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 	"github.com/sandialabs/abox/pkg/cmd/forward"
-	"github.com/sandialabs/abox/pkg/cmd/helper"
 	"github.com/sandialabs/abox/pkg/cmd/helptopics"
 	"github.com/sandialabs/abox/pkg/cmd/http"
 	importcmd "github.com/sandialabs/abox/pkg/cmd/importcmd"
@@ -26,11 +25,11 @@ import (
 	"github.com/sandialabs/abox/pkg/cmd/list"
 	"github.com/sandialabs/abox/pkg/cmd/logs"
 	"github.com/sandialabs/abox/pkg/cmd/monitor"
-	"github.com/sandialabs/abox/pkg/cmd/mount"
 	"github.com/sandialabs/abox/pkg/cmd/net"
 	"github.com/sandialabs/abox/pkg/cmd/overrides"
 	"github.com/sandialabs/abox/pkg/cmd/provision"
 	"github.com/sandialabs/abox/pkg/cmd/prune"
+	"github.com/sandialabs/abox/pkg/cmd/remote"
 	"github.com/sandialabs/abox/pkg/cmd/remove"
 	"github.com/sandialabs/abox/pkg/cmd/restart"
 	"github.com/sandialabs/abox/pkg/cmd/scp"
@@ -40,15 +39,10 @@ import (
 	"github.com/sandialabs/abox/pkg/cmd/status"
 	"github.com/sandialabs/abox/pkg/cmd/stop"
 	"github.com/sandialabs/abox/pkg/cmd/tap"
-	"github.com/sandialabs/abox/pkg/cmd/unmount"
 	"github.com/sandialabs/abox/pkg/cmd/up"
 	versioncmd "github.com/sandialabs/abox/pkg/cmd/version"
 
 	"github.com/spf13/cobra"
-
-	// Register VM backends via blank imports.
-	// Backends self-register in their init() functions.
-	_ "github.com/sandialabs/abox/internal/backend/libvirt"
 )
 
 // Command group IDs for organizing help output.
@@ -223,12 +217,14 @@ func addSubcommands(cmd *cobra.Command, f *factory.Factory) {
 	// Access commands
 	addGroupedCommand(cmd, ssh.NewCmdSSH(f, nil), groupAccess)
 	addGroupedCommand(cmd, scp.NewCmdSCP(f, nil), groupAccess)
+	addGroupedCommand(cmd, remote.NewCmdRemote(f), groupAccess)
 	addGroupedCommand(cmd, provision.NewCmdProvision(f, nil), groupAccess)
 	addGroupedCommand(cmd, forward.NewCmdForward(f), groupAccess)
 
-	// File transfer commands
-	addGroupedCommand(cmd, mount.NewCmdMount(f, nil), groupFiles)
-	addGroupedCommand(cmd, unmount.NewCmdUnmount(f, nil), groupFiles)
+	// File transfer commands. mount/unmount are registered per-platform
+	// (Linux only) because they rely on FUSE/sshfs, which abox does not
+	// support on macOS.
+	addPlatformFileCommands(cmd, f)
 	addGroupedCommand(cmd, export.NewCmdExport(f, nil), groupFiles)
 	addGroupedCommand(cmd, importcmd.NewCmdImport(f, nil), groupFiles)
 
@@ -253,6 +249,9 @@ func addSubcommands(cmd *cobra.Command, f *factory.Factory) {
 	addGroupedCommand(cmd, doctor.NewCmdDoctor(f, nil), groupUtilities)
 	addGroupedCommand(cmd, versioncmd.NewCmdVersion(f, nil), groupUtilities)
 
-	// Hidden helper command for privilege escalation
-	cmd.AddCommand(helper.NewCmdHelper())
+	// Hidden helper command for privilege escalation (platform-specific)
+	addPlatformCommands(cmd)
+
+	// Platform-specific grouped commands (e.g. macOS-only `teardown-pf`).
+	addPlatformGroupedCommands(cmd, f)
 }

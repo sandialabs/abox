@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -310,11 +312,18 @@ func (f *Factory) PrivilegeClient() (rpc.PrivilegeClient, error) {
 		return helper.client, nil
 	}
 
-	// Determine socket directory: prefer XDG_RUNTIME_DIR for security
-	// XDG_RUNTIME_DIR is user-private (/run/user/<uid>), unlike /tmp which is world-writable
+	// Determine socket directory: prefer XDG_RUNTIME_DIR for security.
+	// On macOS, $TMPDIR is per-user and private (e.g., /var/folders/xx/.../T/).
+	// On Linux, /run/user/<uid> is user-private.
 	socketDir := os.Getenv("XDG_RUNTIME_DIR")
 	if socketDir == "" {
-		socketDir = fmt.Sprintf("/run/user/%d", os.Getuid())
+		if runtime.GOOS == "darwin" {
+			// os.TempDir() returns $TMPDIR which may have a trailing slash on macOS.
+			// filepath.Clean normalizes it (e.g., "/var/folders/.../T/" → "/var/folders/.../T").
+			socketDir = filepath.Clean(os.TempDir())
+		} else {
+			socketDir = fmt.Sprintf("/run/user/%d", os.Getuid())
+		}
 	}
 	// Refuse to continue if no secure runtime directory exists
 	if _, err := os.Stat(socketDir); os.IsNotExist(err) { //nolint:gosec // checking directory existence, not opening untrusted path

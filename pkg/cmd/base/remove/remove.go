@@ -66,23 +66,23 @@ func runRemove(ctx context.Context, opts *Options) error {
 	}
 
 	name := opts.Name
-	userImage := filepath.Join(paths.UserBaseImages, name+".qcow2")
-	libvirtImage := filepath.Join(paths.BaseImages, name+".qcow2")
+	userImage := filepath.Join(paths.UserBaseImages, config.UserBaseImageName(name))
+	backendImage := filepath.Join(paths.BaseImages, config.UserBaseImageName(name))
 
 	// Check if image exists in either location
 	_, userErr := os.Stat(userImage)
-	_, libvirtErr := os.Stat(libvirtImage)
+	_, backendErr := os.Stat(backendImage)
 
-	if os.IsNotExist(userErr) && os.IsNotExist(libvirtErr) {
+	if os.IsNotExist(userErr) && os.IsNotExist(backendErr) {
 		return fmt.Errorf("base image %q not found", name)
 	}
 
 	out := opts.Factory.IO.Out
-	hasLibvirtCopy := libvirtErr == nil
+	hasBackendCopy := backendErr == nil
 
 	// Early in-use scan (unless --force): check if any instance disks reference this base image
-	if !opts.Force && hasLibvirtCopy {
-		inUse, err := instancesUsingBase(libvirtImage)
+	if !opts.Force && hasBackendCopy {
+		inUse, err := instancesUsingBase(backendImage)
 		if err != nil {
 			logging.Debug("failed to scan for instances using base image", "error", err)
 		} else if len(inUse) > 0 {
@@ -108,12 +108,13 @@ func runRemove(ctx context.Context, opts *Options) error {
 		fmt.Fprintf(out, "Removed %s\n", userImage)
 	}
 
-	// Delete libvirt copy (requires privilege helper + flock)
-	if hasLibvirtCopy {
-		if err := removeLibvirtCopy(ctx, opts, name, libvirtImage); err != nil {
+	// Delete backend-managed copy (requires privilege helper + flock on linux;
+	// user-owned direct delete on darwin via DirectPrivilegeClient).
+	if hasBackendCopy {
+		if err := removeBackendCopy(ctx, opts, name, backendImage); err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "Removed %s\n", libvirtImage)
+		fmt.Fprintf(out, "Removed %s\n", backendImage)
 	}
 
 	logging.Audit(logging.ActionBaseRemove, "action", logging.ActionBaseRemove, "name", name)
@@ -122,18 +123,18 @@ func runRemove(ctx context.Context, opts *Options) error {
 	return nil
 }
 
-// removeLibvirtCopy acquires an exclusive flock, re-scans for in-use instances,
-// and deletes the libvirt base image via the privilege helper.
-func removeLibvirtCopy(ctx context.Context, opts *Options, name, libvirtImage string) error {
+// removeBackendCopy acquires an exclusive flock, re-scans for in-use instances,
+// and deletes the backend-managed base image via the privilege helper.
+func removeBackendCopy(ctx context.Context, opts *Options, name, backendImage string) error {
 	// Acquire exclusive flock — blocks until any in-progress creates finish
-	unlock, err := images.LockBaseImage(libvirtImage, syscall.LOCK_EX)
+	unlock, err := images.LockBaseImage(backendImage, syscall.LOCK_EX)
 	if err != nil {
 		return fmt.Errorf("failed to lock base image: %w", err)
 	}
 
 	// Re-scan under lock (unless --force): authoritative check
 	if !opts.Force {
-		inUse, err := instancesUsingBase(libvirtImage)
+		inUse, err := instancesUsingBase(backendImage)
 		if err != nil {
 			unlock.Close()
 			return fmt.Errorf("failed to scan for instances using base image: %w", err)
@@ -154,10 +155,10 @@ func removeLibvirtCopy(ctx context.Context, opts *Options, name, libvirtImage st
 	ctx, cancel := context.WithTimeout(ctx, timeout.Default)
 	defer cancel()
 
-	_, err = client.RemoveAll(ctx, &rpc.PathReq{Path: libvirtImage})
+	_, err = client.RemoveAll(ctx, &rpc.PathReq{Path: backendImage})
 	unlock.Close()
 	if err != nil {
-		return fmt.Errorf("failed to remove libvirt base image: %w", err)
+		return fmt.Errorf("failed to remove backend base image: %w", err)
 	}
 	return nil
 }
@@ -186,9 +187,13 @@ func instancesUsingBase(baseImagePath string) ([]string, error) {
 			continue
 		}
 
+		// Check for both qcow2 (libvirt) and raw (vfkit) disk formats
 		diskPath := filepath.Join(instancesDir, entry.Name(), "disk.qcow2")
 		if _, err := os.Stat(diskPath); os.IsNotExist(err) {
-			continue
+			diskPath = filepath.Join(instancesDir, entry.Name(), "disk.raw")
+			if _, err := os.Stat(diskPath); os.IsNotExist(err) {
+				continue
+			}
 		}
 
 		cmd := exec.Command("qemu-img", "info", "--output=json", diskPath)
@@ -226,18 +231,19 @@ func completeBaseImages(cmd *cobra.Command, args []string, toComplete string) ([
 	seen := make(map[string]bool)
 	var names []string
 
-	// Scan user cache
+	// Scan both user cache and backend-managed base images. Both dirs use the
+	// same extension per host (see config.UserBaseImageExt).
+	ext := config.UserBaseImageExt()
 	for _, dir := range []string{paths.UserBaseImages, paths.BaseImages} {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
 		for _, entry := range entries {
-			if before, ok := strings.CutSuffix(entry.Name(), ".qcow2"); ok {
-				name := before
-				if !seen[name] {
-					seen[name] = true
-					names = append(names, name)
+			if before, ok := strings.CutSuffix(entry.Name(), ext); ok {
+				if !seen[before] {
+					seen[before] = true
+					names = append(names, before)
 				}
 			}
 		}

@@ -1,9 +1,10 @@
 // Package backend provides a pluggable interface for VM management backends.
 //
-// Currently available backends:
+// Available backends:
 //   - libvirt (Linux): QEMU/KVM via libvirt
+//   - vfkit (macOS): Apple Virtualization.framework via vfkit
 //
-// Additional backends (proxmox, macos) are planned for future releases.
+// Additional backends (proxmox) are planned for future releases.
 //
 // Backend selection is automatic at runtime based on platform and availability.
 // The detected backend is recorded in instance config at create time.
@@ -20,7 +21,7 @@ import (
 // Backend is the main interface for VM management backends.
 // Each backend implements platform-specific operations for VMs, networks, and disks.
 type Backend interface {
-	// Name returns the backend identifier (e.g., "libvirt", "proxmox", "macos").
+	// Name returns the backend identifier (e.g., "libvirt", "proxmox", "vfkit").
 	Name() string
 
 	// IsAvailable checks if this backend can be used on the current system.
@@ -229,6 +230,50 @@ type TrafficInterceptor interface {
 
 	// GetFilterUUID returns the UUID of a filter, or empty string if not found.
 	GetFilterUUID(filterName string) string
+}
+
+// DiskFormatProvider is an optional interface for backends that use a non-default
+// disk image format. The default format is "qcow2". Backends that require a
+// different format (e.g., "raw" for vfkit on macOS) implement this interface.
+// Check support via type assertion: dfp, ok := be.(DiskFormatProvider)
+type DiskFormatProvider interface {
+	// DiskFormat returns the disk image format for this backend (e.g., "raw", "qcow2").
+	DiskFormat() string
+}
+
+// SelfContainedExporter is an optional interface for backends whose disk export
+// is always a single self-contained image with no backing-file/CoW-delta concept
+// (e.g. vfkit on macOS, which stores raw disks). For such backends the
+// `--snapshot` export flag cannot be honored: there is no delta to export, so a
+// snapshot request must be rejected rather than silently producing a full image
+// mislabeled as a snapshot. Check support via type assertion:
+// sce, ok := be.Disk().(SelfContainedExporter).
+type SelfContainedExporter interface {
+	// SelfContainedExport reports whether this backend's Export always produces a
+	// self-contained image (true) such that snapshot/CoW-delta export is impossible.
+	SelfContainedExport() bool
+}
+
+// SubnetProvider is an optional interface for backends that manage their own
+// networking subnet (e.g., macOS vmnet shared mode). When implemented, the
+// create flow uses this instead of the default subnet pool allocation.
+// Check support via type assertion: sp, ok := be.(SubnetProvider)
+type SubnetProvider interface {
+	// NetworkDefaults returns the gateway IP and subnet CIDR for this backend's
+	// managed network. For example, vmnet shared mode returns ("192.168.64.1", "192.168.64.0/24").
+	NetworkDefaults() (gateway, subnet string)
+}
+
+// CreatePrivilegeProvider is an optional interface for backends that can report
+// whether `abox create` needs the privilege helper. Backends with user-owned
+// storage and no privileged create-time operations (e.g., vfkit on macOS) return
+// false so create does not trigger a sudo prompt. Backends that do not implement
+// this interface default to requiring privileges (Linux/libvirt unchanged).
+// Check support via type assertion: cpp, ok := be.(CreatePrivilegeProvider)
+type CreatePrivilegeProvider interface {
+	// CreateRequiresPrivilege reports whether instance creation performs
+	// operations that require the privilege helper.
+	CreateRequiresPrivilege() bool
 }
 
 // TemplateValidator is an optional interface for backends that support custom templates.
