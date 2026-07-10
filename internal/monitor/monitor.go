@@ -3,7 +3,9 @@ package monitor
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"sync"
@@ -56,6 +58,11 @@ func ConnectWithRetry(ctx context.Context, socketPath string, interval time.Dura
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// warnedPermission ensures a persistent permission error is surfaced at WARN
+	// exactly once per call (the loop never returns while EACCES persists), rather
+	// than spamming a WARN every tick.
+	warnedPermission := false
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -65,7 +72,19 @@ func ConnectWithRetry(ctx context.Context, socketPath string, interval time.Dura
 			if err == nil {
 				return mon, nil
 			}
-			logging.Debug("waiting for monitor socket", "path", socketPath, "error", err)
+			// A permission error means the socket exists but the daemon's user
+			// can't connect — almost always missing membership in the socket's
+			// owning group. Surface that loudly (once). "Not yet created" races
+			// (ENOENT) during normal boot stay at DEBUG.
+			if errors.Is(err, fs.ErrPermission) {
+				if !warnedPermission {
+					logging.Warn("monitor socket exists but is not accessible (permission denied); "+
+						"the invoking user is likely not in the socket's owning group", "path", socketPath, "error", err)
+					warnedPermission = true
+				}
+			} else {
+				logging.Debug("waiting for monitor socket", "path", socketPath, "error", err)
+			}
 		}
 	}
 }

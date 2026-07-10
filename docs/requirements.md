@@ -188,6 +188,23 @@ groups | grep libvirt
 
 If not in the libvirt group, abox will use pkexec or sudo for virsh commands, which may prompt for passwords.
 
+### Monitor Group Membership (when monitoring is enabled)
+
+The Tetragon monitor streams events from the VM over a virtio-serial socket that
+libvirt creates owned by qemu's group (commonly `kvm`, sometimes `libvirt-qemu` or
+`qemu` depending on your distribution and `/etc/libvirt/qemu.conf`). The monitor
+daemon runs as your user, so you must be a member of that group to read the socket —
+otherwise events are silently not captured (`EventsLogged: 0`).
+
+```bash
+# Add yourself to the socket's group (usually kvm); start a new login session after.
+sudo usermod -aG kvm $USER
+```
+
+`abox start` reports the exact group to join if you're not a member. See
+[troubleshooting](troubleshooting.md#monitor-captures-no-events) if monitoring shows
+no events.
+
 ### Polkit Configuration (Optional)
 
 To avoid password prompts when not in the libvirt group, create a polkit rule:

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 
@@ -46,7 +47,13 @@ func InGroup(groupName string) bool {
 		return false
 	}
 
-	// Check real and effective GID first.
+	return inGID(gid)
+}
+
+// inGID reports whether the current process belongs to the given GID, checking
+// the real GID, effective GID, and supplementary groups (POSIX leaves it
+// unspecified whether the real/effective GIDs appear in the supplementary list).
+func inGID(gid int) bool {
 	if os.Getgid() == gid || os.Getegid() == gid {
 		return true
 	}
@@ -57,6 +64,38 @@ func InGroup(groupName string) bool {
 	}
 
 	return slices.Contains(groups, gid)
+}
+
+// SocketGroupAccess describes a unix socket's owning group and whether the
+// current process can reach it via that group's permissions.
+type SocketGroupAccess struct {
+	Group    string // owning group name, or the numeric GID if it can't be resolved
+	GID      int
+	IsMember bool // whether the current process is a member of the owning group
+}
+
+// CheckSocketGroupAccess stats the socket at path and reports its owning group
+// and whether the current process is a member of it. This is the authoritative
+// check for whether a connect() will be permitted via group permissions — the
+// common case for libvirt-created chardev sockets, which are group-owned (e.g.
+// kvm/libvirt-qemu) rather than owned by the invoking user.
+func CheckSocketGroupAccess(path string) (SocketGroupAccess, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return SocketGroupAccess{}, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return SocketGroupAccess{}, fmt.Errorf("cannot determine ownership of %s", path)
+	}
+
+	gid := int(stat.Gid)
+	gidStr := strconv.Itoa(gid)
+	access := SocketGroupAccess{GID: gid, Group: gidStr, IsMember: inGID(gid)}
+	if g, err := user.LookupGroupId(gidStr); err == nil {
+		access.Group = g.Name
+	}
+	return access, nil
 }
 
 // CanAccessLibvirtImages checks if the current user/process can access libvirt disk paths.

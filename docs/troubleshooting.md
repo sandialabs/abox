@@ -335,6 +335,43 @@ This checks: host configuration, VM state, network, DNS/HTTP filter services, SS
    # Run script commands one by one
    ```
 
+### Monitor Captures No Events
+
+**Symptoms:**
+- `abox monitor logs <name>` is empty even though Tetragon is running in the VM
+- `abox monitor status <name>` shows `Events logged: 0` (with the socket reported as
+  existing and the daemon running)
+- `TestMonitorEventTypes` e2e subtests fail with "no ... event found"
+
+**Cause:**
+
+libvirt creates the monitor virtio-serial socket
+(`~/.local/share/abox/instances/<name>/monitor.sock`) owned by qemu's group (e.g.
+`libvirt-qemu:kvm`, mode `0775`). The monitor daemon runs as your user; if you are not
+a member of the socket's owning group, `connect()` fails with `permission denied` and
+the daemon retries silently, so no events are logged. (The `<permissions>` element abox
+emits in the domain XML is best-effort and is ignored for chardev sockets on most
+libvirt versions, which is why group membership is required.)
+
+**Resolution:**
+
+1. Find the socket's group and confirm you're not in it:
+   ```bash
+   ls -l ~/.local/share/abox/instances/<name>/monitor.sock   # 4th column = group
+   id                                                          # your groups
+   ```
+2. Add yourself to that group and start a **new login session** (a fresh shell is not
+   enough — the daemon inherits the login session's groups):
+   ```bash
+   sudo usermod -aG kvm "$USER"   # use the group from step 1
+   ```
+3. Restart the instance (`abox stop <name> && abox start <name>`) and confirm:
+   ```bash
+   abox monitor status <name>     # Events logged: should be > 0
+   ```
+
+`abox start` prints a warning naming the exact group when it detects this.
+
 ## Log Locations
 
 Instance data is stored at `~/.local/share/abox/instances/<name>/`.
