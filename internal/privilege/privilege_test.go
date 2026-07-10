@@ -66,7 +66,7 @@ func TestCheckSocketGroupAccess(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to create test socket: %v", err)
 		}
-		defer l.Close()
+		defer func() { _ = l.Close() }()
 
 		access, err := CheckSocketGroupAccess(sockPath)
 		if err != nil {
