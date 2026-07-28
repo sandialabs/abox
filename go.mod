@@ -10,7 +10,7 @@ require (
 	github.com/itchyny/gojq v0.12.19
 	github.com/miekg/dns v1.1.72
 	github.com/spf13/cobra v1.10.2
-	go.yaml.in/yaml/v3 v3.0.4
+	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/net v0.57.0
 	golang.org/x/sys v0.47.0
 	google.golang.org/grpc v1.82.1
