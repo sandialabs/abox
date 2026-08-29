@@ -1,6 +1,6 @@
 //go:build darwin
 
-package unmount
+package remove
 
 import (
 	"fmt"

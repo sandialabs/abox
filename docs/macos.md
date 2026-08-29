@@ -262,8 +262,8 @@ brew install fuse-t-sshfs
 Mounting then works the same as on Linux:
 
 ```bash
-abox mount dev ~/mnt/dev          # mount the guest home directory
-abox unmount ~/mnt/dev            # unmount
+abox mount add dev ~/mnt/dev      # mount the guest home directory
+abox mount remove ~/mnt/dev       # unmount (or: abox unmount ~/mnt/dev)
 abox unmount -f ~/mnt/dev         # force unmount a busy volume
 ```
 

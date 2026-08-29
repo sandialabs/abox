@@ -1,6 +1,6 @@
 //go:build linux
 
-package unmount
+package remove
 
 import (
 	"fmt"

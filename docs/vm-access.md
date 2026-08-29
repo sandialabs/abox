@@ -173,33 +173,52 @@ curl http://localhost:3000/api/health
 
 For more seamless file access, mount the VM's filesystem on your host.
 
-### Mount
+> **Changed:** mounts are now managed with `abox mount add`/`list`/`remove`
+> (mirroring `abox forward`). The old flat form `abox mount <instance> <path>` is
+> replaced by `abox mount add <instance> <path>`. The top-level `abox unmount`
+> (and `abox umount`) still work as a shortcut for `abox mount remove`.
+> Separately, `abox snapshot create` is now `abox snapshot add` (`create` remains
+> an alias).
+
+### Add a mount
 
 ```bash
 # Mount VM home directory
-abox mount dev ~/mnt/dev
+abox mount add dev ~/mnt/dev
 
 # Mount a specific path
-abox mount dev:/var/log ~/mnt/logs
+abox mount add dev:/var/log ~/mnt/logs
 
 # Mount read-only
-abox mount --read-only dev ~/mnt/dev
+abox mount add --read-only dev ~/mnt/dev
 
 # Allow other users to access the mount
-abox mount --allow-other dev ~/mnt/dev
+abox mount add --allow-other dev ~/mnt/dev
 ```
 
-### Unmount
+### List mounts
+
+```bash
+abox mount list dev        # recorded mounts for an instance, with live status
+abox mount list dev --json
+```
+
+### Remove a mount
+
+`abox mount remove` (alias `rm`) tears a mount down. The top-level `abox unmount`
+(alias `abox umount`) is kept as a shortcut for the same thing.
 
 ```bash
 # By mount path
+abox mount remove ~/mnt/dev
 abox unmount ~/mnt/dev
 
 # By instance name (unmounts all mounts for that instance)
-abox unmount dev
+abox mount remove dev
 
 # Unmount all abox mounts across all instances
-abox unmount --all
+abox mount remove --all
+abox umount --all
 ```
 
 ### Requirements

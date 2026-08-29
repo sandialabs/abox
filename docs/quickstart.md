@@ -227,14 +227,14 @@ abox scp ./myfile.txt dev:/home/$ABOX_USER/  # e.g., /home/ubuntu/ or /home/alma
 abox scp dev:/var/log/app.log ./
 
 # Mount VM filesystem
-abox mount dev ~/mnt/dev
+abox mount add dev ~/mnt/dev
 ```
 
 ### Snapshots
 
 ```bash
 # Create checkpoint before changes
-abox snapshot create dev clean-state
+abox snapshot add dev clean-state
 
 # List snapshots
 abox snapshot list dev

@@ -1,4 +1,4 @@
-package unmount
+package remove
 
 import (
 	"fmt"
@@ -185,5 +185,26 @@ func TestNewCmdUnmount_AllWithArgs(t *testing.T) {
 
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("expected error when --all used with args")
+	}
+}
+
+// TestNewCmdRemove_MirrorsUnmount verifies the `mount remove` subcommand shares
+// the same flags and args behavior as the top-level unmount alias.
+func TestNewCmdRemove_MirrorsUnmount(t *testing.T) {
+	ios, _, _, _ := iostreams.Test()
+	f := &factory.Factory{IO: ios, ColorScheme: cmdutil.NewColorScheme(false)}
+
+	var gotOpts *Options
+	cmd := NewCmdRemove(f, func(o *Options) error {
+		gotOpts = o
+		return nil
+	})
+	cmd.SetArgs([]string{"--force", "/mnt/dev"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotOpts == nil || !gotOpts.Force || gotOpts.Path != "/mnt/dev" {
+		t.Fatalf("remove did not parse flags/args like unmount: %+v", gotOpts)
 	}
 }

@@ -1,4 +1,4 @@
-package create
+package add
 
 import (
 	"context"
@@ -15,22 +15,25 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Options holds the options for the snapshot create command.
+// Options holds the options for the snapshot add command.
 type Options struct {
 	Factory      *factory.Factory
 	Name         string
 	SnapshotName string
 }
 
-// NewCmdCreate creates a new snapshot create command.
-func NewCmdCreate(f *factory.Factory, runF func(*Options) error) *cobra.Command {
+// NewCmdAdd creates a new snapshot add command. The verb is "add" for
+// consistency with other collection commands (allowlist/forward/mount); "create"
+// remains as an alias for backward compatibility.
+func NewCmdAdd(f *factory.Factory, runF func(*Options) error) *cobra.Command {
 	opts := &Options{Factory: f}
 
 	cmd := &cobra.Command{
-		Use:   "create <instance> [name]",
-		Short: "Create a snapshot of an instance",
-		Example: `  abox snapshot create dev                 # Auto-generated snapshot name
-  abox snapshot create dev before-upgrade  # Named snapshot`,
+		Use:     "add <instance> [name]",
+		Aliases: []string{"create"},
+		Short:   "Create a snapshot of an instance",
+		Example: `  abox snapshot add dev                 # Auto-generated snapshot name
+  abox snapshot add dev before-upgrade  # Named snapshot`,
 		Long: `Create a snapshot of an instance.
 
 If no name is provided, an auto-generated name will be used in the format:
