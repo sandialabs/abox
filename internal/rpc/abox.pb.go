@@ -102,27 +102,27 @@ func (x *StringMsg) GetMessage() string {
 	return ""
 }
 
-type PathReq struct {
+type BoolMsg struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Ok            bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *PathReq) Reset() {
-	*x = PathReq{}
+func (x *BoolMsg) Reset() {
+	*x = BoolMsg{}
 	mi := &file_internal_rpc_abox_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *PathReq) String() string {
+func (x *BoolMsg) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*PathReq) ProtoMessage() {}
+func (*BoolMsg) ProtoMessage() {}
 
-func (x *PathReq) ProtoReflect() protoreflect.Message {
+func (x *BoolMsg) ProtoReflect() protoreflect.Message {
 	mi := &file_internal_rpc_abox_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -134,16 +134,16 @@ func (x *PathReq) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use PathReq.ProtoReflect.Descriptor instead.
-func (*PathReq) Descriptor() ([]byte, []int) {
+// Deprecated: Use BoolMsg.ProtoReflect.Descriptor instead.
+func (*BoolMsg) Descriptor() ([]byte, []int) {
 	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{2}
 }
 
-func (x *PathReq) GetPath() string {
+func (x *BoolMsg) GetOk() bool {
 	if x != nil {
-		return x.Path
+		return x.Ok
 	}
-	return ""
+	return false
 }
 
 type DomainReq struct {
@@ -234,30 +234,33 @@ func (x *DomainList) GetDomains() []string {
 	return nil
 }
 
-// Privilege-specific messages
-type QemuImgReq struct {
+// Egress-specific messages. These fields are the single source of truth for the
+// permitted guest egress; the helper enforces exactly what is described here
+// (after bounding/validating each field). See backend.EgressPolicy.
+type EgressReq struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	BackingFile   string                 `protobuf:"bytes,1,opt,name=backing_file,json=backingFile,proto3" json:"backing_file,omitempty"`
-	Output        string                 `protobuf:"bytes,2,opt,name=output,proto3" json:"output,omitempty"`
-	Size          string                 `protobuf:"bytes,3,opt,name=size,proto3" json:"size,omitempty"`
+	Bridge        string                 `protobuf:"bytes,1,opt,name=bridge,proto3" json:"bridge,omitempty"`
+	DnsPort       int32                  `protobuf:"varint,2,opt,name=dns_port,json=dnsPort,proto3" json:"dns_port,omitempty"`                  // dnsfilter listen port (REDIRECT target + INPUT accept)
+	HttpPort      int32                  `protobuf:"varint,3,opt,name=http_port,json=httpPort,proto3" json:"http_port,omitempty"`               // httpfilter listen port (INPUT accept)
+	GuestDnsPort  int32                  `protobuf:"varint,4,opt,name=guest_dns_port,json=guestDnsPort,proto3" json:"guest_dns_port,omitempty"` // guest-facing DNS port REDIRECTed to dns_port (normally 53)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *QemuImgReq) Reset() {
-	*x = QemuImgReq{}
+func (x *EgressReq) Reset() {
+	*x = EgressReq{}
 	mi := &file_internal_rpc_abox_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *QemuImgReq) String() string {
+func (x *EgressReq) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*QemuImgReq) ProtoMessage() {}
+func (*EgressReq) ProtoMessage() {}
 
-func (x *QemuImgReq) ProtoReflect() protoreflect.Message {
+func (x *EgressReq) ProtoReflect() protoreflect.Message {
 	mi := &file_internal_rpc_abox_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -269,366 +272,67 @@ func (x *QemuImgReq) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use QemuImgReq.ProtoReflect.Descriptor instead.
-func (*QemuImgReq) Descriptor() ([]byte, []int) {
+// Deprecated: Use EgressReq.ProtoReflect.Descriptor instead.
+func (*EgressReq) Descriptor() ([]byte, []int) {
 	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{5}
 }
 
-func (x *QemuImgReq) GetBackingFile() string {
-	if x != nil {
-		return x.BackingFile
-	}
-	return ""
-}
-
-func (x *QemuImgReq) GetOutput() string {
-	if x != nil {
-		return x.Output
-	}
-	return ""
-}
-
-func (x *QemuImgReq) GetSize() string {
-	if x != nil {
-		return x.Size
-	}
-	return ""
-}
-
-type ChmodReq struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	Mode          string                 `protobuf:"bytes,2,opt,name=mode,proto3" json:"mode,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChmodReq) Reset() {
-	*x = ChmodReq{}
-	mi := &file_internal_rpc_abox_proto_msgTypes[6]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChmodReq) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChmodReq) ProtoMessage() {}
-
-func (x *ChmodReq) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_rpc_abox_proto_msgTypes[6]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChmodReq.ProtoReflect.Descriptor instead.
-func (*ChmodReq) Descriptor() ([]byte, []int) {
-	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{6}
-}
-
-func (x *ChmodReq) GetPath() string {
-	if x != nil {
-		return x.Path
-	}
-	return ""
-}
-
-func (x *ChmodReq) GetMode() string {
-	if x != nil {
-		return x.Mode
-	}
-	return ""
-}
-
-type MkdirReq struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	Mode          string                 `protobuf:"bytes,2,opt,name=mode,proto3" json:"mode,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *MkdirReq) Reset() {
-	*x = MkdirReq{}
-	mi := &file_internal_rpc_abox_proto_msgTypes[7]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *MkdirReq) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*MkdirReq) ProtoMessage() {}
-
-func (x *MkdirReq) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_rpc_abox_proto_msgTypes[7]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use MkdirReq.ProtoReflect.Descriptor instead.
-func (*MkdirReq) Descriptor() ([]byte, []int) {
-	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{7}
-}
-
-func (x *MkdirReq) GetPath() string {
-	if x != nil {
-		return x.Path
-	}
-	return ""
-}
-
-func (x *MkdirReq) GetMode() string {
-	if x != nil {
-		return x.Mode
-	}
-	return ""
-}
-
-type CopyReq struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Src           string                 `protobuf:"bytes,1,opt,name=src,proto3" json:"src,omitempty"`
-	Dst           string                 `protobuf:"bytes,2,opt,name=dst,proto3" json:"dst,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *CopyReq) Reset() {
-	*x = CopyReq{}
-	mi := &file_internal_rpc_abox_proto_msgTypes[8]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *CopyReq) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*CopyReq) ProtoMessage() {}
-
-func (x *CopyReq) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_rpc_abox_proto_msgTypes[8]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use CopyReq.ProtoReflect.Descriptor instead.
-func (*CopyReq) Descriptor() ([]byte, []int) {
-	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{8}
-}
-
-func (x *CopyReq) GetSrc() string {
-	if x != nil {
-		return x.Src
-	}
-	return ""
-}
-
-func (x *CopyReq) GetDst() string {
-	if x != nil {
-		return x.Dst
-	}
-	return ""
-}
-
-type UfwReq struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Bridge        string                 `protobuf:"bytes,1,opt,name=bridge,proto3" json:"bridge,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *UfwReq) Reset() {
-	*x = UfwReq{}
-	mi := &file_internal_rpc_abox_proto_msgTypes[9]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *UfwReq) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*UfwReq) ProtoMessage() {}
-
-func (x *UfwReq) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_rpc_abox_proto_msgTypes[9]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use UfwReq.ProtoReflect.Descriptor instead.
-func (*UfwReq) Descriptor() ([]byte, []int) {
-	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{9}
-}
-
-func (x *UfwReq) GetBridge() string {
+func (x *EgressReq) GetBridge() string {
 	if x != nil {
 		return x.Bridge
 	}
 	return ""
 }
 
-type UfwStatusResp struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Installed     bool                   `protobuf:"varint,1,opt,name=installed,proto3" json:"installed,omitempty"`
-	Active        bool                   `protobuf:"varint,2,opt,name=active,proto3" json:"active,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *UfwStatusResp) Reset() {
-	*x = UfwStatusResp{}
-	mi := &file_internal_rpc_abox_proto_msgTypes[10]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *UfwStatusResp) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*UfwStatusResp) ProtoMessage() {}
-
-func (x *UfwStatusResp) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_rpc_abox_proto_msgTypes[10]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use UfwStatusResp.ProtoReflect.Descriptor instead.
-func (*UfwStatusResp) Descriptor() ([]byte, []int) {
-	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{10}
-}
-
-func (x *UfwStatusResp) GetInstalled() bool {
-	if x != nil {
-		return x.Installed
-	}
-	return false
-}
-
-func (x *UfwStatusResp) GetActive() bool {
-	if x != nil {
-		return x.Active
-	}
-	return false
-}
-
-type IptablesReq struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Bridge        string                 `protobuf:"bytes,1,opt,name=bridge,proto3" json:"bridge,omitempty"`
-	DnsPort       int32                  `protobuf:"varint,2,opt,name=dns_port,json=dnsPort,proto3" json:"dns_port,omitempty"`
-	Protocol      string                 `protobuf:"bytes,3,opt,name=protocol,proto3" json:"protocol,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *IptablesReq) Reset() {
-	*x = IptablesReq{}
-	mi := &file_internal_rpc_abox_proto_msgTypes[11]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *IptablesReq) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*IptablesReq) ProtoMessage() {}
-
-func (x *IptablesReq) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_rpc_abox_proto_msgTypes[11]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use IptablesReq.ProtoReflect.Descriptor instead.
-func (*IptablesReq) Descriptor() ([]byte, []int) {
-	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{11}
-}
-
-func (x *IptablesReq) GetBridge() string {
-	if x != nil {
-		return x.Bridge
-	}
-	return ""
-}
-
-func (x *IptablesReq) GetDnsPort() int32 {
+func (x *EgressReq) GetDnsPort() int32 {
 	if x != nil {
 		return x.DnsPort
 	}
 	return 0
 }
 
-func (x *IptablesReq) GetProtocol() string {
+func (x *EgressReq) GetHttpPort() int32 {
 	if x != nil {
-		return x.Protocol
+		return x.HttpPort
 	}
-	return ""
+	return 0
 }
 
-type IptablesFlushReq struct {
+func (x *EgressReq) GetGuestDnsPort() int32 {
+	if x != nil {
+		return x.GuestDnsPort
+	}
+	return 0
+}
+
+// Pf-specific messages. The subnet is the single source of truth for what the
+// instance's rules may match: the helper requires every source in the rules to
+// be exactly this subnet (and every gateway to be its .1 host), which closes the
+// cross-instance rule-injection hole.
+type PfAnchorReq struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Bridge        string                 `protobuf:"bytes,1,opt,name=bridge,proto3" json:"bridge,omitempty"`
+	Instance      string                 `protobuf:"bytes,1,opt,name=instance,proto3" json:"instance,omitempty"` // anchor-safe instance name (abox/<instance>)
+	Subnet        string                 `protobuf:"bytes,2,opt,name=subnet,proto3" json:"subnet,omitempty"`     // deterministic per-instance /24 CIDR (e.g. 10.20.30.0/24)
+	Rules         string                 `protobuf:"bytes,3,opt,name=rules,proto3" json:"rules,omitempty"`       // pf rules, each line bound token-for-token to subnet
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *IptablesFlushReq) Reset() {
-	*x = IptablesFlushReq{}
-	mi := &file_internal_rpc_abox_proto_msgTypes[12]
+func (x *PfAnchorReq) Reset() {
+	*x = PfAnchorReq{}
+	mi := &file_internal_rpc_abox_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *IptablesFlushReq) String() string {
+func (x *PfAnchorReq) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*IptablesFlushReq) ProtoMessage() {}
+func (*PfAnchorReq) ProtoMessage() {}
 
-func (x *IptablesFlushReq) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_rpc_abox_proto_msgTypes[12]
+func (x *PfAnchorReq) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_rpc_abox_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -639,16 +343,137 @@ func (x *IptablesFlushReq) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use IptablesFlushReq.ProtoReflect.Descriptor instead.
-func (*IptablesFlushReq) Descriptor() ([]byte, []int) {
-	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{12}
+// Deprecated: Use PfAnchorReq.ProtoReflect.Descriptor instead.
+func (*PfAnchorReq) Descriptor() ([]byte, []int) {
+	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{6}
 }
 
-func (x *IptablesFlushReq) GetBridge() string {
+func (x *PfAnchorReq) GetInstance() string {
 	if x != nil {
-		return x.Bridge
+		return x.Instance
 	}
 	return ""
+}
+
+func (x *PfAnchorReq) GetSubnet() string {
+	if x != nil {
+		return x.Subnet
+	}
+	return ""
+}
+
+func (x *PfAnchorReq) GetRules() string {
+	if x != nil {
+		return x.Rules
+	}
+	return ""
+}
+
+type PfInstanceReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Instance      string                 `protobuf:"bytes,1,opt,name=instance,proto3" json:"instance,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PfInstanceReq) Reset() {
+	*x = PfInstanceReq{}
+	mi := &file_internal_rpc_abox_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PfInstanceReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PfInstanceReq) ProtoMessage() {}
+
+func (x *PfInstanceReq) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_rpc_abox_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PfInstanceReq.ProtoReflect.Descriptor instead.
+func (*PfInstanceReq) Descriptor() ([]byte, []int) {
+	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *PfInstanceReq) GetInstance() string {
+	if x != nil {
+		return x.Instance
+	}
+	return ""
+}
+
+// EnsureStorageRootReq describes the per-user disk storage root to provision.
+// The helper validates path equals <LibvirtImagesDir>/<peer-uid> (deriving the
+// uid from the socket peer credentials, not from this field's contents), so it
+// can only ever create the caller's own directory — never an arbitrary path.
+type EnsureStorageRootReq struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Path  string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"` // expected /var/lib/libvirt/images/abox/<uid>
+	// regroup, when set, additionally walks the caller's OWN <uid> subtree after
+	// provisioning the root and chgrps every entry to the resolved QEMU group and
+	// fixes modes (dirs setgid, files group-readable). Used by `abox migrate`
+	// after relocating files chowned them to the caller's primary group (which
+	// loses the QEMU group). The walk root is ALWAYS the peer-uid's own subtree
+	// (derived from the socket credentials, never from this field), never follows
+	// symlinks out of it, and is otherwise a no-op.
+	Regroup       bool `protobuf:"varint,2,opt,name=regroup,proto3" json:"regroup,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EnsureStorageRootReq) Reset() {
+	*x = EnsureStorageRootReq{}
+	mi := &file_internal_rpc_abox_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EnsureStorageRootReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EnsureStorageRootReq) ProtoMessage() {}
+
+func (x *EnsureStorageRootReq) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_rpc_abox_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EnsureStorageRootReq.ProtoReflect.Descriptor instead.
+func (*EnsureStorageRootReq) Descriptor() ([]byte, []int) {
+	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *EnsureStorageRootReq) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *EnsureStorageRootReq) GetRegroup() bool {
+	if x != nil {
+		return x.Regroup
+	}
+	return false
 }
 
 // DNS-specific messages
@@ -661,7 +486,7 @@ type ModeReq struct {
 
 func (x *ModeReq) Reset() {
 	*x = ModeReq{}
-	mi := &file_internal_rpc_abox_proto_msgTypes[13]
+	mi := &file_internal_rpc_abox_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -673,7 +498,7 @@ func (x *ModeReq) String() string {
 func (*ModeReq) ProtoMessage() {}
 
 func (x *ModeReq) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_rpc_abox_proto_msgTypes[13]
+	mi := &file_internal_rpc_abox_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -686,7 +511,7 @@ func (x *ModeReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModeReq.ProtoReflect.Descriptor instead.
 func (*ModeReq) Descriptor() ([]byte, []int) {
-	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{13}
+	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ModeReq) GetMode() string {
@@ -705,7 +530,7 @@ type ProfileReq struct {
 
 func (x *ProfileReq) Reset() {
 	*x = ProfileReq{}
-	mi := &file_internal_rpc_abox_proto_msgTypes[14]
+	mi := &file_internal_rpc_abox_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -717,7 +542,7 @@ func (x *ProfileReq) String() string {
 func (*ProfileReq) ProtoMessage() {}
 
 func (x *ProfileReq) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_rpc_abox_proto_msgTypes[14]
+	mi := &file_internal_rpc_abox_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -730,7 +555,7 @@ func (x *ProfileReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProfileReq.ProtoReflect.Descriptor instead.
 func (*ProfileReq) Descriptor() ([]byte, []int) {
-	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{14}
+	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ProfileReq) GetSubcommand() string {
@@ -751,7 +576,7 @@ type ProfileResp struct {
 
 func (x *ProfileResp) Reset() {
 	*x = ProfileResp{}
-	mi := &file_internal_rpc_abox_proto_msgTypes[15]
+	mi := &file_internal_rpc_abox_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -763,7 +588,7 @@ func (x *ProfileResp) String() string {
 func (*ProfileResp) ProtoMessage() {}
 
 func (x *ProfileResp) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_rpc_abox_proto_msgTypes[15]
+	mi := &file_internal_rpc_abox_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -776,7 +601,7 @@ func (x *ProfileResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProfileResp.ProtoReflect.Descriptor instead.
 func (*ProfileResp) Descriptor() ([]byte, []int) {
-	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{15}
+	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ProfileResp) GetMessage() string {
@@ -816,7 +641,7 @@ type DNSStatus struct {
 
 func (x *DNSStatus) Reset() {
 	*x = DNSStatus{}
-	mi := &file_internal_rpc_abox_proto_msgTypes[16]
+	mi := &file_internal_rpc_abox_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -828,7 +653,7 @@ func (x *DNSStatus) String() string {
 func (*DNSStatus) ProtoMessage() {}
 
 func (x *DNSStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_rpc_abox_proto_msgTypes[16]
+	mi := &file_internal_rpc_abox_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -841,7 +666,7 @@ func (x *DNSStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DNSStatus.ProtoReflect.Descriptor instead.
 func (*DNSStatus) Descriptor() ([]byte, []int) {
-	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{16}
+	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *DNSStatus) GetMode() string {
@@ -916,7 +741,7 @@ type HTTPStatus struct {
 
 func (x *HTTPStatus) Reset() {
 	*x = HTTPStatus{}
-	mi := &file_internal_rpc_abox_proto_msgTypes[17]
+	mi := &file_internal_rpc_abox_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -928,7 +753,7 @@ func (x *HTTPStatus) String() string {
 func (*HTTPStatus) ProtoMessage() {}
 
 func (x *HTTPStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_rpc_abox_proto_msgTypes[17]
+	mi := &file_internal_rpc_abox_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -941,7 +766,7 @@ func (x *HTTPStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HTTPStatus.ProtoReflect.Descriptor instead.
 func (*HTTPStatus) Descriptor() ([]byte, []int) {
-	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{17}
+	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *HTTPStatus) GetMode() string {
@@ -1010,7 +835,7 @@ type KeyLogReq struct {
 
 func (x *KeyLogReq) Reset() {
 	*x = KeyLogReq{}
-	mi := &file_internal_rpc_abox_proto_msgTypes[18]
+	mi := &file_internal_rpc_abox_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1022,7 +847,7 @@ func (x *KeyLogReq) String() string {
 func (*KeyLogReq) ProtoMessage() {}
 
 func (x *KeyLogReq) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_rpc_abox_proto_msgTypes[18]
+	mi := &file_internal_rpc_abox_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1035,7 +860,7 @@ func (x *KeyLogReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KeyLogReq.ProtoReflect.Descriptor instead.
 func (*KeyLogReq) Descriptor() ([]byte, []int) {
-	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{18}
+	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *KeyLogReq) GetPath() string {
@@ -1055,7 +880,7 @@ type LogLevelReq struct {
 
 func (x *LogLevelReq) Reset() {
 	*x = LogLevelReq{}
-	mi := &file_internal_rpc_abox_proto_msgTypes[19]
+	mi := &file_internal_rpc_abox_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1067,7 +892,7 @@ func (x *LogLevelReq) String() string {
 func (*LogLevelReq) ProtoMessage() {}
 
 func (x *LogLevelReq) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_rpc_abox_proto_msgTypes[19]
+	mi := &file_internal_rpc_abox_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1080,7 +905,7 @@ func (x *LogLevelReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogLevelReq.ProtoReflect.Descriptor instead.
 func (*LogLevelReq) Descriptor() ([]byte, []int) {
-	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{19}
+	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *LogLevelReq) GetLevel() string {
@@ -1099,7 +924,7 @@ type LogLevelResp struct {
 
 func (x *LogLevelResp) Reset() {
 	*x = LogLevelResp{}
-	mi := &file_internal_rpc_abox_proto_msgTypes[20]
+	mi := &file_internal_rpc_abox_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1111,7 +936,7 @@ func (x *LogLevelResp) String() string {
 func (*LogLevelResp) ProtoMessage() {}
 
 func (x *LogLevelResp) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_rpc_abox_proto_msgTypes[20]
+	mi := &file_internal_rpc_abox_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1124,7 +949,7 @@ func (x *LogLevelResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogLevelResp.ProtoReflect.Descriptor instead.
 func (*LogLevelResp) Descriptor() ([]byte, []int) {
-	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{20}
+	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *LogLevelResp) GetLevel() string {
@@ -1147,7 +972,7 @@ type MonitorStatus struct {
 
 func (x *MonitorStatus) Reset() {
 	*x = MonitorStatus{}
-	mi := &file_internal_rpc_abox_proto_msgTypes[21]
+	mi := &file_internal_rpc_abox_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1159,7 +984,7 @@ func (x *MonitorStatus) String() string {
 func (*MonitorStatus) ProtoMessage() {}
 
 func (x *MonitorStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_rpc_abox_proto_msgTypes[21]
+	mi := &file_internal_rpc_abox_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1172,7 +997,7 @@ func (x *MonitorStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MonitorStatus.ProtoReflect.Descriptor instead.
 func (*MonitorStatus) Descriptor() ([]byte, []int) {
-	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{21}
+	return file_internal_rpc_abox_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *MonitorStatus) GetRunning() bool {
@@ -1217,39 +1042,30 @@ const file_internal_rpc_abox_proto_rawDesc = "" +
 	"\x17internal/rpc/abox.proto\x12\x04abox\"\a\n" +
 	"\x05Empty\"%\n" +
 	"\tStringMsg\x12\x18\n" +
-	"\amessage\x18\x01 \x01(\tR\amessage\"\x1d\n" +
-	"\aPathReq\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"#\n" +
+	"\amessage\x18\x01 \x01(\tR\amessage\"\x19\n" +
+	"\aBoolMsg\x12\x0e\n" +
+	"\x02ok\x18\x01 \x01(\bR\x02ok\"#\n" +
 	"\tDomainReq\x12\x16\n" +
 	"\x06domain\x18\x01 \x01(\tR\x06domain\"&\n" +
 	"\n" +
 	"DomainList\x12\x18\n" +
-	"\adomains\x18\x01 \x03(\tR\adomains\"[\n" +
-	"\n" +
-	"QemuImgReq\x12!\n" +
-	"\fbacking_file\x18\x01 \x01(\tR\vbackingFile\x12\x16\n" +
-	"\x06output\x18\x02 \x01(\tR\x06output\x12\x12\n" +
-	"\x04size\x18\x03 \x01(\tR\x04size\"2\n" +
-	"\bChmodReq\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
-	"\x04mode\x18\x02 \x01(\tR\x04mode\"2\n" +
-	"\bMkdirReq\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
-	"\x04mode\x18\x02 \x01(\tR\x04mode\"-\n" +
-	"\aCopyReq\x12\x10\n" +
-	"\x03src\x18\x01 \x01(\tR\x03src\x12\x10\n" +
-	"\x03dst\x18\x02 \x01(\tR\x03dst\" \n" +
-	"\x06UfwReq\x12\x16\n" +
-	"\x06bridge\x18\x01 \x01(\tR\x06bridge\"E\n" +
-	"\rUfwStatusResp\x12\x1c\n" +
-	"\tinstalled\x18\x01 \x01(\bR\tinstalled\x12\x16\n" +
-	"\x06active\x18\x02 \x01(\bR\x06active\"\\\n" +
-	"\vIptablesReq\x12\x16\n" +
+	"\adomains\x18\x01 \x03(\tR\adomains\"\xa5\x01\n" +
+	"\tEgressReq\x12\x16\n" +
 	"\x06bridge\x18\x01 \x01(\tR\x06bridge\x12\x19\n" +
-	"\bdns_port\x18\x02 \x01(\x05R\adnsPort\x12\x1a\n" +
-	"\bprotocol\x18\x03 \x01(\tR\bprotocol\"*\n" +
-	"\x10IptablesFlushReq\x12\x16\n" +
-	"\x06bridge\x18\x01 \x01(\tR\x06bridge\"\x1d\n" +
+	"\bdns_port\x18\x02 \x01(\x05R\adnsPort\x12\x1b\n" +
+	"\thttp_port\x18\x03 \x01(\x05R\bhttpPort\x12$\n" +
+	"\x0eguest_dns_port\x18\x04 \x01(\x05R\fguestDnsPortJ\x04\b\x05\x10\x06J\x04\b\x06\x10\aR\n" +
+	"allow_dhcpR\n" +
+	"allow_icmp\"W\n" +
+	"\vPfAnchorReq\x12\x1a\n" +
+	"\binstance\x18\x01 \x01(\tR\binstance\x12\x16\n" +
+	"\x06subnet\x18\x02 \x01(\tR\x06subnet\x12\x14\n" +
+	"\x05rules\x18\x03 \x01(\tR\x05rules\"+\n" +
+	"\rPfInstanceReq\x12\x1a\n" +
+	"\binstance\x18\x01 \x01(\tR\binstance\"D\n" +
+	"\x14EnsureStorageRootReq\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x18\n" +
+	"\aregroup\x18\x02 \x01(\bR\aregroup\"\x1d\n" +
 	"\aModeReq\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\tR\x04mode\",\n" +
 	"\n" +
@@ -1292,21 +1108,22 @@ const file_internal_rpc_abox_proto_rawDesc = "" +
 	"\revents_logged\x18\x02 \x01(\x04R\feventsLogged\x12\x19\n" +
 	"\blog_file\x18\x03 \x01(\tR\alogFile\x12$\n" +
 	"\x0elog_size_bytes\x18\x04 \x01(\x03R\flogSizeBytes\x12\x16\n" +
-	"\x06uptime\x18\x05 \x01(\tR\x06uptime2\xba\x04\n" +
-	"\tPrivilege\x12$\n" +
+	"\x06uptime\x18\x05 \x01(\tR\x06uptime2\x8b\x02\n" +
+	"\x06Egress\x12$\n" +
 	"\x04Ping\x12\v.abox.Empty\x1a\x0f.abox.StringMsg\x12$\n" +
-	"\bShutdown\x12\v.abox.Empty\x1a\v.abox.Empty\x12.\n" +
-	"\rQemuImgCreate\x12\x10.abox.QemuImgReq\x1a\v.abox.Empty\x12$\n" +
-	"\x05Chmod\x12\x0e.abox.ChmodReq\x1a\v.abox.Empty\x12'\n" +
-	"\bMkdirAll\x12\x0e.abox.MkdirReq\x1a\v.abox.Empty\x12'\n" +
-	"\tRemoveAll\x12\r.abox.PathReq\x1a\v.abox.Empty\x12&\n" +
-	"\bCopyFile\x12\r.abox.CopyReq\x1a\v.abox.Empty\x12#\n" +
-	"\x06UfwAdd\x12\f.abox.UfwReq\x1a\v.abox.Empty\x12&\n" +
-	"\tUfwRemove\x12\f.abox.UfwReq\x1a\v.abox.Empty\x12-\n" +
-	"\tUfwStatus\x12\v.abox.Empty\x1a\x13.abox.UfwStatusResp\x12-\n" +
-	"\vIptablesAdd\x12\x11.abox.IptablesReq\x1a\v.abox.Empty\x120\n" +
-	"\x0eIptablesRemove\x12\x11.abox.IptablesReq\x1a\v.abox.Empty\x124\n" +
-	"\rIptablesFlush\x12\x16.abox.IptablesFlushReq\x1a\v.abox.Empty2\x97\x02\n" +
+	"\bShutdown\x12\v.abox.Empty\x1a\v.abox.Empty\x12<\n" +
+	"\x11EnsureStorageRoot\x12\x1a.abox.EnsureStorageRootReq\x1a\v.abox.Empty\x12%\n" +
+	"\x05Apply\x12\x0f.abox.EgressReq\x1a\v.abox.Empty\x12&\n" +
+	"\x06Remove\x12\x0f.abox.EgressReq\x1a\v.abox.Empty\x12(\n" +
+	"\x06Verify\x12\x0f.abox.EgressReq\x1a\r.abox.BoolMsg2\xff\x01\n" +
+	"\x02Pf\x12$\n" +
+	"\x04Ping\x12\v.abox.Empty\x1a\x0f.abox.StringMsg\x12$\n" +
+	"\bShutdown\x12\v.abox.Empty\x1a\v.abox.Empty\x12\"\n" +
+	"\x06Enable\x12\v.abox.Empty\x1a\v.abox.Empty\x12,\n" +
+	"\n" +
+	"LoadAnchor\x12\x11.abox.PfAnchorReq\x1a\v.abox.Empty\x12/\n" +
+	"\vFlushAnchor\x12\x13.abox.PfInstanceReq\x1a\v.abox.Empty\x12*\n" +
+	"\x0eTeardownConfig\x12\v.abox.Empty\x1a\v.abox.Empty2\x97\x02\n" +
 	"\tDNSFilter\x12&\n" +
 	"\x06Status\x12\v.abox.Empty\x1a\x0f.abox.DNSStatus\x12)\n" +
 	"\aSetMode\x12\r.abox.ModeReq\x1a\x0f.abox.StringMsg\x12.\n" +
@@ -1332,7 +1149,7 @@ const file_internal_rpc_abox_proto_rawDesc = "" +
 	"\bShutdown\x12\v.abox.Empty\x1a\v.abox.Empty2[\n" +
 	"\aMonitor\x12*\n" +
 	"\x06Status\x12\v.abox.Empty\x1a\x13.abox.MonitorStatus\x12$\n" +
-	"\bShutdown\x12\v.abox.Empty\x1a\v.abox.EmptyB(Z&github.com/jcrussell/abox/internal/rpcb\x06proto3"
+	"\bShutdown\x12\v.abox.Empty\x1a\v.abox.EmptyB)Z'github.com/sandialabs/abox/internal/rpcb\x06proto3"
 
 var (
 	file_internal_rpc_abox_proto_rawDescOnce sync.Once
@@ -1346,100 +1163,94 @@ func file_internal_rpc_abox_proto_rawDescGZIP() []byte {
 	return file_internal_rpc_abox_proto_rawDescData
 }
 
-var file_internal_rpc_abox_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_internal_rpc_abox_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_internal_rpc_abox_proto_goTypes = []any{
-	(*Empty)(nil),            // 0: abox.Empty
-	(*StringMsg)(nil),        // 1: abox.StringMsg
-	(*PathReq)(nil),          // 2: abox.PathReq
-	(*DomainReq)(nil),        // 3: abox.DomainReq
-	(*DomainList)(nil),       // 4: abox.DomainList
-	(*QemuImgReq)(nil),       // 5: abox.QemuImgReq
-	(*ChmodReq)(nil),         // 6: abox.ChmodReq
-	(*MkdirReq)(nil),         // 7: abox.MkdirReq
-	(*CopyReq)(nil),          // 8: abox.CopyReq
-	(*UfwReq)(nil),           // 9: abox.UfwReq
-	(*UfwStatusResp)(nil),    // 10: abox.UfwStatusResp
-	(*IptablesReq)(nil),      // 11: abox.IptablesReq
-	(*IptablesFlushReq)(nil), // 12: abox.IptablesFlushReq
-	(*ModeReq)(nil),          // 13: abox.ModeReq
-	(*ProfileReq)(nil),       // 14: abox.ProfileReq
-	(*ProfileResp)(nil),      // 15: abox.ProfileResp
-	(*DNSStatus)(nil),        // 16: abox.DNSStatus
-	(*HTTPStatus)(nil),       // 17: abox.HTTPStatus
-	(*KeyLogReq)(nil),        // 18: abox.KeyLogReq
-	(*LogLevelReq)(nil),      // 19: abox.LogLevelReq
-	(*LogLevelResp)(nil),     // 20: abox.LogLevelResp
-	(*MonitorStatus)(nil),    // 21: abox.MonitorStatus
+	(*Empty)(nil),                // 0: abox.Empty
+	(*StringMsg)(nil),            // 1: abox.StringMsg
+	(*BoolMsg)(nil),              // 2: abox.BoolMsg
+	(*DomainReq)(nil),            // 3: abox.DomainReq
+	(*DomainList)(nil),           // 4: abox.DomainList
+	(*EgressReq)(nil),            // 5: abox.EgressReq
+	(*PfAnchorReq)(nil),          // 6: abox.PfAnchorReq
+	(*PfInstanceReq)(nil),        // 7: abox.PfInstanceReq
+	(*EnsureStorageRootReq)(nil), // 8: abox.EnsureStorageRootReq
+	(*ModeReq)(nil),              // 9: abox.ModeReq
+	(*ProfileReq)(nil),           // 10: abox.ProfileReq
+	(*ProfileResp)(nil),          // 11: abox.ProfileResp
+	(*DNSStatus)(nil),            // 12: abox.DNSStatus
+	(*HTTPStatus)(nil),           // 13: abox.HTTPStatus
+	(*KeyLogReq)(nil),            // 14: abox.KeyLogReq
+	(*LogLevelReq)(nil),          // 15: abox.LogLevelReq
+	(*LogLevelResp)(nil),         // 16: abox.LogLevelResp
+	(*MonitorStatus)(nil),        // 17: abox.MonitorStatus
 }
 var file_internal_rpc_abox_proto_depIdxs = []int32{
-	0,  // 0: abox.Privilege.Ping:input_type -> abox.Empty
-	0,  // 1: abox.Privilege.Shutdown:input_type -> abox.Empty
-	5,  // 2: abox.Privilege.QemuImgCreate:input_type -> abox.QemuImgReq
-	6,  // 3: abox.Privilege.Chmod:input_type -> abox.ChmodReq
-	7,  // 4: abox.Privilege.MkdirAll:input_type -> abox.MkdirReq
-	2,  // 5: abox.Privilege.RemoveAll:input_type -> abox.PathReq
-	8,  // 6: abox.Privilege.CopyFile:input_type -> abox.CopyReq
-	9,  // 7: abox.Privilege.UfwAdd:input_type -> abox.UfwReq
-	9,  // 8: abox.Privilege.UfwRemove:input_type -> abox.UfwReq
-	0,  // 9: abox.Privilege.UfwStatus:input_type -> abox.Empty
-	11, // 10: abox.Privilege.IptablesAdd:input_type -> abox.IptablesReq
-	11, // 11: abox.Privilege.IptablesRemove:input_type -> abox.IptablesReq
-	12, // 12: abox.Privilege.IptablesFlush:input_type -> abox.IptablesFlushReq
-	0,  // 13: abox.DNSFilter.Status:input_type -> abox.Empty
-	13, // 14: abox.DNSFilter.SetMode:input_type -> abox.ModeReq
-	14, // 15: abox.DNSFilter.Profile:input_type -> abox.ProfileReq
-	19, // 16: abox.DNSFilter.SetLogLevel:input_type -> abox.LogLevelReq
-	0,  // 17: abox.DNSFilter.GetLogLevel:input_type -> abox.Empty
-	0,  // 18: abox.DNSFilter.Shutdown:input_type -> abox.Empty
-	3,  // 19: abox.Allowlist.Add:input_type -> abox.DomainReq
-	3,  // 20: abox.Allowlist.Remove:input_type -> abox.DomainReq
-	0,  // 21: abox.Allowlist.List:input_type -> abox.Empty
-	0,  // 22: abox.Allowlist.Reload:input_type -> abox.Empty
-	0,  // 23: abox.HTTPFilter.Status:input_type -> abox.Empty
-	13, // 24: abox.HTTPFilter.SetMode:input_type -> abox.ModeReq
-	14, // 25: abox.HTTPFilter.Profile:input_type -> abox.ProfileReq
-	19, // 26: abox.HTTPFilter.SetLogLevel:input_type -> abox.LogLevelReq
-	0,  // 27: abox.HTTPFilter.GetLogLevel:input_type -> abox.Empty
-	18, // 28: abox.HTTPFilter.StartKeyLog:input_type -> abox.KeyLogReq
-	0,  // 29: abox.HTTPFilter.StopKeyLog:input_type -> abox.Empty
-	0,  // 30: abox.HTTPFilter.Shutdown:input_type -> abox.Empty
-	0,  // 31: abox.Monitor.Status:input_type -> abox.Empty
-	0,  // 32: abox.Monitor.Shutdown:input_type -> abox.Empty
-	1,  // 33: abox.Privilege.Ping:output_type -> abox.StringMsg
-	0,  // 34: abox.Privilege.Shutdown:output_type -> abox.Empty
-	0,  // 35: abox.Privilege.QemuImgCreate:output_type -> abox.Empty
-	0,  // 36: abox.Privilege.Chmod:output_type -> abox.Empty
-	0,  // 37: abox.Privilege.MkdirAll:output_type -> abox.Empty
-	0,  // 38: abox.Privilege.RemoveAll:output_type -> abox.Empty
-	0,  // 39: abox.Privilege.CopyFile:output_type -> abox.Empty
-	0,  // 40: abox.Privilege.UfwAdd:output_type -> abox.Empty
-	0,  // 41: abox.Privilege.UfwRemove:output_type -> abox.Empty
-	10, // 42: abox.Privilege.UfwStatus:output_type -> abox.UfwStatusResp
-	0,  // 43: abox.Privilege.IptablesAdd:output_type -> abox.Empty
-	0,  // 44: abox.Privilege.IptablesRemove:output_type -> abox.Empty
-	0,  // 45: abox.Privilege.IptablesFlush:output_type -> abox.Empty
-	16, // 46: abox.DNSFilter.Status:output_type -> abox.DNSStatus
-	1,  // 47: abox.DNSFilter.SetMode:output_type -> abox.StringMsg
-	15, // 48: abox.DNSFilter.Profile:output_type -> abox.ProfileResp
-	1,  // 49: abox.DNSFilter.SetLogLevel:output_type -> abox.StringMsg
-	20, // 50: abox.DNSFilter.GetLogLevel:output_type -> abox.LogLevelResp
-	0,  // 51: abox.DNSFilter.Shutdown:output_type -> abox.Empty
-	1,  // 52: abox.Allowlist.Add:output_type -> abox.StringMsg
-	1,  // 53: abox.Allowlist.Remove:output_type -> abox.StringMsg
-	4,  // 54: abox.Allowlist.List:output_type -> abox.DomainList
-	1,  // 55: abox.Allowlist.Reload:output_type -> abox.StringMsg
-	17, // 56: abox.HTTPFilter.Status:output_type -> abox.HTTPStatus
-	1,  // 57: abox.HTTPFilter.SetMode:output_type -> abox.StringMsg
-	15, // 58: abox.HTTPFilter.Profile:output_type -> abox.ProfileResp
-	1,  // 59: abox.HTTPFilter.SetLogLevel:output_type -> abox.StringMsg
-	20, // 60: abox.HTTPFilter.GetLogLevel:output_type -> abox.LogLevelResp
-	0,  // 61: abox.HTTPFilter.StartKeyLog:output_type -> abox.Empty
-	0,  // 62: abox.HTTPFilter.StopKeyLog:output_type -> abox.Empty
-	0,  // 63: abox.HTTPFilter.Shutdown:output_type -> abox.Empty
-	21, // 64: abox.Monitor.Status:output_type -> abox.MonitorStatus
-	0,  // 65: abox.Monitor.Shutdown:output_type -> abox.Empty
-	33, // [33:66] is the sub-list for method output_type
-	0,  // [0:33] is the sub-list for method input_type
+	0,  // 0: abox.Egress.Ping:input_type -> abox.Empty
+	0,  // 1: abox.Egress.Shutdown:input_type -> abox.Empty
+	8,  // 2: abox.Egress.EnsureStorageRoot:input_type -> abox.EnsureStorageRootReq
+	5,  // 3: abox.Egress.Apply:input_type -> abox.EgressReq
+	5,  // 4: abox.Egress.Remove:input_type -> abox.EgressReq
+	5,  // 5: abox.Egress.Verify:input_type -> abox.EgressReq
+	0,  // 6: abox.Pf.Ping:input_type -> abox.Empty
+	0,  // 7: abox.Pf.Shutdown:input_type -> abox.Empty
+	0,  // 8: abox.Pf.Enable:input_type -> abox.Empty
+	6,  // 9: abox.Pf.LoadAnchor:input_type -> abox.PfAnchorReq
+	7,  // 10: abox.Pf.FlushAnchor:input_type -> abox.PfInstanceReq
+	0,  // 11: abox.Pf.TeardownConfig:input_type -> abox.Empty
+	0,  // 12: abox.DNSFilter.Status:input_type -> abox.Empty
+	9,  // 13: abox.DNSFilter.SetMode:input_type -> abox.ModeReq
+	10, // 14: abox.DNSFilter.Profile:input_type -> abox.ProfileReq
+	15, // 15: abox.DNSFilter.SetLogLevel:input_type -> abox.LogLevelReq
+	0,  // 16: abox.DNSFilter.GetLogLevel:input_type -> abox.Empty
+	0,  // 17: abox.DNSFilter.Shutdown:input_type -> abox.Empty
+	3,  // 18: abox.Allowlist.Add:input_type -> abox.DomainReq
+	3,  // 19: abox.Allowlist.Remove:input_type -> abox.DomainReq
+	0,  // 20: abox.Allowlist.List:input_type -> abox.Empty
+	0,  // 21: abox.Allowlist.Reload:input_type -> abox.Empty
+	0,  // 22: abox.HTTPFilter.Status:input_type -> abox.Empty
+	9,  // 23: abox.HTTPFilter.SetMode:input_type -> abox.ModeReq
+	10, // 24: abox.HTTPFilter.Profile:input_type -> abox.ProfileReq
+	15, // 25: abox.HTTPFilter.SetLogLevel:input_type -> abox.LogLevelReq
+	0,  // 26: abox.HTTPFilter.GetLogLevel:input_type -> abox.Empty
+	14, // 27: abox.HTTPFilter.StartKeyLog:input_type -> abox.KeyLogReq
+	0,  // 28: abox.HTTPFilter.StopKeyLog:input_type -> abox.Empty
+	0,  // 29: abox.HTTPFilter.Shutdown:input_type -> abox.Empty
+	0,  // 30: abox.Monitor.Status:input_type -> abox.Empty
+	0,  // 31: abox.Monitor.Shutdown:input_type -> abox.Empty
+	1,  // 32: abox.Egress.Ping:output_type -> abox.StringMsg
+	0,  // 33: abox.Egress.Shutdown:output_type -> abox.Empty
+	0,  // 34: abox.Egress.EnsureStorageRoot:output_type -> abox.Empty
+	0,  // 35: abox.Egress.Apply:output_type -> abox.Empty
+	0,  // 36: abox.Egress.Remove:output_type -> abox.Empty
+	2,  // 37: abox.Egress.Verify:output_type -> abox.BoolMsg
+	1,  // 38: abox.Pf.Ping:output_type -> abox.StringMsg
+	0,  // 39: abox.Pf.Shutdown:output_type -> abox.Empty
+	0,  // 40: abox.Pf.Enable:output_type -> abox.Empty
+	0,  // 41: abox.Pf.LoadAnchor:output_type -> abox.Empty
+	0,  // 42: abox.Pf.FlushAnchor:output_type -> abox.Empty
+	0,  // 43: abox.Pf.TeardownConfig:output_type -> abox.Empty
+	12, // 44: abox.DNSFilter.Status:output_type -> abox.DNSStatus
+	1,  // 45: abox.DNSFilter.SetMode:output_type -> abox.StringMsg
+	11, // 46: abox.DNSFilter.Profile:output_type -> abox.ProfileResp
+	1,  // 47: abox.DNSFilter.SetLogLevel:output_type -> abox.StringMsg
+	16, // 48: abox.DNSFilter.GetLogLevel:output_type -> abox.LogLevelResp
+	0,  // 49: abox.DNSFilter.Shutdown:output_type -> abox.Empty
+	1,  // 50: abox.Allowlist.Add:output_type -> abox.StringMsg
+	1,  // 51: abox.Allowlist.Remove:output_type -> abox.StringMsg
+	4,  // 52: abox.Allowlist.List:output_type -> abox.DomainList
+	1,  // 53: abox.Allowlist.Reload:output_type -> abox.StringMsg
+	13, // 54: abox.HTTPFilter.Status:output_type -> abox.HTTPStatus
+	1,  // 55: abox.HTTPFilter.SetMode:output_type -> abox.StringMsg
+	11, // 56: abox.HTTPFilter.Profile:output_type -> abox.ProfileResp
+	1,  // 57: abox.HTTPFilter.SetLogLevel:output_type -> abox.StringMsg
+	16, // 58: abox.HTTPFilter.GetLogLevel:output_type -> abox.LogLevelResp
+	0,  // 59: abox.HTTPFilter.StartKeyLog:output_type -> abox.Empty
+	0,  // 60: abox.HTTPFilter.StopKeyLog:output_type -> abox.Empty
+	0,  // 61: abox.HTTPFilter.Shutdown:output_type -> abox.Empty
+	17, // 62: abox.Monitor.Status:output_type -> abox.MonitorStatus
+	0,  // 63: abox.Monitor.Shutdown:output_type -> abox.Empty
+	32, // [32:64] is the sub-list for method output_type
+	0,  // [0:32] is the sub-list for method input_type
 	0,  // [0:0] is the sub-list for extension type_name
 	0,  // [0:0] is the sub-list for extension extendee
 	0,  // [0:0] is the sub-list for field type_name
@@ -1456,9 +1267,9 @@ func file_internal_rpc_abox_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_rpc_abox_proto_rawDesc), len(file_internal_rpc_abox_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   22,
+			NumMessages:   18,
 			NumExtensions: 0,
-			NumServices:   5,
+			NumServices:   6,
 		},
 		GoTypes:           file_internal_rpc_abox_proto_goTypes,
 		DependencyIndexes: file_internal_rpc_abox_proto_depIdxs,

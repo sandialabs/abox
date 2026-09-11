@@ -15,7 +15,8 @@ import (
 
 // TestMonitorWorkflow tests abox monitor functionality with Tetragon.
 func TestMonitorWorkflow(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
+	skipIfNoMonitorSupport(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -37,7 +38,12 @@ func TestMonitorWorkflow(t *testing.T) {
 		env.runWithTimeout(longTimeout, "down", "--remove", "--force", "-d", dir)
 	})
 
+	// Dump diagnostics on failure (registered after teardown so LIFO runs it first,
+	// before `down --remove` deletes the instance). Boxfile-driven, so hooked here.
+	diagnoseOnFailure(t, env, name)
+
 	t.Run("up-with-monitor", func(t *testing.T) {
+		env := env.sub(t)
 		// abox up -d dir
 		result := env.runWithTimeout(longTimeout, "up", "-d", dir)
 		if !result.Success() {
@@ -58,7 +64,6 @@ func TestMonitorWorkflow(t *testing.T) {
 
 		// Wait for SSH to be available (cloud-init to complete)
 		if !ti.waitForSSH(180 * time.Second) {
-			ti.dumpDiagnostics()
 			t.Fatal("SSH did not become available")
 		}
 	})
@@ -162,7 +167,8 @@ func TestMonitorWorkflow(t *testing.T) {
 // A single VM is created with ALL kprobes enabled, trigger commands are run via SSH,
 // and then each event type is verified in the monitor logs.
 func TestMonitorEventTypes(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
+	skipIfNoMonitorSupport(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -182,6 +188,9 @@ func TestMonitorEventTypes(t *testing.T) {
 		env.runWithTimeout(longTimeout, "down", "--remove", "--force", "-d", dir)
 	})
 
+	// Dump diagnostics on failure (registered after teardown so LIFO runs it first).
+	diagnoseOnFailure(t, env, name)
+
 	// Track whether optional tools are available in the VM.
 	var hasPython3 bool
 	var hasModprobeDummy bool
@@ -197,7 +206,6 @@ func TestMonitorEventTypes(t *testing.T) {
 			t.Fatal("Instance did not reach running state")
 		}
 		if !ti.waitForSSH(180 * time.Second) {
-			ti.dumpDiagnostics()
 			t.Fatal("SSH did not become available")
 		}
 
@@ -270,27 +278,13 @@ func TestMonitorEventTypes(t *testing.T) {
 		ti.triggerSSH(t, "sentinel-done", "touch", "/tmp/abox-sentinel-done")
 
 		deadline := time.Now().Add(15 * time.Second)
-		sentinelSeen := false
 		for time.Now().Before(deadline) {
 			if lines := monitorQuery(env, name,
 				`select(.type == "file" and .path == "/tmp/abox-sentinel-done")`); len(lines) > 0 {
 				t.Log("Pipeline sync: sentinel-done seen in monitor log")
-				sentinelSeen = true
 				break
 			}
 			time.Sleep(1 * time.Second)
-		}
-
-		// The sentinel is a touch (a default, always-on file kprobe). If it never
-		// reaches the host monitor log, the entire VM->host event pipeline is dead
-		// (e.g. the daemon can't connect to the virtio-serial socket because the
-		// invoking user isn't in the socket's group). Fail loudly here rather than
-		// letting every downstream verify-* subtest fail with cryptic empty logs.
-		if !sentinelSeen {
-			dumpMonitorDiagnostics(t, env, ti)
-			t.Fatal("monitor pipeline produced no events: sentinel-done never reached the host " +
-				"monitor log within 15s. Check that the invoking user is in the monitor socket's " +
-				"owning group (see 'abox monitor status' and the socket owner via ls -l).")
 		}
 	})
 

@@ -42,7 +42,7 @@ flowchart TB
             L1b["HTTP/HTTPS Proxy Filter<br/>Domain filtering + SSRF protection"]
         end
         L2["Layer 2: Network Filter (nwfilter)<br/>Only HTTP proxy traffic outbound<br/>All other protocols blocked"]
-        L3["Layer 3: NAT Isolation<br/>Per-instance /24 subnet<br/>No inbound connections"]
+        L3["Layer 3: Host-Only Network Isolation<br/>Per-instance /24 subnet, no uplink/NAT<br/>Host FORWARD default-deny"]
     end
 
     subgraph External["External Network"]
@@ -73,7 +73,7 @@ flowchart TB
             L1b["HTTP/HTTPS Proxy (SSRF)"]
         end
         L2["Layer 2: nwfilter"]
-        L3["Layer 3: NAT"]
+        L3["Layer 3: Host-Only Isolation"]
     end
 
     A1 -.->|"NXDOMAIN"| L1a
@@ -91,47 +91,70 @@ For detailed architecture, request flows, and management commands, see [Filterin
 
 ### Layer 2: Network Filter (nwfilter)
 
-When an instance is "filtered" or "closed", libvirt's nwfilter applies packet-level restrictions.
+A single libvirt nwfilter is always applied to a started instance, imposing
+packet-level restrictions. Whether non-allowlisted domains are reachable is
+controlled by the active/passive allowlist mode at Layer 1, not by this filter.
 
-In filtered mode, a default-deny approach allows only specific services:
+The filter is **stateful and default-deny in both directions**. Outbound, only
+specific services on the gateway are allowed; inbound, the only *new* connection
+permitted is host→guest SSH. libvirt tracks connection state per rule (`statematch`
+defaults to true); rather than depend on the exact reverse-direction rule libvirt
+derives per allow, we make the policy explicit — each initiator sets `state='NEW'`
+and the return path is admitted by dedicated `ESTABLISHED,RELATED` accepts in both
+directions:
 
 ```xml
-<!-- Allow DHCP -->
-<rule action='accept' direction='out'>
-  <udp srcportstart='68' dstportstart='67'/>
-</rule>
+<!-- Return traffic for established connections, both directions -->
+<rule action='accept' direction='in'><all state='ESTABLISHED,RELATED'/></rule>
+<rule action='accept' direction='out'><all state='ESTABLISHED,RELATED'/></rule>
 
-<!-- Allow DNS to gateway -->
-<rule action='accept' direction='out'>
-  <udp dstipaddr='GATEWAY' dstportstart='53'/>
-</rule>
+<!-- Host->guest SSH (the only new inbound connection) -->
+<rule action='accept' direction='in'><tcp dstportstart='22' state='NEW'/></rule>
 
-<!-- Allow HTTP proxy to gateway (filtered mode only) -->
-<rule action='accept' direction='out'>
-  <tcp dstipaddr='GATEWAY' dstportstart='PROXY_PORT'/>
-</rule>
+<!-- Guest-initiated allowlist (new): DNS, HTTP proxy, ICMP to gateway.
+     No DHCP rule: the guest is statically addressed via cloud-init. -->
+<rule action='accept' direction='out'><udp dstipaddr='GATEWAY' dstportstart='53' state='NEW'/></rule>
+<rule action='accept' direction='out'><tcp dstipaddr='GATEWAY' dstportstart='PROXY_PORT' state='NEW'/></rule>
+<rule action='accept' direction='out'><icmp dstipaddr='GATEWAY' state='NEW'/></rule>
 
-<!-- Allow ICMP to gateway -->
-<rule action='accept' direction='out'>
-  <icmp dstipaddr='GATEWAY'/>
-</rule>
-
-<!-- Drop everything else (default deny) -->
-<rule action='drop' direction='out'>
-  <all/>
-</rule>
+<!-- Default deny, both directions -->
+<rule action='drop' direction='in'><all/></rule>
+<rule action='drop' direction='out'><all/></rule>
 ```
 
-In closed mode, the HTTP proxy rule is omitted, blocking ALL outbound traffic except DHCP, DNS, and ICMP to the gateway. Private IP protection is handled by the HTTP proxy's SSRF protection.
+Host→guest SSH is scoped to port 22 only; the bridge is host-only, so the host is
+the sole possible initiator of inbound traffic. The HTTP proxy accept is always
+emitted; the filter permits DNS, the HTTP proxy, and gateway ICMP and denies
+everything else. Private IP protection is handled by the HTTP proxy's SSRF
+protection.
 
-### Layer 3: NAT Isolation
+The macOS backend enforces the equivalent policy with pf: a per-instance anchor
+whose outbound default-deny mirrors the rules above, plus a single
+`pass ... from <gateway> to <subnet> port 22` that admits host→guest SSH (the
+reply rides pf's connection state).
 
-Each instance gets its own isolated network:
+### Layer 3: Host-Only Network Isolation
+
+Each instance gets its own **host-only** (isolated) network — there is no NAT and
+no uplink, so the guest has no direct route to the internet. All external
+connections are made *by the host* on the guest's behalf, through the DNS filter
+and HTTP proxy:
 
 - **Unique /24 subnet** - e.g., 10.10.10.0/24, 10.10.11.0/24
-- **NAT for outbound** - VM traffic is NATed through the host
+- **No uplink / no NAT** - the guest cannot route to the internet directly; the
+  host originates all egress via the filtering proxies
+- **Host FORWARD default-deny** - a per-bridge iptables FORWARD chain drops
+  forwarded guest traffic as defense-in-depth, independent of the topology
 - **No inbound** - External systems cannot initiate connections to the VM
-- **Separate bridge** - Each instance has its own bridge interface
+- **Separate bridge** - Each instance has its own bridge interface, which also
+  isolates instances from one another
+
+This uniform host-only model applies across all backends (libvirt, vfkit, and
+VMware). Earlier abox releases gave libvirt instances a NAT network; instances
+created before this change keep their NAT topology until recreated. To migrate a
+legacy instance to host-only, run `abox remove` followed by `abox create` —
+this redefines the network. (`abox restart` is stop+start and does *not* redefine
+an existing network, so it leaves a legacy NAT instance on its NAT uplink.)
 
 ## Filtering Approaches
 

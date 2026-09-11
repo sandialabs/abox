@@ -1,20 +1,37 @@
 package cloudinit
 
 import (
-	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/sandialabs/abox/internal/config"
-	"github.com/sandialabs/abox/internal/rpc"
-	"github.com/sandialabs/abox/internal/timeout"
 	"github.com/sandialabs/abox/internal/validation"
 )
 
-// GenerateAndInstall creates a cloud-init ISO and installs it via the privilege helper.
-func GenerateAndInstall(client rpc.PrivilegeClient, inst *config.Instance, paths *config.Paths, contributors []Contributor) error {
+// isoFileMode is the cloud-init ISO mode: owner rw, group r (the QEMU process
+// reads it via the group inherited from the setgid storage dir), no others.
+const isoFileMode = 0o640
+
+// subnetPrefix returns the prefix length (e.g. 24) of an instance's subnet CIDR
+// so the guest's static address can be written as "<ip>/<prefix>".
+func subnetPrefix(subnet string) (int, error) {
+	_, ipnet, err := net.ParseCIDR(subnet)
+	if err != nil {
+		return 0, fmt.Errorf("invalid instance subnet %q: %w", subnet, err)
+	}
+	ones, _ := ipnet.Mask.Size()
+	return ones, nil
+}
+
+// GenerateAndInstall creates a cloud-init ISO directly in the instance's storage
+// directory. It runs unprivileged; the ISO inherits the QEMU runtime group from
+// the setgid storage tree (see internal/backend/libvirt/disk.go), so the VM
+// process can read it at boot without ACLs. (The libvirt disk manager's
+// EnsureAccess re-asserts these modes before boot as a backstop.)
+func GenerateAndInstall(inst *config.Instance, paths *config.Paths, contributors []Contributor) error {
 	// Read the SSH public key
 	pubKeyPath := paths.SSHKey + ".pub"
 	pubKeyBytes, err := os.ReadFile(pubKeyPath)
@@ -28,47 +45,68 @@ func GenerateAndInstall(client rpc.PrivilegeClient, inst *config.Instance, paths
 		return fmt.Errorf("invalid SSH public key: %w", err)
 	}
 
+	// Derive the subnet prefix for the guest's static address from the instance
+	// subnet (a /24 today, but parse it so the two can't silently drift).
+	prefix, err := subnetPrefix(inst.Subnet)
+	if err != nil {
+		return err
+	}
+
 	// Create cloud-init config
 	cfg := &Config{
 		Hostname:     inst.Name,
 		Username:     inst.GetUser(),
 		SSHPublicKey: pubKey,
 		MACAddress:   inst.MACAddress,
+		IPAddress:    inst.IPAddress,
+		Gateway:      inst.Gateway,
+		Prefix:       prefix,
 		Contributors: contributors,
 	}
 
-	// Create ISO in runtime directory
-	tempDir := config.RuntimeDirOr(paths.Instance)
-	tempPath := filepath.Join(tempDir, fmt.Sprintf("abox-cloudinit-%s.iso", inst.Name))
-	defer os.Remove(tempPath)
+	// Ensure the destination directory exists. In the libvirt storage tree this
+	// dir was already created setgid by the disk manager, so the ISO inherits the
+	// QEMU group; this MkdirAll is a defensive no-op in that case.
+	dir := filepath.Dir(paths.CloudInitISO)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("failed to create cloud-init ISO directory: %w", err)
+	}
 
-	// Generate the ISO
-	if err := CreateISO(tempPath, cfg); err != nil {
+	// Build into a temp file in the SAME directory, then atomically rename over
+	// the destination. Rationale: a previous VM start may have left the existing
+	// ISO owned by the QEMU runtime user (libvirtd dynamic_ownership=1 chowns the
+	// readonly CDROM source at boot and does not restore it on stop), so
+	// regenerating in place fails — genisoimage cannot truncate a file the caller
+	// no longer owns. os.CreateTemp makes an exclusively-created regular file
+	// (never a pre-planted symlink) that inherits the QEMU group from the setgid
+	// dir; os.Rename then replaces the destination atomically. Rename needs write
+	// on the parent dir (the caller owns it), NOT ownership of the dest, and
+	// overwrites a symlink at the dest rather than following it — so it clears the
+	// libvirt-owned file and any tampering in one syscall, and a failed generation
+	// leaves the previous (still valid) ISO in place. Same-directory keeps the
+	// rename on one filesystem, which is what makes it atomic.
+	tmp, err := os.CreateTemp(dir, "cidata-*.iso")
+	if err != nil {
+		return fmt.Errorf("failed to create temp cloud-init ISO: %w", err)
+	}
+	tmpPath := tmp.Name()
+	tmp.Close()
+	// Cleans up the temp on any early return; a no-op once the rename moves it.
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	if err := CreateISO(tmpPath, cfg); err != nil {
 		return err
 	}
 
-	// Copy to final location via privileged helper
-	ctx, cancel := context.WithTimeout(context.Background(), timeout.Default)
-	defer cancel()
-
-	_, err = client.CopyFile(ctx, &rpc.CopyReq{
-		Src: tempPath,
-		Dst: paths.CloudInitISO,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to copy cloud-init ISO: %w", err)
-	}
-
-	// Set permissions for libvirt access
-	ctx2, cancel2 := context.WithTimeout(context.Background(), timeout.Default)
-	defer cancel2()
-
-	_, err = client.Chmod(ctx2, &rpc.ChmodReq{
-		Path: paths.CloudInitISO,
-		Mode: "644",
-	})
-	if err != nil {
+	// Group-readable so the QEMU process can attach the ISO at VM start (the group
+	// is inherited from the setgid storage dir; no ACLs needed). Chmod the temp
+	// before the rename so the final file appears atomically with its mode set. No
+	// symlink guard is needed: os.CreateTemp created this regular file exclusively.
+	if err := os.Chmod(tmpPath, isoFileMode); err != nil {
 		return fmt.Errorf("failed to set cloud-init ISO permissions: %w", err)
+	}
+	if err := os.Rename(tmpPath, paths.CloudInitISO); err != nil {
+		return fmt.Errorf("failed to install cloud-init ISO: %w", err)
 	}
 
 	return nil

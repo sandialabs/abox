@@ -28,12 +28,12 @@ func TestParseTetragonEvent(t *testing.T) {
 		},
 		{
 			name: "kprobe network event (sockaddr)",
-			data: `{"process_kprobe":{"function_name":"security_socket_connect","process":{"pid":1234},"args":[{"sockaddr_arg":{"family":"AF_INET","addr":"93.184.216.34","port":443}}]}}`,
+			data: `{"process_kprobe":{"function_name":"security_socket_connect","process":{"pid":1234},"args":[{"sockaddr_arg":{"family":"AF_INET","addr":"203.0.113.34","port":443}}]}}`,
 			want: EventTypeNetwork,
 		},
 		{
 			name: "kprobe network event (sock)",
-			data: `{"process_kprobe":{"function_name":"tcp_close","process":{"pid":1234},"args":[{"sock_arg":{"daddr":"93.184.216.34","dport":443,"protocol":"TCP"}}]}}`,
+			data: `{"process_kprobe":{"function_name":"tcp_close","process":{"pid":1234},"args":[{"sock_arg":{"daddr":"203.0.113.34","dport":443,"protocol":"TCP"}}]}}`,
 			want: EventTypeNetwork,
 		},
 		{
@@ -309,9 +309,79 @@ func TestCloudInitContributorDisabled(t *testing.T) {
 	}
 }
 
+func TestCloudInitContributorMissingGuestDevice(t *testing.T) {
+	// Enabled with a valid version but no guest device: the backend supplied no
+	// monitor transport, which must be a hard error, not a silent no-device agent.
+	c := &CloudInitContributor{
+		Enabled:         true,
+		TetragonTarball: "/tmp/fake.tar.gz",
+		TetragonVersion: "v1.3.0",
+	}
+	_, err := c.Contribute()
+	if err == nil {
+		t.Fatal("expected error when GuestDevice is empty")
+	}
+	if !strings.Contains(err.Error(), "guest device") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestCloudInitContributorGuestDeviceSubstituted(t *testing.T) {
+	cases := []struct {
+		name      string
+		device    string
+		deviceDir string
+	}{
+		{"virtio", "/dev/virtio-ports/abox.monitor.0", "/dev/virtio-ports"},
+		{"serial", "/dev/ttyS0", "/dev"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &CloudInitContributor{
+				Enabled:         true,
+				Kprobes:         []string{"security_socket_connect"},
+				TetragonTarball: "/tmp/fake.tar.gz",
+				TetragonVersion: "v1.3.0",
+				GuestDevice:     tc.device,
+			}
+			contrib, err := c.Contribute()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			script := contrib.WriteFiles[0]
+			service := contrib.WriteFiles[1]
+
+			// The agent script and service must reference the chosen device.
+			if !strings.Contains(script, `MONITOR_DEVICE="`+tc.device+`"`) {
+				t.Errorf("script missing device %q:\n%s", tc.device, script)
+			}
+			for _, want := range []string{
+				"ConditionPathExists=" + tc.device,
+				"DeviceAllow=" + tc.device + " rw",
+				"ReadWritePaths=" + tc.deviceDir,
+			} {
+				if !strings.Contains(service, want) {
+					t.Errorf("service missing %q:\n%s", want, service)
+				}
+			}
+
+			// The serial case must not leak the virtio path (and vice versa).
+			other := "/dev/ttyS0"
+			if tc.device == other {
+				other = "/dev/virtio-ports/abox.monitor.0"
+			}
+			if strings.Contains(script, other) || strings.Contains(service, other) {
+				t.Errorf("rendered files leaked the other backend's device %q", other)
+			}
+		})
+	}
+}
+
 func TestCloudInitContributorDefaultKprobes(t *testing.T) {
 	c := &CloudInitContributor{
 		Enabled:         true,
+		GuestDevice:     "/dev/virtio-ports/abox.monitor.0",
 		Kprobes:         nil, // nil = all defaults
 		TetragonTarball: "/tmp/fake-tarball.tar.gz",
 		TetragonVersion: "v1.3.0",
@@ -382,6 +452,7 @@ func TestCloudInitContributorDefaultKprobes(t *testing.T) {
 func TestCloudInitContributorKprobeSubset(t *testing.T) {
 	c := &CloudInitContributor{
 		Enabled:         true,
+		GuestDevice:     "/dev/virtio-ports/abox.monitor.0",
 		Kprobes:         []string{"security_socket_connect"},
 		TetragonTarball: "/tmp/fake.tar.gz",
 		TetragonVersion: "v1.3.0",
@@ -420,6 +491,7 @@ func TestCloudInitContributorCustomPolicies(t *testing.T) {
 
 	c := &CloudInitContributor{
 		Enabled:         true,
+		GuestDevice:     "/dev/virtio-ports/abox.monitor.0",
 		Policies:        []string{policyPath},
 		TetragonTarball: "/tmp/fake.tar.gz",
 		TetragonVersion: "v1.3.0",
@@ -448,6 +520,7 @@ func TestCloudInitContributorCustomPolicies(t *testing.T) {
 func TestCloudInitContributorInvalidVersion(t *testing.T) {
 	c := &CloudInitContributor{
 		Enabled:         true,
+		GuestDevice:     "/dev/virtio-ports/abox.monitor.0",
 		TetragonVersion: "malicious; rm -rf /",
 		TetragonTarball: "/tmp/fake.tar.gz",
 	}
@@ -460,6 +533,7 @@ func TestCloudInitContributorInvalidVersion(t *testing.T) {
 func TestCloudInitContributorMissingPolicyFile(t *testing.T) {
 	c := &CloudInitContributor{
 		Enabled:         true,
+		GuestDevice:     "/dev/virtio-ports/abox.monitor.0",
 		Policies:        []string{"/nonexistent/policy.yaml"},
 		TetragonTarball: "/tmp/fake.tar.gz",
 		TetragonVersion: "v1.3.0",
@@ -476,6 +550,7 @@ func TestCloudInitContributorMissingPolicyFile(t *testing.T) {
 func TestCloudInitContributorKprobeMultiEnabled(t *testing.T) {
 	c := &CloudInitContributor{
 		Enabled:         true,
+		GuestDevice:     "/dev/virtio-ports/abox.monitor.0",
 		KprobeMulti:     true,
 		Kprobes:         []string{"security_socket_connect"},
 		TetragonTarball: "/tmp/fake.tar.gz",

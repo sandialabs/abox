@@ -3,10 +3,10 @@ package remove
 import (
 	"fmt"
 	"strconv"
-	"syscall"
 
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/logging"
+	"github.com/sandialabs/abox/internal/procutil"
 	"github.com/sandialabs/abox/pkg/cmd/completion"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 	"github.com/sandialabs/abox/pkg/cmd/forward/shared"
@@ -73,7 +73,7 @@ func runRemove(f *factory.Factory, name, portStr string) error {
 
 	// Kill the SSH tunnel process
 	if shared.IsPIDRunning(entry.PID) {
-		if err := syscall.Kill(entry.PID, syscall.SIGTERM); err != nil {
+		if err := procutil.TerminatePID(entry.PID); err != nil {
 			logging.Warn("failed to kill forward process", "error", err, "instance", name, "pid", entry.PID)
 		}
 	}

@@ -14,9 +14,11 @@ import (
 
 	"github.com/sandialabs/abox/internal/backend"
 	"github.com/sandialabs/abox/internal/config"
+	"github.com/sandialabs/abox/internal/fsutil"
 	"github.com/sandialabs/abox/internal/logging"
-	"github.com/sandialabs/abox/internal/rpc"
+	"github.com/sandialabs/abox/internal/profiling"
 	"github.com/sandialabs/abox/internal/tui"
+	"github.com/sandialabs/abox/internal/validation"
 	"github.com/sandialabs/abox/pkg/cmd/export"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 	"github.com/sandialabs/abox/pkg/cmdutil"
@@ -89,6 +91,28 @@ func runImport(ctx context.Context, opts *Options, archivePath, newName string) 
 		name = manifest.Instance.Name
 	}
 
+	// Validate the name before it flows into filesystem paths, libvirt/network
+	// resource names, and config.Save. The manifest name is attacker-controlled and
+	// the --name arg is user-supplied; unlike create (which validates), import did
+	// not, so a name like "." , "foo/bar", or a leading "-" could produce a
+	// half-created, unloadable instance. Mirrors pkg/cmd/create validateCreateInputs.
+	if err := validation.ValidateInstanceName(name); err != nil {
+		return err
+	}
+
+	// Hold the cross-process lock across the whole import (exists-check ->
+	// subnet/port allocation -> config.Save -> Network().Create), mirroring
+	// create (pkg/cmd/create/create.go). Allocation is a read-modify-write of the
+	// shared instance set, and the VMware Network().Create edits root-owned shared
+	// state (the /etc/vmware/networking answer file + the vmnet registry) whose
+	// seams document that cross-process safety relies on the caller holding this
+	// lock (internal/vmrun/network.go, netcfg_answerfile.go). AcquireLock is not
+	// reentrant, and nothing on the import path re-acquires it.
+	if err := config.AcquireLock(); err != nil {
+		return fmt.Errorf("failed to acquire lock: %w", err)
+	}
+	defer func() { _ = config.ReleaseLock() }()
+
 	// Check if name already taken
 	if config.Exists(name) {
 		return &cmdutil.ErrHint{
@@ -97,42 +121,63 @@ func runImport(ctx context.Context, opts *Options, archivePath, newName string) 
 		}
 	}
 
-	// For snapshot archives, verify base image exists
+	// For snapshot archives, verify the base image is obtainable. Resolve paths
+	// through the backend exactly as allocateResources/importSnapshotDisk do:
+	// config.GetPaths uses the DEFAULT storage root (~/.local/share/abox/disks),
+	// which is neither the backend store the snapshot rebase reads
+	// (be.StorageDir()/base, e.g. LibvirtStorageDir) nor the user cache that
+	// `abox base pull` fills — so the old check consulted a dead path and spuriously
+	// rejected valid snapshot imports after the storage relocation.
 	if manifest.Snapshot {
-		paths, err := config.GetPaths(name)
+		be, err := opts.Factory.AutoDetectBackend()
+		if err != nil {
+			return fmt.Errorf("failed to get backend: %w", err)
+		}
+		paths, err := config.GetPathsWithStorage(name, be.StorageDir())
 		if err != nil {
 			return err
 		}
-		baseImage := filepath.Join(paths.BaseImages, manifest.Instance.Base+".qcow2")
-		if _, err := os.Stat(baseImage); os.IsNotExist(err) {
-			return &cmdutil.ErrHint{
-				Err:  fmt.Errorf("base image %q not found", manifest.Instance.Base),
-				Hint: "This is a snapshot archive that requires the base image.\nInstall it with: abox base pull " + manifest.Instance.Base,
-			}
+		if err := verifySnapshotBaseImage(paths, manifest.Instance.Base); err != nil {
+			return err
 		}
 	}
 
-	// Get privilege client early - this is where the single password prompt happens
-	client, err := opts.Factory.PrivilegeClientFor(name)
-	if err != nil {
-		return fmt.Errorf("failed to get privilege client: %w", err)
-	}
-
 	if opts.Factory.IO.IsTerminal() {
-		return runImportTUI(ctx, opts, archivePath, name, manifest, client)
+		return runImportTUI(ctx, opts, archivePath, name, manifest)
 	}
-	return runImportPlain(ctx, opts, archivePath, name, manifest, client)
+	return runImportPlain(ctx, opts, archivePath, name, manifest)
+}
+
+// verifySnapshotBaseImage reports whether the base image a snapshot archive
+// rebases onto is obtainable, given backend-resolved paths. The snapshot delta is
+// rebased onto the LOCAL base at import (importSnapshotDisk) and the VM reads
+// through that base at boot, so the base must exist either already-promoted in the
+// backend store (paths.BaseImages) or in the user cache (paths.UserBaseImages,
+// where `abox base pull` installs it and from which EnsureBaseImage promotes it).
+// paths MUST be resolved via GetPathsWithStorage(name, be.StorageDir()) so
+// paths.BaseImages points at the store the rebase actually reads.
+func verifySnapshotBaseImage(paths *config.Paths, base string) error {
+	imageName := config.UserBaseImageName(base)
+	for _, dir := range []string{paths.BaseImages, paths.UserBaseImages} {
+		if _, err := os.Stat(filepath.Join(dir, imageName)); err == nil {
+			return nil
+		}
+	}
+	return &cmdutil.ErrHint{
+		Err:  fmt.Errorf("base image %q not found", base),
+		Hint: "This is a snapshot archive that requires the base image.\nInstall it with: abox base pull " + base,
+	}
 }
 
 // ---------------------------------------------------------------------------
 // Plain text path (non-TTY or pipe)
 // ---------------------------------------------------------------------------
 
-func runImportPlain(ctx context.Context, opts *Options, archivePath, name string, manifest *export.Manifest, client rpc.PrivilegeClient) error {
+func runImportPlain(ctx context.Context, opts *Options, archivePath, name string, manifest *export.Manifest) error {
 	w := opts.Factory.IO.Out
 	fmt.Fprintf(w, "Importing from %s...\n", archivePath)
 
-	if err := doImport(ctx, w, opts, archivePath, name, manifest, client, tui.NoopNotifier{}); err != nil {
+	if err := doImport(ctx, w, opts, archivePath, name, manifest, tui.NoopNotifier{}); err != nil {
 		return err
 	}
 
@@ -144,7 +189,7 @@ func runImportPlain(ctx context.Context, opts *Options, archivePath, name string
 // TUI path
 // ---------------------------------------------------------------------------
 
-func runImportTUI(ctx context.Context, opts *Options, archivePath, name string, manifest *export.Manifest, client rpc.PrivilegeClient) error {
+func runImportTUI(ctx context.Context, opts *Options, archivePath, name string, manifest *export.Manifest) error {
 	steps := []tui.Step{
 		{Name: "Extract archive"},
 		{Name: "Validate manifest"},
@@ -167,7 +212,7 @@ func runImportTUI(ctx context.Context, opts *Options, archivePath, name string, 
 		defer f.IO.RestoreOutput()
 		old := logging.StderrWriter().Swap(errOut)
 		defer logging.StderrWriter().Swap(old)
-		return doImport(ctx, out, opts, archivePath, name, manifest, client, notify)
+		return doImport(ctx, out, opts, archivePath, name, manifest, notify)
 	})
 	if err != nil {
 		return err
@@ -187,7 +232,7 @@ func runImportTUI(ctx context.Context, opts *Options, archivePath, name string, 
 // Unified work function
 // ---------------------------------------------------------------------------
 
-func doImport(ctx context.Context, w io.Writer, opts *Options, archivePath, name string, manifest *export.Manifest, client rpc.PrivilegeClient, notify tui.PhaseNotifier) error {
+func doImport(ctx context.Context, w io.Writer, opts *Options, archivePath, name string, manifest *export.Manifest, notify tui.PhaseNotifier) error {
 	// Phase 0: Extract archive
 	notify.PhaseStart(0)
 	fmt.Fprintln(w, "Extracting archive...")
@@ -215,13 +260,12 @@ func doImport(ctx context.Context, w io.Writer, opts *Options, archivePath, name
 		notify.PhaseDone(2, err)
 		return err
 	}
-	cleanup.client = client
 	defer cleanup.run()
 	notify.PhaseDone(2, nil)
 
 	// Phase 3: Copy disk and config files
 	notify.PhaseStart(3)
-	if err := copyDiskAndConfig(ctx, w, tempDir, manifest, paths, inst, be, client, cleanup); err != nil {
+	if err := copyDiskAndConfig(ctx, w, tempDir, manifest, paths, inst, be, cleanup); err != nil {
 		notify.PhaseDone(3, err)
 		return err
 	}
@@ -241,15 +285,17 @@ func doImport(ctx context.Context, w io.Writer, opts *Options, archivePath, name
 
 // extractArchive creates a temp directory and extracts the archive into it.
 func extractArchive(archivePath string) (string, error) {
-	runtimeDir, err := config.RuntimeDir()
-	if err != nil {
-		return "", fmt.Errorf("cannot import: %w", err)
-	}
+	// RuntimeDirOr falls back to $TMPDIR when there is no XDG_RUNTIME_DIR /
+	// /run/user/<uid> (e.g. macOS), so import works cross-platform.
+	runtimeDir := config.RuntimeDirOr(os.TempDir())
 	tempDir, err := os.MkdirTemp(runtimeDir, "abox-import-")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp directory: %w", err)
 	}
-	if err := extractTarGz(archivePath, tempDir); err != nil {
+	extractTimer := profiling.Track("import:extract")
+	err = extractTarGz(archivePath, tempDir)
+	extractTimer()
+	if err != nil {
 		os.RemoveAll(tempDir)
 		return "", fmt.Errorf("failed to extract archive: %w", err)
 	}
@@ -271,7 +317,7 @@ func validateExtractedManifest(tempDir string) error {
 	if err := json.Unmarshal(manifestData, &extractedManifest); err != nil {
 		return fmt.Errorf("failed to parse manifest: %w", err)
 	}
-	if extractedManifest.Format != "abox-archive" {
+	if extractedManifest.Format != export.ArchiveFormat {
 		return fmt.Errorf("invalid archive format: %s", extractedManifest.Format)
 	}
 	if extractedManifest.Version != 1 {
@@ -297,7 +343,11 @@ func allocateResources(opts *Options, name string, manifest *export.Manifest, w 
 
 	cleanup := &cleanupState{paths: paths, name: name, errOut: w}
 
-	subnet, gateway, thirdOctet, err := config.AllocateSubnet("")
+	// Route subnet allocation through the backend so self-managing backends
+	// (vfkit's host-mode 192.168.128.0/24+ pool) pick their own subnet; libvirt
+	// falls back to config.AllocateSubnet, so Linux behavior is unchanged. This
+	// mirrors create (see pkg/cmd/create/create.go).
+	subnet, gateway, _, err := backend.ResolveNetwork(be, "")
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("failed to allocate subnet: %w", err)
 	}
@@ -332,7 +382,7 @@ func allocateResources(opts *Options, name string, manifest *export.Manifest, w 
 		SSHKey:     paths.SSHKey,
 		Disk:       manifest.Instance.Disk,
 		MACAddress: be.GenerateMAC(),
-		IPAddress:  fmt.Sprintf("10.10.%d.10", thirdOctet),
+		IPAddress:  config.DeriveHostIP(gateway),
 		StorageDir: be.StorageDir(),
 	}
 
@@ -340,25 +390,28 @@ func allocateResources(opts *Options, name string, manifest *export.Manifest, w 
 }
 
 // copyDiskAndConfig copies the disk image and configuration files from the extracted archive.
-func copyDiskAndConfig(ctx context.Context, w io.Writer, tempDir string, manifest *export.Manifest, paths *config.Paths, inst *config.Instance, be backend.Backend, client rpc.PrivilegeClient, cleanup *cleanupState) error {
+func copyDiskAndConfig(ctx context.Context, w io.Writer, tempDir string, manifest *export.Manifest, paths *config.Paths, inst *config.Instance, be backend.Backend, cleanup *cleanupState) error {
 	fmt.Fprintln(w, "Copying disk image...")
 	srcDisk := filepath.Join(tempDir, "disk.qcow2")
-	if err := be.Disk().Import(ctx, client, srcDisk, inst, paths, manifest.Snapshot); err != nil {
+	diskTimer := profiling.Track("import:disk-convert")
+	err := be.Disk().Import(ctx, srcDisk, inst, paths, manifest.Snapshot)
+	diskTimer()
+	if err != nil {
 		return fmt.Errorf("failed to import disk: %w", err)
 	}
 	cleanup.diskCreated = true
 
 	fmt.Fprintln(w, "Copying configuration files...")
-	if err := copyFile(filepath.Join(tempDir, "id_ed25519"), paths.SSHKey); err != nil {
+	if err := fsutil.CopyFile(filepath.Join(tempDir, "id_ed25519"), paths.SSHKey); err != nil {
 		return fmt.Errorf("failed to copy SSH private key: %w", err)
 	}
 	if err := os.Chmod(paths.SSHKey, 0o600); err != nil {
 		return fmt.Errorf("failed to set SSH key permissions: %w", err)
 	}
-	if err := copyFile(filepath.Join(tempDir, "id_ed25519.pub"), paths.SSHKey+".pub"); err != nil {
+	if err := fsutil.CopyFile(filepath.Join(tempDir, "id_ed25519.pub"), paths.SSHKey+".pub"); err != nil {
 		return fmt.Errorf("failed to copy SSH public key: %w", err)
 	}
-	if err := copyFile(filepath.Join(tempDir, "allowlist.conf"), paths.Allowlist); err != nil {
+	if err := fsutil.CopyFile(filepath.Join(tempDir, "allowlist.conf"), paths.Allowlist); err != nil {
 		return fmt.Errorf("failed to copy allowlist: %w", err)
 	}
 
@@ -427,7 +480,7 @@ func peekManifest(archivePath string) (*export.Manifest, error) {
 			if err := json.Unmarshal(data, &manifest); err != nil {
 				return nil, fmt.Errorf("failed to parse manifest: %w", err)
 			}
-			if manifest.Format != "abox-archive" {
+			if manifest.Format != export.ArchiveFormat {
 				return nil, fmt.Errorf("invalid archive format: %s", manifest.Format)
 			}
 			return &manifest, nil
@@ -446,7 +499,6 @@ type cleanupState struct {
 	name           string
 	bridge         string
 	be             backend.Backend
-	client         rpc.PrivilegeClient
 	errOut         io.Writer
 	diskCreated    bool
 	configCreated  bool
@@ -474,8 +526,8 @@ func (c *cleanupState) run() {
 	if c.networkCreated && c.be != nil {
 		_ = c.be.Network().Delete(ctx, c.bridge)
 	}
-	if c.diskCreated && c.be != nil && c.client != nil {
-		_ = c.be.Disk().Delete(ctx, c.client, c.paths)
+	if c.diskCreated && c.be != nil {
+		_ = c.be.Disk().Delete(ctx, c.paths)
 	}
 	if c.configCreated || c.diskCreated {
 		os.RemoveAll(c.paths.Instance)
@@ -551,35 +603,4 @@ func extractTarFile(tr *tar.Reader, header *tar.Header, targetPath string) error
 		return err
 	}
 	return f.Close()
-}
-
-// copyFile copies a file from src to dst.
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-
-	// Preserve permissions
-	info, err := in.Stat()
-	if err != nil {
-		out.Close()
-		return err
-	}
-	if err := out.Chmod(info.Mode()); err != nil {
-		out.Close()
-		return err
-	}
-
-	if _, err = io.Copy(out, in); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
 }

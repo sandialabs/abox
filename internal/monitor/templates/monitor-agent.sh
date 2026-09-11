@@ -1,19 +1,21 @@
 #!/bin/bash
-# abox-monitor-agent - Stream Tetragon events to virtio-serial
-# This script runs as a systemd service and pipes events to the host
+# abox-monitor-agent - Stream Tetragon events to the host monitor device
+# This script runs as a systemd service and pipes events to the host over the
+# backend-specific transport device ({{.Device}}: a virtio-serial port on
+# libvirt, or a serial pipe on VMware).
 
 set -euo pipefail
 
-VIRTIO_PORT="/dev/virtio-ports/abox.monitor.0"
+MONITOR_DEVICE="{{.Device}}"
 TETRA_BIN="/usr/local/bin/tetra"
-VIRTIO_TIMEOUT=60
+DEVICE_TIMEOUT=60
 TETRAGON_TIMEOUT=120
 
-# Wait for virtio port to be available (timeout after 60s)
+# Wait for the monitor device to be available (timeout after 60s)
 counter=0
-while [ ! -e "$VIRTIO_PORT" ]; do
-    if [ $counter -ge $VIRTIO_TIMEOUT ]; then
-        echo "Timeout waiting for virtio port $VIRTIO_PORT" >&2
+while [ ! -e "$MONITOR_DEVICE" ]; do
+    if [ $counter -ge $DEVICE_TIMEOUT ]; then
+        echo "Timeout waiting for monitor device $MONITOR_DEVICE" >&2
         exit 1
     fi
     sleep 1
@@ -39,7 +41,7 @@ while ! "$TETRA_BIN" status >/dev/null 2>&1; do
     counter=$((counter + 2))
 done
 
-# Stream Tetragon events to virtio-serial
+# Stream Tetragon events to the monitor device
 # The -o json flag outputs events as JSON, one per line
 # stderr goes to systemd journal automatically since this runs as a service
-exec "$TETRA_BIN" getevents -o json > "$VIRTIO_PORT"
+exec "$TETRA_BIN" getevents -o json > "$MONITOR_DEVICE"

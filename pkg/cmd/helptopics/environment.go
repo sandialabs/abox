@@ -29,6 +29,15 @@ ABOX_LOG_FILE
   Example:
     ABOX_LOG_FILE=~/.abox.log abox up
 
+ABOX_BACKEND
+  Explicitly select the VM backend by name (e.g. 'vmware'), bypassing
+  auto-detection. Required to select an experimental backend, which
+  auto-detection never chooses silently. The choice is recorded in the
+  instance config at create time.
+
+  Example:
+    ABOX_BACKEND=vmware abox create dev
+
 ABOX_PRIVILEGE_METHOD
   Privilege escalation method: 'pkexec' or 'sudo'.
   Default: auto-detect (prefers sudo on headless, pkexec with display).

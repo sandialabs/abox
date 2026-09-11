@@ -11,6 +11,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/sandialabs/abox/internal/config"
+	"github.com/sandialabs/abox/internal/filterbase"
 	"github.com/sandialabs/abox/internal/tetragon/policy"
 	"github.com/sandialabs/abox/internal/validation"
 )
@@ -36,6 +37,14 @@ type BoxfileMonitor struct {
 type BoxfileHTTP struct {
 	MITM           *bool `yaml:"mitm,omitempty"`            // Enable TLS MITM (default: true). Pointer to distinguish unset from false.
 	MaxConnections *int  `yaml:"max_connections,omitempty"` // cap on concurrent client connections (default: 512). Pointer to distinguish unset.
+	// AllowPrivateTargets lists CIDRs the DNS/HTTP filters may reach despite the
+	// default SSRF deny of private/loopback/link-local/metadata ranges. Empty =
+	// deny all such targets (the secure default).
+	AllowPrivateTargets []string `yaml:"allow_private_targets,omitempty"`
+	// SecretInjections binds host-side secret store values into outbound request
+	// headers (see config.SecretInjection). The value lives in the secret store,
+	// never in abox.yaml.
+	SecretInjections []config.SecretInjection `yaml:"secret_injections,omitempty"`
 }
 
 // Boxfile represents the abox.yaml declarative configuration.
@@ -101,6 +110,18 @@ func (b *Boxfile) GetMaxConnections() int {
 	return *b.HTTP.MaxConnections
 }
 
+// GetAllowPrivateTargets returns the opt-in list of permitted private-target
+// CIDRs (empty by default = deny all private/loopback/link-local/metadata).
+func (b *Boxfile) GetAllowPrivateTargets() []string {
+	return b.HTTP.AllowPrivateTargets
+}
+
+// GetSecretInjections returns the configured secret-injection bindings (nil if
+// none are set).
+func (b *Boxfile) GetSecretInjections() []config.SecretInjection {
+	return b.HTTP.SecretInjections
+}
+
 // Load reads abox.yaml from the specified directory (or current directory if empty).
 // Returns the parsed Boxfile and the directory containing the file.
 func Load(dir string) (*Boxfile, string, error) {
@@ -154,6 +175,16 @@ func Load(dir string) (*Boxfile, string, error) {
 	return box, absDir, nil
 }
 
+// ApplySuffix appends suffix to the instance name, joined with a hyphen, so the
+// same abox.yaml can back several independent instances (e.g. name "my-agent"
+// with suffix "1" becomes "my-agent-1"). An empty suffix is a no-op. Call before
+// Validate so the resulting name is checked.
+func (b *Boxfile) ApplySuffix(suffix string) {
+	if suffix != "" {
+		b.Name += "-" + suffix
+	}
+}
+
 // Validate checks that required fields are present and paths exist.
 func (b *Boxfile) Validate(baseDir string) error {
 	if err := b.validateNameAndUser(); err != nil {
@@ -176,6 +207,15 @@ func (b *Boxfile) Validate(baseDir string) error {
 	}
 	if b.HTTP.MaxConnections != nil && *b.HTTP.MaxConnections < 1 {
 		return fmt.Errorf("invalid http.max_connections in abox.yaml: must be >= 1 (got %d)", *b.HTTP.MaxConnections)
+	}
+	// Validate the SSRF allow-list with the same checker the filters use at
+	// runtime, so a bad CIDR (or a default route that would disable protection)
+	// is caught here rather than only when the daemon starts.
+	if _, err := filterbase.NewTargetChecker(b.HTTP.AllowPrivateTargets); err != nil {
+		return fmt.Errorf("invalid http.allow_private_targets in abox.yaml: %w", err)
+	}
+	if err := config.ValidateSecretInjections(b.HTTP.SecretInjections); err != nil {
+		return fmt.Errorf("invalid http.secret_injections in abox.yaml: %w", err)
 	}
 	return b.validateDNS()
 }

@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"strings"
-	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
@@ -21,12 +20,9 @@ import (
 // paths (e.g., with random suffixes) to avoid conflicts with stale sockets.
 // For fixed paths that may have stale sockets from crashes, use UnixListenWithStaleCheck.
 func UnixListen(path string) (net.Listener, error) {
-	// Set restrictive umask before creating socket
-	oldUmask := syscall.Umask(0o077)
-	listener, err := net.Listen("unix", path)
-	syscall.Umask(oldUmask)
-
-	return listener, err
+	// Create the socket with a restrictive umask (0o600) where the platform
+	// honors it (Unix); see listenUnixRestrictive.
+	return listenUnixRestrictive(path)
 }
 
 // UnixListenWithStaleCheck creates a net.Listener, handling stale sockets from crashes.
@@ -34,10 +30,7 @@ func UnixListen(path string) (net.Listener, error) {
 // and safe to remove. If connection succeeds, another process owns it and we error.
 func UnixListenWithStaleCheck(path string) (net.Listener, error) {
 	// First try to listen directly
-	oldUmask := syscall.Umask(0o077)
-	listener, err := net.Listen("unix", path)
-	syscall.Umask(oldUmask)
-
+	listener, err := listenUnixRestrictive(path)
 	if err == nil {
 		return listener, nil
 	}
@@ -63,10 +56,7 @@ func UnixListenWithStaleCheck(path string) (net.Listener, error) {
 	}
 
 	// Retry listen
-	oldUmask = syscall.Umask(0o077)
-	listener, err = net.Listen("unix", path)
-	syscall.Umask(oldUmask)
-
+	listener, err = listenUnixRestrictive(path)
 	if err == nil {
 		logging.Debug("created unix listener", "path", path)
 	}
@@ -102,24 +92,42 @@ type uidCheckListener struct {
 }
 
 // Accept accepts a connection and verifies the peer UID matches the allowed value.
+//
+// A rejected or unverifiable peer must never stop the server: grpc.Server.Serve
+// treats any non-temporary Accept error as fatal and returns, which would tear
+// down the whole (privileged) listener over a single stray connection. So a
+// peer-credential failure or UID mismatch drops that one connection and the
+// loop continues; only a genuine error from the underlying listener (e.g. it
+// was closed) is propagated to the caller.
 func (l *uidCheckListener) Accept() (net.Conn, error) {
-	conn, err := l.Listener.Accept()
-	if err != nil {
-		return nil, err
-	}
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
 
-	_, uid, err := GetPeerCredentials(conn)
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to get peer credentials: %w", err)
-	}
+		_, uid, err := GetPeerCredentials(conn)
+		if err != nil {
+			conn.Close()
+			logging.Warn("rejecting helper connection: failed to get peer credentials", "error", err)
+			// Audit the denial: a connection to a UID-gated socket that cannot be
+			// attributed to a peer is a security-relevant event the audit trail must
+			// capture (Warn alone does not reach the audit sink on every platform).
+			logging.Audit("rpc.peer-rejected", "reason", "peer credentials unavailable", "expected_uid", l.allowedUID)
+			continue
+		}
 
-	if uid != l.allowedUID {
-		conn.Close()
-		return nil, fmt.Errorf("connection rejected: UID %d not allowed (expected %d)", uid, l.allowedUID)
-	}
+		if uid != l.allowedUID {
+			conn.Close()
+			logging.Warn("rejecting helper connection: UID not allowed", "uid", uid, "expected", l.allowedUID)
+			// Audit the denial: a foreign UID connecting to the (privileged) socket
+			// is exactly the probe a security audit trail must record.
+			logging.Audit("rpc.peer-rejected", "reason", "uid not allowed", "uid", uid, "expected_uid", l.allowedUID)
+			continue
+		}
 
-	return conn, nil
+		return conn, nil
+	}
 }
 
 // UnixListenWithStaleAndUIDCheck creates a net.Listener that handles stale sockets
@@ -151,10 +159,12 @@ func UnixListenWithStaleAndUIDCheck(path string, allowedUID int) (net.Listener, 
 // # Security Model
 //
 // The socket is created by the privilege helper which runs as root, so it's
-// owned by root:root. We chmod to 0o666 because:
-//  1. The non-root abox client process needs to connect
-//  2. chown would require knowing the client UID at socket creation time
-//  3. chgrp to a shared group would require additional system configuration
+// owned by root:root. The socket mode is platform-split (socketPeerCheckMode; see
+// socket_mode_{darwin,other}.go and the inline note below):
+//   - Linux: 0o666, because the non-root abox client must connect and chown would
+//     require knowing the client UID at socket-creation time (security rests on
+//     SO_PEERCRED + token, below).
+//   - darwin: 0o600 + chown to the allowed UID, since the spawn path knows it.
 //
 // Security is enforced through multiple layers:
 //  1. UID check via SO_PEERCRED - kernel-level check rejects connections from other users
@@ -164,17 +174,21 @@ func UnixListenWithStaleAndUIDCheck(path string, allowedUID int) (net.Listener, 
 //     visible in process arguments, environment variables, or /proc
 //  4. Token comparison uses constant-time algorithm to prevent timing attacks
 //
-// This layered approach ensures that even with world-accessible socket permissions,
-// only the specific process that spawned the helper can make authenticated RPC calls.
+// This layered approach ensures that even on Linux's world-accessible socket
+// permissions, only the specific process that spawned the helper can make
+// authenticated RPC calls.
 func UnixListenWithUIDCheck(path string, allowedUID int) (net.Listener, error) {
 	listener, err := UnixListen(path)
 	if err != nil {
 		return nil, err
 	}
 
-	// chmod 0o666: See security model documentation above.
-	// TL;DR: Socket owned by root, client runs as non-root, security via UID + token.
-	if err := os.Chmod(path, 0o666); err != nil { //nolint:gosec // socket needs 0o666: security enforced via UID + token (see comment above)
+	// Socket mode is platform-split (socketPeerCheckMode; see socket_mode_*.go).
+	// On Linux it is 0o666 (see security model documentation above: socket owned
+	// by root, client runs as non-root, security via SO_PEERCRED UID + token). On
+	// darwin the spawn path knows the allowed UID and the socket is chowned to it
+	// below, so the mode is tightened to 0o600.
+	if err := os.Chmod(path, socketPeerCheckMode); err != nil {
 		_ = listener.Close()
 		return nil, fmt.Errorf("failed to chmod socket: %w", err)
 	}

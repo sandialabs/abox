@@ -7,6 +7,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/rpc"
 	"github.com/sandialabs/abox/internal/validation"
 )
@@ -25,6 +26,20 @@ type AllowlistAPIHandler struct {
 	Filter *Filter
 	Loader *Loader
 	Server ModeServer
+
+	// Instance and Label attribute service-layer audit records. Instance is the
+	// instance name (matching what the CLI's AuditInstance recorded); Label is the
+	// daemon that handled the call ("dns" or "http"). These make the audit trail
+	// complete for callers that talk to the socket directly (bypassing the CLI).
+	Instance string
+	Label    string
+}
+
+// audit emits a service-layer audit record for a successful state change,
+// tagged with the daemon label so DNS and HTTP entries are distinguishable.
+func (h *AllowlistAPIHandler) audit(action string, keysAndValues ...any) {
+	args := append([]any{"filter", h.Label}, keysAndValues...)
+	logging.AuditInstance(h.Instance, action, args...)
 }
 
 // Add adds a domain to the allowlist.
@@ -44,6 +59,7 @@ func (h *AllowlistAPIHandler) Add(domain string) (*rpc.StringMsg, error) {
 				return nil, status.Errorf(codes.Internal, "added %s to filter but failed to save to allowlist file: %v", domain, err)
 			}
 		}
+		h.audit(logging.ActionAllowlistAdd, "domain", domain)
 		return &rpc.StringMsg{Message: "added " + domain}, nil
 	}
 
@@ -60,6 +76,7 @@ func (h *AllowlistAPIHandler) Remove(domain string) (*rpc.StringMsg, error) {
 	}
 
 	if h.Filter.Remove(domain) {
+		h.audit(logging.ActionAllowlistRemove, "domain", domain)
 		return &rpc.StringMsg{Message: fmt.Sprintf("removed %s (edit the allowlist file to persist)", domain)}, nil
 	}
 
@@ -82,7 +99,9 @@ func (h *AllowlistAPIHandler) Reload() (*rpc.StringMsg, error) {
 		return nil, status.Errorf(codes.Internal, "failed to reload: %v", err)
 	}
 
-	return &rpc.StringMsg{Message: fmt.Sprintf("reloaded %d domains from file", h.Filter.Count())}, nil
+	count := h.Filter.Count()
+	h.audit(logging.ActionAllowlistReload, "domains", count)
+	return &rpc.StringMsg{Message: fmt.Sprintf("reloaded %d domains from file", count)}, nil
 }
 
 // SetMode sets the filtering mode (active or passive).
@@ -97,9 +116,11 @@ func (h *AllowlistAPIHandler) SetMode(mode string) (*rpc.StringMsg, error) {
 	switch mode {
 	case ModeActive:
 		h.Server.SetActive(true)
+		h.audit(logging.ActionModeActive)
 		return &rpc.StringMsg{Message: "mode: " + ModeActive}, nil
 	case ModePassive:
 		h.Server.SetActive(false)
+		h.audit(logging.ActionModePassive)
 		return &rpc.StringMsg{Message: "mode: " + ModePassive}, nil
 	default:
 		return nil, status.Errorf(codes.InvalidArgument, "invalid mode: %s (must be %s or %s)", mode, ModeActive, ModePassive)
@@ -135,6 +156,7 @@ func (h *AllowlistAPIHandler) Profile(subcmd string) (*rpc.ProfileResp, error) {
 		if err := logger.Clear(); err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to clear: %v", err)
 		}
+		h.audit(logging.ActionProfileClear)
 		return &rpc.ProfileResp{Message: "profile log cleared"}, nil
 
 	case "count":

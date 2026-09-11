@@ -4,12 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/logging"
+	"github.com/sandialabs/abox/internal/mountutil"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 	"github.com/sandialabs/abox/pkg/cmd/mount"
 	"github.com/sandialabs/abox/pkg/cmdutil"
@@ -68,11 +68,15 @@ When specifying an instance name, all mounts for that instance are unmounted.`,
 		},
 	}
 
-	cmd.Flags().BoolVarP(&opts.Force, "force", "f", false, "Force unmount (lazy unmount if busy)")
+	cmd.Flags().BoolVarP(&opts.Force, "force", "f", false, "Force unmount (lazy unmount on Linux; diskutil force on macOS)")
 	cmd.Flags().BoolVar(&opts.All, "all", false, "Unmount all abox mounts")
 
 	return cmd
 }
+
+// doUnmountFn is the mount-teardown seam, overridable in tests. It defaults to
+// the platform doUnmount (fusermount on Linux, diskutil on macOS).
+var doUnmountFn = doUnmount
 
 // Run executes the unmount command for a single target.
 func (o *Options) Run(target string) error {
@@ -107,13 +111,17 @@ func (o *Options) unmountPath(localPath string) error {
 		return fmt.Errorf("failed to resolve path: %w", err)
 	}
 
-	// Check if mounted
-	if !isMounted(absPath) {
+	// Check if mounted. --force must still attempt teardown even when the mount
+	// looks absent: a dead FUSE/SSHFS endpoint can defeat detection, and lazy
+	// unmount (Linux -z) / `diskutil unmount force` (macOS) both tolerate an
+	// already-gone mount. Refusing here is what made --force unable to clean the
+	// exact stale mount it exists for.
+	if !o.Force && !mountutil.IsMounted(absPath) {
 		return fmt.Errorf("path %q is not mounted", absPath)
 	}
 
-	// Unmount using fusermount
-	if err := doUnmount(absPath, o.Force); err != nil {
+	// Unmount (fusermount on Linux, umount/diskutil on macOS)
+	if err := doUnmountFn(absPath, o.Force); err != nil {
 		return err
 	}
 
@@ -126,6 +134,42 @@ func (o *Options) unmountPath(localPath string) error {
 	logging.Audit("unmount by path", "action", logging.ActionUnmount, "path", absPath)
 
 	return nil
+}
+
+// unmountMounts tears down every recorded mount for one instance, honoring
+// --force. --force still attempts teardown even when a mount looks absent: a dead
+// FUSE/SSHFS endpoint can defeat detection, and lazy unmount (Linux -z) /
+// `diskutil unmount force` (macOS) tolerate an already-gone mount — this gate
+// mirrors unmountPath's. It returns the number unmounted and any per-path errors;
+// suffix is appended to each success line (the --all view labels the instance).
+func (o *Options) unmountMounts(instanceName, instanceDir string, mounts []mount.MountEntry, suffix string) (int, []string) {
+	w := o.Factory.IO.Out
+	var errs []string
+	unmounted := 0
+
+	for _, m := range mounts {
+		if !o.Force && !mountutil.IsMounted(m.LocalPath) {
+			// Not mounted, just remove the record.
+			_ = mount.RemoveMountRecord(instanceDir, m.LocalPath)
+			continue
+		}
+
+		if err := doUnmountFn(m.LocalPath, o.Force); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", m.LocalPath, err))
+			continue
+		}
+
+		if err := mount.RemoveMountRecord(instanceDir, m.LocalPath); err != nil {
+			logging.Warn("failed to remove mount record", "error", err, "path", m.LocalPath)
+		}
+
+		fmt.Fprintf(w, "Unmounted %s%s\n", m.LocalPath, suffix)
+		unmounted++
+
+		logging.AuditInstance(instanceName, logging.ActionUnmount, "path", m.LocalPath)
+	}
+
+	return unmounted, errs
 }
 
 // unmountInstance unmounts all mounts for an instance.
@@ -146,30 +190,7 @@ func (o *Options) unmountInstance(instanceName string) error {
 		return nil
 	}
 
-	var errs []string
-	unmounted := 0
-
-	for _, m := range mounts {
-		if !isMounted(m.LocalPath) {
-			// Not mounted, just remove the record
-			_ = mount.RemoveMountRecord(paths.Instance, m.LocalPath)
-			continue
-		}
-
-		if err := doUnmount(m.LocalPath, o.Force); err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v", m.LocalPath, err))
-			continue
-		}
-
-		if err := mount.RemoveMountRecord(paths.Instance, m.LocalPath); err != nil {
-			logging.Warn("failed to remove mount record", "error", err, "path", m.LocalPath)
-		}
-
-		fmt.Fprintf(w, "Unmounted %s\n", m.LocalPath)
-		unmounted++
-
-		logging.AuditInstance(instanceName, logging.ActionUnmount, "path", m.LocalPath)
-	}
+	unmounted, errs := o.unmountMounts(instanceName, paths.Instance, mounts, "")
 
 	if len(errs) > 0 {
 		return &cmdutil.ErrHint{
@@ -212,27 +233,9 @@ func (o *Options) UnmountAll() error {
 			continue
 		}
 
-		for _, m := range mounts {
-			if !isMounted(m.LocalPath) {
-				// Not mounted, just remove the record
-				_ = mount.RemoveMountRecord(paths.Instance, m.LocalPath)
-				continue
-			}
-
-			if err := doUnmount(m.LocalPath, o.Force); err != nil {
-				errs = append(errs, fmt.Sprintf("%s: %v", m.LocalPath, err))
-				continue
-			}
-
-			if err := mount.RemoveMountRecord(paths.Instance, m.LocalPath); err != nil {
-				logging.Warn("failed to remove mount record", "error", err, "path", m.LocalPath)
-			}
-
-			fmt.Fprintf(w, "Unmounted %s (instance: %s)\n", m.LocalPath, instanceName)
-			unmounted++
-
-			logging.AuditInstance(instanceName, logging.ActionUnmount, "path", m.LocalPath)
-		}
+		n, e := o.unmountMounts(instanceName, paths.Instance, mounts, fmt.Sprintf(" (instance: %s)", instanceName))
+		unmounted += n
+		errs = append(errs, e...)
 	}
 
 	if len(errs) > 0 {
@@ -246,28 +249,6 @@ func (o *Options) UnmountAll() error {
 		fmt.Fprintln(w, "No active mounts to unmount")
 	}
 
-	return nil
-}
-
-// isMounted checks if a path is a mount point.
-func isMounted(path string) bool {
-	cmd := exec.Command("mountpoint", "-q", path)
-	return cmd.Run() == nil
-}
-
-// doUnmount performs the actual unmount operation.
-func doUnmount(path string, force bool) error {
-	args := []string{"-u"}
-	if force {
-		args = append(args, "-z") // lazy unmount
-	}
-	args = append(args, path)
-
-	cmd := exec.Command("fusermount", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to unmount: %s: %w", strings.TrimSpace(string(output)), err)
-	}
 	return nil
 }
 

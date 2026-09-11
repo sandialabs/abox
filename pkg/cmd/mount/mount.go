@@ -7,11 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/sandialabs/abox/internal/instance"
 	"github.com/sandialabs/abox/internal/logging"
+	"github.com/sandialabs/abox/internal/mountutil"
+	"github.com/sandialabs/abox/internal/procutil"
 	"github.com/sandialabs/abox/internal/sshutil"
 	"github.com/sandialabs/abox/pkg/cmd/completion"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
@@ -89,7 +92,7 @@ func parseInstanceSpec(spec string) (string, string) {
 func (o *Options) Run(instanceSpec, localPath string) error {
 	// Check if sshfs is installed
 	if _, err := exec.LookPath("sshfs"); err != nil {
-		return errors.New("sshfs not found; please install sshfs")
+		return errors.New(sshfsMissingHint())
 	}
 
 	instanceName, remotePath := parseInstanceSpec(instanceSpec)
@@ -138,7 +141,7 @@ func (o *Options) Run(instanceSpec, localPath string) error {
 	}
 
 	// Check if already mounted
-	if isMounted(absLocalPath) {
+	if mountutil.IsMounted(absLocalPath) {
 		return fmt.Errorf("path %q is already mounted", absLocalPath)
 	}
 
@@ -148,6 +151,11 @@ func (o *Options) Run(instanceSpec, localPath string) error {
 		sshutil.RemotePath(sshUser, ip, remotePath),
 		absLocalPath,
 		"-o", "IdentityFile=" + paths.SSHKey,
+		"-o", "IdentitiesOnly=yes",
+		// Pre-8.5 keyword name; a permanent alias on newer OpenSSH. See the
+		// sshOptPubkeyAlgos comment in internal/sshutil for why not the
+		// PubkeyAcceptedAlgorithms spelling.
+		"-o", "PubkeyAcceptedKeyTypes=+ssh-ed25519",
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "UserKnownHostsFile=" + paths.KnownHosts,
 		"-o", "LogLevel=ERROR",
@@ -160,13 +168,8 @@ func (o *Options) Run(instanceSpec, localPath string) error {
 		sshfsArgs = append(sshfsArgs, "-o", "allow_other")
 	}
 
-	// Execute sshfs
-	cmd := exec.Command("sshfs", sshfsArgs...)
-	cmd.Stdout = o.Factory.IO.Out
-	cmd.Stderr = o.Factory.IO.ErrOut
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to mount via sshfs: %w", err)
+	if err := runSSHFS(paths.LogsDir, absLocalPath, sshfsArgs); err != nil {
+		return err
 	}
 
 	// Record mount in mounts.json
@@ -182,10 +185,80 @@ func (o *Options) Run(instanceSpec, localPath string) error {
 	return nil
 }
 
-// isMounted checks if a path is a mount point.
-func isMounted(path string) bool {
-	cmd := exec.Command("mountpoint", "-q", path)
-	return cmd.Run() == nil
+// runSSHFS launches sshfs detached, sending its output to logsDir/mount.log, and
+// waits for the mount at localPath to appear. It returns nil once mounted, or an
+// error if sshfs fails or the mount never materializes within the timeout.
+//
+// sshfs must run detached rather than via a blocking Run(): on macOS macFUSE's
+// sshfs stays in the FOREGROUND for the life of the mount, so Run() would never
+// return; on Linux sshfs self-daemonizes. Wiring its output to the caller's stdio
+// would also let a foreground sshfs hold the caller's pipes open, hanging anything
+// reading them (this is what deadlocked the e2e harness). mountutil.IsMounted is
+// therefore the source of truth: on Linux the foreground helper exits ~immediately
+// after forking the real daemon, so an early clean exit is NOT a failure — only a
+// non-zero exit or the mount never appearing is.
+func runSSHFS(logsDir, localPath string, sshfsArgs []string) error {
+	if err := os.MkdirAll(logsDir, 0o700); err != nil {
+		return fmt.Errorf("failed to create log directory: %w", err)
+	}
+	logPath := filepath.Join(logsDir, "mount.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("failed to open mount log: %w", err)
+	}
+	defer logFile.Close()
+
+	cmd := exec.Command("sshfs", sshfsArgs...)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	procutil.Detach(cmd) // own process group so the daemon outlives this command
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start sshfs: %w", err)
+	}
+
+	// Reap the child so a foreground sshfs that exits early doesn't linger as a
+	// zombie, and so we can distinguish an sshfs error from a clean daemonize.
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+
+	const (
+		mountTimeout  = 10 * time.Second
+		mountInterval = 100 * time.Millisecond
+	)
+	deadline := time.Now().Add(mountTimeout)
+	var exitErr error
+	sshfsExited := false
+	for !mountutil.IsMounted(localPath) {
+		if sshfsExited && exitErr != nil {
+			// sshfs is gone with an error and nothing is mounted -> real failure.
+			return fmt.Errorf("sshfs failed to mount (see %s): %w", logPath, exitErr)
+		}
+		if time.Now().After(deadline) {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			return fmt.Errorf("sshfs did not mount %s within %s; see %s", localPath, mountTimeout, logPath)
+		}
+		select {
+		case werr := <-exited:
+			exitErr = werr
+			sshfsExited = true
+		case <-time.After(mountInterval):
+		}
+	}
+	return nil
+}
+
+// sshfsMissingHint returns a platform-appropriate error message when the sshfs
+// binary is not found. On macOS we recommend fuse-t, a kext-less FUSE
+// implementation (no System Extension approval or reboot), over macFUSE.
+func sshfsMissingHint() string {
+	if runtime.GOOS == "darwin" {
+		return "sshfs not found; install the kext-less fuse-t (recommended over macFUSE): " +
+			"brew tap macos-fuse-t/homebrew-cask && brew install fuse-t fuse-t-sshfs"
+	}
+	return "sshfs not found; please install sshfs (see 'abox check-deps')"
 }
 
 // getMountsFilePath returns the path to mounts.json for an instance.

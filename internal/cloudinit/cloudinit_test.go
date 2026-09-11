@@ -86,6 +86,9 @@ func TestGenerateUserData(t *testing.T) {
 func TestGenerateNetworkConfig(t *testing.T) {
 	cfg := &Config{
 		MACAddress: "52:54:00:ab:cd:ef",
+		IPAddress:  "192.168.128.10",
+		Gateway:    "192.168.128.1",
+		Prefix:     24,
 	}
 
 	data, err := GenerateNetworkConfig(cfg)
@@ -110,8 +113,30 @@ func TestGenerateNetworkConfig(t *testing.T) {
 	if !strings.Contains(content, `mac_address: "52:54:00:ab:cd:ef"`) {
 		t.Errorf("network-config missing mac_address, got:\n%s", content)
 	}
-	if !strings.Contains(content, "type: dhcp") {
-		t.Errorf("network-config missing dhcp subnet, got:\n%s", content)
+
+	// Static addressing (no DHCP): address/gateway/dns_nameservers.
+	if strings.Contains(content, "type: dhcp") {
+		t.Errorf("network-config must NOT use DHCP, got:\n%s", content)
+	}
+	if !strings.Contains(content, "type: static") {
+		t.Errorf("network-config missing type: static, got:\n%s", content)
+	}
+	if !strings.Contains(content, "address: 192.168.128.10/24") {
+		t.Errorf("network-config missing static address, got:\n%s", content)
+	}
+	if !strings.Contains(content, "gateway: 192.168.128.1") {
+		t.Errorf("network-config missing gateway, got:\n%s", content)
+	}
+	if !strings.Contains(content, "dns_nameservers:") {
+		t.Errorf("network-config missing dns_nameservers, got:\n%s", content)
+	}
+}
+
+func TestGenerateNetworkConfigMissingStaticFields(t *testing.T) {
+	// A MAC without a static address/gateway/prefix is a misconfiguration.
+	cfg := &Config{MACAddress: "52:54:00:ab:cd:ef"}
+	if _, err := GenerateNetworkConfig(cfg); err == nil {
+		t.Error("expected error when static IP fields are missing")
 	}
 }
 

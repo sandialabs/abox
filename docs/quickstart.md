@@ -176,6 +176,23 @@ This creates, starts, provisions, and secures the instance in one command.
 
 See [abox.yaml Reference](abox-yaml.md) for all configuration options.
 
+### Multiple Instances from One abox.yaml
+
+Use `--suffix` to run the same `abox.yaml` as several independent instances (for
+example, one per feature branch or task). The suffix is appended to the `name`
+from `abox.yaml`, and each instance gets its own network, disk, and filters:
+
+```bash
+abox up --suffix 1      # instance "<name>-1"
+abox up --suffix 2      # instance "<name>-2"
+abox list               # shows <name>-1 and <name>-2
+
+abox down --suffix 1            # stop just <name>-1
+abox down --suffix 2 --remove   # stop and delete <name>-2
+```
+
+Pass the same `--suffix` to `abox down` to target the matching instance.
+
 ## Common Workflows
 
 ### Setup Mode
@@ -250,6 +267,8 @@ abox base remove ubuntu-24.04
 abox prune -n          # Preview what would be removed
 abox prune -f          # Actually remove
 ```
+
+To build your own base image with tools pre-installed, see [Base Images](base-images.md).
 
 ### Instance Configuration
 

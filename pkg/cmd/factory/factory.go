@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -14,7 +16,9 @@ import (
 	"github.com/sandialabs/abox/internal/backend"
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/dnsfilter"
+	"github.com/sandialabs/abox/internal/firewall"
 	"github.com/sandialabs/abox/internal/iostreams"
+	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/rpc"
 	"github.com/sandialabs/abox/pkg/cmdutil"
 )
@@ -39,6 +43,11 @@ const (
 	// EnvPrivilegeToken is the environment variable for the external helper auth token.
 	// Required when EnvPrivilegeSocket is set.
 	EnvPrivilegeToken = "ABOX_PRIVILEGE_TOKEN"
+
+	// EnvBackend explicitly selects a VM backend by name (e.g. "vmware"),
+	// bypassing auto-detection. Required to select an experimental backend, which
+	// auto-detection never chooses silently.
+	EnvBackend = "ABOX_BACKEND"
 )
 
 // Factory provides shared dependencies for all commands.
@@ -55,12 +64,38 @@ type Factory struct {
 	// Config loads an instance configuration by name.
 	Config func(name string) (*config.Instance, *config.Paths, error)
 
-	mu               sync.Mutex
-	dnsClients       map[string]*dnsfilter.Client // keyed by instance name
-	httpClients      map[string]*httpClient       // keyed by instance name
-	privilegeHelper  *PrivilegeHelper
-	privilegeLogPath string                     // set by PrivilegeClientFor before helper starts
-	backends         map[string]backend.Backend // cached backends by name
+	mu                     sync.Mutex
+	dnsClients             map[string]*dnsfilter.Client // keyed by instance name
+	httpClients            map[string]*httpClient       // keyed by instance name
+	privilegeHelper        *PrivilegeHelper
+	privilegeLogPath       string                     // set by EgressClientFor before helper starts
+	backends               map[string]backend.Backend // cached backends by name
+	noInteractivePrivilege bool                       // when true, never launch an interactive sudo/pkexec prompt
+}
+
+// SetNonInteractivePrivilege controls whether acquiring the privileged helper may
+// launch an interactive sudo/pkexec prompt. Teardown/diagnostic commands (stop,
+// doctor on a non-TTY) set this so they never block on a password: if only an
+// interactive escalation path is available, privilege acquisition fails and the
+// caller treats the host-side step as best-effort. The setuid helper, an
+// already-running helper, an external helper (ABOX_PRIVILEGE_SOCKET), and running
+// as root are all non-interactive and remain available.
+func (f *Factory) SetNonInteractivePrivilege(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.noInteractivePrivilege = v
+}
+
+// SetNonInteractivePrivilegeFromTTY enables non-interactive privilege acquisition
+// when there is no controlling terminal to prompt on (stdout is not a TTY, e.g.
+// CI/scripts/pipes), and leaves interactive escalation available otherwise. This
+// is the shared "no TTY to type a password on" decision used by the diagnostic
+// and teardown-from-TTY commands (doctor, down); a command that must ALWAYS be
+// best-effort regardless of TTY (stop) sets the flag unconditionally instead.
+func (f *Factory) SetNonInteractivePrivilegeFromTTY() {
+	if !f.IO.IsTerminal() {
+		f.SetNonInteractivePrivilege(true)
+	}
 }
 
 // httpClient wraps HTTP filter client connection
@@ -112,23 +147,146 @@ func (f *Factory) BackendFor(name string) (backend.Backend, error) {
 		if err != nil {
 			return nil, fmt.Errorf("backend %q not available: %w", inst.Backend, err)
 		}
+		warnIfExperimental(b.Name())
+		f.injectEgressProvider(b, name)
+		f.injectPfProvider(b, name)
+		f.injectStorageProvider(b, name)
 		f.backends[name] = b
 		return b, nil
 	}
 
-	// Instance doesn't exist or has no backend - auto-detect
-	b, err := backend.AutoDetect()
+	// Instance doesn't exist or has no backend - resolve (explicit ABOX_BACKEND or
+	// auto-detect).
+	b, err := resolveBackend()
 	if err != nil {
 		return nil, err
 	}
+	f.injectEgressProvider(b, name)
+	f.injectPfProvider(b, name)
+	f.injectStorageProvider(b, name)
 	f.backends[name] = b
 	return b, nil
 }
 
-// AutoDetectBackend returns the auto-detected backend for new instances.
-// This is used when creating new instances to determine which backend to use.
-func (f *Factory) AutoDetectBackend() (backend.Backend, error) {
+// resolveBackend selects the backend to use: the one named by ABOX_BACKEND when
+// set (the only way to reach an experimental backend), otherwise auto-detection
+// (which never selects an experimental backend silently). A warning is emitted
+// when the resolved backend is experimental.
+func resolveBackend() (backend.Backend, error) {
+	if name := os.Getenv(EnvBackend); name != "" {
+		b, err := backend.Get(name)
+		if err != nil {
+			return nil, fmt.Errorf("backend %q (from %s) not available: %w", name, EnvBackend, err)
+		}
+		warnIfExperimental(b.Name())
+		return b, nil
+	}
 	return backend.AutoDetect()
+}
+
+// warnIfExperimental emits a one-line warning when an experimental backend is in
+// use, so the unvalidated-on-real-hardware status is visible at the point of use.
+func warnIfExperimental(name string) {
+	if backend.IsExperimental(name) {
+		logging.Warn("using experimental backend; not validated on real hardware",
+			"backend", name)
+	}
+}
+
+// injectEgressProvider wires the privileged egress enforcer provider into a
+// backend that supports it (backend.EgressProviderSetter), so its
+// EgressController can install host-side rules (iptables DNS REDIRECT + INPUT
+// accepts) on demand. The provider is a closure invoked lazily, only when
+// enforcement is actually needed (Define/Remove), so read-only paths never
+// trigger privilege escalation. Passing a non-empty name routes helper logs to
+// that instance's log file; an empty name (auto-detected, instance-less
+// backends) uses the default helper log.
+func (f *Factory) injectEgressProvider(b backend.Backend, name string) {
+	setter, ok := b.(backend.EgressProviderSetter)
+	if !ok {
+		return
+	}
+	setter.SetEgressProvider(func() (backend.EgressEnforcer, error) {
+		var (
+			c   rpc.EgressClient
+			err error
+		)
+		if name != "" {
+			c, err = f.EgressClientFor(name)
+		} else {
+			c, err = f.EgressClient()
+		}
+		if err != nil {
+			return nil, err
+		}
+		return firewall.NewEgressEnforcer(c), nil
+	})
+}
+
+// injectPfProvider wires the privileged pfctl provider into a backend that
+// supports it (backend.PfProviderSetter), so its EgressController can enable pf
+// and load per-instance anchors on demand. Parallel to injectEgressProvider: the
+// provider is a closure invoked lazily (only when enforcement is needed), so
+// read-only paths never trigger privilege escalation. A backend implements at
+// most one of the two setters, so calling both injectors is safe — the
+// non-matching one early-returns.
+func (f *Factory) injectPfProvider(b backend.Backend, name string) {
+	setter, ok := b.(backend.PfProviderSetter)
+	if !ok {
+		return
+	}
+	setter.SetPfProvider(func() (backend.PfEnforcer, error) {
+		c, err := f.PfClientFor(name)
+		if err != nil {
+			return nil, err
+		}
+		return firewall.NewPfClient(c), nil
+	})
+}
+
+// injectStorageProvider wires the privileged storage enforcer provider into a
+// backend that supports it (backend.StorageProviderSetter), so its disk manager
+// can provision the per-user storage root on demand. Parallel to
+// injectEgressProvider (and sharing the same Egress helper client): the provider
+// is a closure invoked lazily, only when a disk op actually needs the root
+// prepared (create/import), so read-only paths never trigger privilege
+// escalation.
+func (f *Factory) injectStorageProvider(b backend.Backend, name string) {
+	setter, ok := b.(backend.StorageProviderSetter)
+	if !ok {
+		return
+	}
+	setter.SetStorageProvider(func() (backend.StorageEnforcer, error) {
+		var (
+			c   rpc.EgressClient
+			err error
+		)
+		if name != "" {
+			c, err = f.EgressClientFor(name)
+		} else {
+			c, err = f.EgressClient()
+		}
+		if err != nil {
+			return nil, err
+		}
+		return firewall.NewStorageEnforcer(c), nil
+	})
+}
+
+// AutoDetectBackend returns the backend for new instances: the one selected by
+// ABOX_BACKEND when set, otherwise the auto-detected one (auto-detection never
+// selects an experimental backend). The egress enforcer provider is injected
+// (instance-less) so the returned backend is safe to use for egress operations
+// should a caller need to.
+func (f *Factory) AutoDetectBackend() (backend.Backend, error) {
+	b, err := resolveBackend()
+	if err != nil {
+		return nil, err
+	}
+	f.injectEgressProvider(b, "")
+	f.injectPfProvider(b, "")
+	f.injectStorageProvider(b, "")
+	return b, nil
 }
 
 // ensureDNSConnection returns a cached DNS filter client connection,
@@ -287,8 +445,8 @@ func (f *Factory) WithHTTPAllowlistClient(name string, fn func(ctx context.Conte
 	return fn(ctx, client)
 }
 
-// PrivilegeClient returns the privilege helper client, starting helper if needed.
-func (f *Factory) PrivilegeClient() (rpc.PrivilegeClient, error) {
+// EgressClient returns the privileged egress helper client, starting the helper if needed.
+func (f *Factory) EgressClient() (rpc.EgressClient, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -310,18 +468,14 @@ func (f *Factory) PrivilegeClient() (rpc.PrivilegeClient, error) {
 		return helper.client, nil
 	}
 
-	// Determine socket directory: prefer XDG_RUNTIME_DIR for security
-	// XDG_RUNTIME_DIR is user-private (/run/user/<uid>), unlike /tmp which is world-writable
-	socketDir := os.Getenv("XDG_RUNTIME_DIR")
-	if socketDir == "" {
-		socketDir = fmt.Sprintf("/run/user/%d", os.Getuid())
-	}
-	// Refuse to continue if no secure runtime directory exists
-	if _, err := os.Stat(socketDir); os.IsNotExist(err) { //nolint:gosec // checking directory existence, not opening untrusted path
-		return nil, fmt.Errorf(
-			"no secure runtime directory for privilege helper socket; "+
-				"XDG_RUNTIME_DIR is unset and %s does not exist",
-			socketDir)
+	// Determine socket directory via the platform's secure runtime dir seam.
+	// On linux this is XDG_RUNTIME_DIR or /run/user/<uid>; on darwin it is
+	// $TMPDIR. The seam asserts the directory exists, is owned by the invoking
+	// user, and is not group/other-writable (refusing a world-writable /tmp),
+	// so the helper socket cannot be pre-created or hijacked by another user.
+	socketDir, err := config.SecureRuntimeDir()
+	if err != nil {
+		return nil, fmt.Errorf("no secure runtime directory for privilege helper socket: %w", err)
 	}
 
 	// Generate random socket path to allow multiple concurrent abox instances
@@ -329,7 +483,9 @@ func (f *Factory) PrivilegeClient() (rpc.PrivilegeClient, error) {
 	if _, err := rand.Read(randomBytes); err != nil {
 		return nil, fmt.Errorf("failed to generate random socket path: %w", err)
 	}
-	socketPath := fmt.Sprintf("%s/abox-privilege-%s.sock", socketDir, hex.EncodeToString(randomBytes))
+	// filepath.Join (not Sprintf) so the path stays clean even if socketDir ever
+	// carries a trailing separator; the helper rejects a non-clean --socket.
+	socketPath := filepath.Join(socketDir, fmt.Sprintf("abox-privilege-%s.sock", hex.EncodeToString(randomBytes)))
 
 	// Generate auth token
 	tokenBytes := make([]byte, 32)
@@ -339,10 +495,11 @@ func (f *Factory) PrivilegeClient() (rpc.PrivilegeClient, error) {
 	token := hex.EncodeToString(tokenBytes)
 
 	helper := &PrivilegeHelper{
-		socketPath: socketPath,
-		token:      token,
-		logPath:    f.privilegeLogPath,
-		errOut:     f.IO.ErrOut,
+		socketPath:    socketPath,
+		token:         token,
+		logPath:       f.privilegeLogPath,
+		errOut:        f.IO.ErrOut,
+		noInteractive: f.noInteractivePrivilege,
 	}
 	if err := helper.start(); err != nil {
 		return nil, err
@@ -352,10 +509,10 @@ func (f *Factory) PrivilegeClient() (rpc.PrivilegeClient, error) {
 	return helper.client, nil
 }
 
-// PrivilegeClientFor returns a privilege client, logging to the instance's log file.
+// EgressClientFor returns a privileged egress client, logging to the instance's log file.
 // On first call, the helper is started with logging to the given instance.
 // Subsequent calls reuse the existing helper (log path from first call).
-func (f *Factory) PrivilegeClientFor(name string) (rpc.PrivilegeClient, error) {
+func (f *Factory) EgressClientFor(name string) (rpc.EgressClient, error) {
 	// Get instance paths (works for existing or new instances)
 	paths, err := config.GetPaths(name)
 	if err != nil {
@@ -368,7 +525,41 @@ func (f *Factory) PrivilegeClientFor(name string) (rpc.PrivilegeClient, error) {
 	}
 	f.mu.Unlock()
 
-	return f.PrivilegeClient()
+	return f.EgressClient()
+}
+
+// PfClientFor returns a token-wrapped privileged pfctl client for the macOS
+// egress controller, spawning/reusing the SAME privilege helper as EgressClientFor
+// (on darwin the helper registers the Pf service). It differs from EgressClientFor
+// only in the client constructor: it wraps the shared helper connection with
+// NewPfClientWithToken (every Pf method, including Ping, requires the auth token).
+func (f *Factory) PfClientFor(name string) (rpc.PfClient, error) {
+	// Reuse the helper-spawn/connection machinery: EgressClientFor ensures the
+	// helper is started (routing its logs to this instance) and cached in
+	// f.privilegeHelper. We then build a Pf client over the SAME connection.
+	if _, err := f.EgressClientFor(name); err != nil {
+		return nil, err
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.privilegeHelper == nil || f.privilegeHelper.conn == nil {
+		return nil, errors.New("privilege helper connection unavailable for pf client")
+	}
+	return rpc.NewPfClientWithToken(f.privilegeHelper.conn, f.privilegeHelper.token), nil
+}
+
+// StorageEnforcerFor returns a privileged storage enforcer for provisioning the
+// caller's per-user disk storage root, routing helper logs to the named
+// instance. It reuses the SAME Egress helper client as the disk manager's
+// injected provider (the storage-root step shares the single privilege helper);
+// `abox migrate` uses it to provision + regroup the root after relocating files.
+func (f *Factory) StorageEnforcerFor(name string) (backend.StorageEnforcer, error) {
+	c, err := f.EgressClientFor(name)
+	if err != nil {
+		return nil, err
+	}
+	return firewall.NewStorageEnforcer(c), nil
 }
 
 // Close closes all cached clients and should be called on shutdown.

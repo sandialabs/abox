@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"syscall"
 
 	"github.com/sandialabs/abox/internal/instance"
 	"github.com/sandialabs/abox/internal/logging"
+	"github.com/sandialabs/abox/internal/procutil"
 	"github.com/sandialabs/abox/internal/sshutil"
 	"github.com/sandialabs/abox/pkg/cmd/completion"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
@@ -88,9 +88,13 @@ func runSSH(f *factory.Factory, args []string) error {
 		return fmt.Errorf("ssh not found: %w", err)
 	}
 
-	// Log SSH access before exec replaces this process
+	// Log SSH access before exec replaces this process. procutil.Exec is
+	// syscall.Exec (it replaces the process image), so the deferred CloseLogFile in
+	// main never runs — flush the audit sink here or the macOS logger-pipe line is
+	// lost with the process image.
 	logging.AuditInstance(name, logging.ActionSSH, "ip", ip)
+	logging.CloseLogFile()
 
 	// Replace current process with ssh
-	return syscall.Exec(sshBin, append([]string{"ssh"}, sshArgs...), os.Environ())
+	return procutil.Exec(sshBin, append([]string{"ssh"}, sshArgs...), os.Environ())
 }

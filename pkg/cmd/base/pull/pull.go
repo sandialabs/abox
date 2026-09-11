@@ -11,13 +11,14 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/images"
 	"github.com/sandialabs/abox/internal/logging"
+	"github.com/sandialabs/abox/internal/qemuimg"
 	"github.com/sandialabs/abox/internal/tui"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 	"github.com/sandialabs/abox/pkg/cmdutil"
@@ -105,7 +106,7 @@ func pickImage(ctx context.Context, w io.Writer, prompter cmdutil.Prompter) (*im
 
 		for _, img := range providerImages {
 			status := ""
-			imagePath := filepath.Join(paths.UserBaseImages, img.Name+".qcow2")
+			imagePath := filepath.Join(paths.UserBaseImages, config.UserBaseImageName(img.Name))
 			if _, err := os.Stat(imagePath); err == nil {
 				status = "[downloaded]"
 			}
@@ -175,7 +176,7 @@ func runPullImage(ctx context.Context, f *factory.Factory, img *images.ImageInfo
 		return err
 	}
 
-	destPath := filepath.Join(paths.UserBaseImages, img.Name+".qcow2")
+	destPath := filepath.Join(paths.UserBaseImages, config.UserBaseImageName(img.Name))
 
 	// Check if already exists
 	if _, err := os.Stat(destPath); err == nil {
@@ -248,7 +249,7 @@ func runPullImageTUI(ctx context.Context, f *factory.Factory, img *images.ImageI
 	steps := []tui.Step{
 		{Name: "Download image"},
 		{Name: "Verify checksum"},
-		{Name: "Convert to qcow2"},
+		{Name: convertStepName()},
 	}
 
 	done := tui.DoneConfig{
@@ -409,14 +410,52 @@ func verifyChecksum(w io.Writer, img *images.ImageInfo, computedHash string) err
 	return nil
 }
 
-// convertImage converts the downloaded image to qcow2 format.
+// convertStepName returns the user-facing convert-phase step name, matching the
+// target base-image format for the current host (see convertImage).
+func convertStepName() string {
+	if runtime.GOOS == "darwin" {
+		return "Convert to raw"
+	}
+	return "Convert to qcow2"
+}
+
+// convertImage converts the downloaded qcow2 image to the host's base-image
+// format (see config.UserBaseImageExt).
+//
+// On macOS the target is raw: vfkit (Apple Virtualization.framework) cannot read
+// qcow2, so we transform the upstream qcow2 cloud image once here rather than at
+// every `abox create`. A conversion failure removes any partial output so the
+// existence check in runPullImage does not block a retry.
+//
+// On Linux the target is qcow2; the qemu-img convert pass normalizes the image
+// (strips backing-file references, unifies the qcow2 version), falling back to a
+// plain rename if it fails (the download may already be a usable qcow2).
 func convertImage(w io.Writer, src, dst string) error {
+	// The downloaded image is untrusted (remote): reject any external reference — a
+	// backing file or a qcow2 external data file — before qemu-img reads THROUGH it
+	// into the stored base image (a data-file pointing at an absolute host path would
+	// otherwise be folded into every instance built from this base).
+	if err := qemuimg.RejectExternalReferences(context.Background(), src,
+		"a downloaded base image must be self-contained",
+		"the upstream image is malformed or not trustworthy; do not import it",
+		qemuimg.ExternalRefOpts{}); err != nil {
+		return err
+	}
+
+	if runtime.GOOS == "darwin" {
+		fmt.Fprintln(w, "Converting to raw format...")
+		if err := qemuimg.ConvertToRaw(context.Background(), src, "qcow2", dst); err != nil {
+			os.Remove(dst)
+			return fmt.Errorf("failed to convert image to raw: %w", err)
+		}
+		return nil
+	}
+
 	fmt.Fprintln(w, "Converting to qcow2 format...")
-	convertCmd := exec.Command("qemu-img", "convert", "-f", "qcow2", "-O", "qcow2", src, dst)
-	if output, err := convertCmd.CombinedOutput(); err != nil {
+	if err := qemuimg.Convert(context.Background(), src, dst, false); err != nil {
 		// Try just renaming if conversion fails (might already be qcow2)
 		if renameErr := os.Rename(src, dst); renameErr != nil {
-			return fmt.Errorf("failed to convert image: %s: %w", string(output), err)
+			return fmt.Errorf("failed to convert image: %w", err)
 		}
 	}
 	return nil

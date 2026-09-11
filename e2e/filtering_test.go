@@ -14,7 +14,7 @@ import (
 
 // TestAllowlistManagement tests adding, removing, and listing allowlist entries.
 func TestAllowlistManagement(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -28,6 +28,7 @@ func TestAllowlistManagement(t *testing.T) {
 	}
 
 	t.Run("add-domain", func(t *testing.T) {
+		inst := inst.sub(t)
 		inst.allowlistAdd("github.com")
 
 		domains := inst.allowlistList()
@@ -44,6 +45,7 @@ func TestAllowlistManagement(t *testing.T) {
 	})
 
 	t.Run("add-wildcard", func(t *testing.T) {
+		inst := inst.sub(t)
 		inst.allowlistAdd("*.example.com")
 
 		domains := inst.allowlistList()
@@ -60,6 +62,7 @@ func TestAllowlistManagement(t *testing.T) {
 	})
 
 	t.Run("remove-domain", func(t *testing.T) {
+		inst := inst.sub(t)
 		inst.allowlistRemove("github.com")
 
 		domains := inst.allowlistList()
@@ -81,7 +84,7 @@ func TestAllowlistManagement(t *testing.T) {
 
 // TestDNSFilterStatus tests the DNS filter status command.
 func TestDNSFilterStatus(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -110,7 +113,7 @@ func TestDNSFilterStatus(t *testing.T) {
 
 // TestHTTPFilterStatus tests the HTTP filter status command.
 func TestHTTPFilterStatus(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -143,7 +146,7 @@ func TestHTTPFilterStatus(t *testing.T) {
 // existence and reported "already running", leaving the user with no clean
 // recovery path.
 func TestFilterCrashRecovery(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -199,7 +202,7 @@ func TestFilterCrashRecovery(t *testing.T) {
 
 // TestNetFilterCommand tests the unified filter mode command (abox net filter).
 func TestNetFilterCommand(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -250,7 +253,7 @@ func TestNetFilterCommand(t *testing.T) {
 
 // TestAllowlistReload tests reloading the allowlist.
 func TestAllowlistReload(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -278,7 +281,7 @@ func TestAllowlistReload(t *testing.T) {
 
 // TestDNSBlocking tests that DNS queries to non-allowlisted domains are blocked.
 func TestDNSBlocking(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -292,7 +295,6 @@ func TestDNSBlocking(t *testing.T) {
 	}
 
 	if !inst.waitForSSH(120 * time.Second) {
-		inst.dumpDiagnostics()
 		t.Fatal("SSH did not become available")
 	}
 
@@ -332,7 +334,7 @@ func TestDNSBlocking(t *testing.T) {
 
 // TestNetProfile tests the profile capture command (abox net profile).
 func TestNetProfile(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -379,7 +381,7 @@ func TestNetProfile(t *testing.T) {
 
 // TestPassiveModeCaptures tests that passive mode captures domain requests.
 func TestPassiveModeCaptures(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -393,7 +395,6 @@ func TestPassiveModeCaptures(t *testing.T) {
 	}
 
 	if !inst.waitForSSH(120 * time.Second) {
-		inst.dumpDiagnostics()
 		t.Fatal("SSH did not become available")
 	}
 
@@ -425,7 +426,7 @@ func TestPassiveModeCaptures(t *testing.T) {
 // TestAllowlistAffectsTraffic tests that adding and removing domains from the
 // allowlist immediately affects DNS resolution from inside the VM.
 func TestAllowlistAffectsTraffic(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -439,7 +440,6 @@ func TestAllowlistAffectsTraffic(t *testing.T) {
 	}
 
 	if !inst.waitForSSH(120 * time.Second) {
-		inst.dumpDiagnostics()
 		t.Fatal("SSH did not become available")
 	}
 
@@ -447,6 +447,7 @@ func TestAllowlistAffectsTraffic(t *testing.T) {
 	inst.setFilterMode("active")
 
 	t.Run("add-allows-resolution", func(t *testing.T) {
+		inst := inst.sub(t)
 		// Add example.com and verify it resolves from the VM
 		inst.allowlistAdd("example.com")
 

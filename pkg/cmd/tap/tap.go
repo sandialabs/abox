@@ -54,11 +54,7 @@ By default, SSH management traffic between the host and VM (used by
 "abox ssh") is excluded from the capture. Use --include-ssh to include it.
 
 When stdout is a terminal, tcpdump shows decoded packets interactively.
-When stdout is piped, raw PCAP binary is written for tool consumption.
-
-Requires tcpdump to be installed (sudo apt install tcpdump). On most
-Linux distributions, tcpdump has the necessary capture permissions by
-default. If not, see the error message for remediation steps.`,
+When stdout is piped, raw PCAP binary is written for tool consumption.` + tcpdumpInstallHint,
 		Example: `  abox tap dev                                 # Interactive decoded output
   abox tap dev -o capture.pcap                 # Write PCAP to file
   abox tap dev | wireshark -k -i -             # Pipe to Wireshark
@@ -120,12 +116,20 @@ func runTap(opts *Options, extraArgs []string) error {
 		return err
 	}
 
+	// Resolve the host capture interface. On Linux this is the instance's
+	// bridge; on macOS the logical inst.Bridge is not a host interface, so the
+	// real vmnet bridge (bridgeN) recorded in BackendConfig is used instead.
+	captureIface, err := resolveCaptureInterface(inst)
+	if err != nil {
+		return err
+	}
+
 	// Find tcpdump
 	tcpdumpBin, err := exec.LookPath("tcpdump")
 	if err != nil {
 		return &errhint.ErrHint{
 			Err:  errors.New("tcpdump not found"),
-			Hint: "Install tcpdump: sudo apt install tcpdump",
+			Hint: tcpdumpNotFoundHint,
 		}
 	}
 
@@ -148,11 +152,11 @@ func runTap(opts *Options, extraArgs []string) error {
 	}()
 
 	// Build tcpdump arguments
-	args := buildTcpdumpArgs(opts, f, inst, extraArgs)
+	args := buildTcpdumpArgs(opts, f, inst, captureIface, extraArgs)
 
-	printCaptureInfo(opts, inst, paths)
+	printCaptureInfo(opts, inst, captureIface, paths)
 
-	logging.AuditInstance(name, logging.ActionTap, "bridge", inst.Bridge)
+	logging.AuditInstance(name, logging.ActionTap, "bridge", captureIface)
 
 	return runTcpdump(tcpdumpBin, args, opts, paths)
 }
@@ -169,8 +173,8 @@ func startKeyLogging(client *httpfilter.Client, keyLogPath string) error {
 }
 
 // buildTcpdumpArgs constructs the tcpdump command-line arguments.
-func buildTcpdumpArgs(opts *Options, f *factory.Factory, inst *config.Instance, extraArgs []string) []string {
-	args := []string{"-i", inst.Bridge, "-n"}
+func buildTcpdumpArgs(opts *Options, f *factory.Factory, inst *config.Instance, captureIface string, extraArgs []string) []string {
+	args := []string{"-i", captureIface, "-n"}
 
 	if opts.Output != "" {
 		args = append(args, "-w", opts.Output)
@@ -199,8 +203,8 @@ func buildTcpdumpArgs(opts *Options, f *factory.Factory, inst *config.Instance, 
 }
 
 // printCaptureInfo prints capture information to stderr.
-func printCaptureInfo(opts *Options, inst *config.Instance, paths *config.Paths) {
-	fmt.Fprintf(os.Stderr, "Capturing on bridge %s (Ctrl+C to stop)\n", inst.Bridge)
+func printCaptureInfo(opts *Options, inst *config.Instance, captureIface string, paths *config.Paths) {
+	fmt.Fprintf(os.Stderr, "Capturing on bridge %s (Ctrl+C to stop)\n", captureIface)
 	fmt.Fprintf(os.Stderr, "TLS key log: %s\n", paths.KeyLog)
 	if opts.Output != "" {
 		fmt.Fprintf(os.Stderr, "PCAP output: %s\n", opts.Output)
@@ -221,7 +225,7 @@ func runTcpdump(tcpdumpBin string, args []string, opts *Options, paths *config.P
 		if err != nil {
 			return &errhint.ErrHint{
 				Err:  errors.New("tcpdump requires capture privileges"),
-				Hint: "Grant tcpdump capabilities:\n  sudo setcap cap_net_raw,cap_net_admin=eip " + tcpdumpBin,
+				Hint: privilegeFailureHint(tcpdumpBin),
 			}
 		}
 		cmd = exec.Command(tool, append([]string{tcpdumpBin}, args...)...)
@@ -236,17 +240,24 @@ func runTcpdump(tcpdumpBin string, args []string, opts *Options, paths *config.P
 		return fmt.Errorf("failed to start tcpdump: %w", err)
 	}
 
-	// Forward signals to tcpdump so it can print stats before exiting.
+	// Forward signals to tcpdump so it can print stats before exiting. The done
+	// channel gives the goroutine a second wake path so it always returns after
+	// tcpdump exits (on the clean path no signal ever arrives on sigCh).
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	done := make(chan struct{})
 	go func() {
-		sig := <-sigCh
-		signal.Stop(sigCh)
-		_ = cmd.Process.Signal(sig)
+		select {
+		case sig := <-sigCh:
+			signal.Stop(sigCh)
+			_ = cmd.Process.Signal(sig)
+		case <-done:
+			signal.Stop(sigCh)
+		}
 	}()
 
 	err := cmd.Wait()
-	signal.Stop(sigCh)
+	close(done)
 
 	// Print decryption hint after capture
 	if opts.Output != "" {
@@ -278,15 +289,6 @@ func handleTcpdumpExit(err error, escalated bool, tcpdumpBin string) error {
 	return fmt.Errorf("tcpdump exited: %w", err)
 }
 
-// hintForTcpdumpError returns a remediation hint for common tcpdump failures.
-func hintForTcpdumpError(tcpdumpBin string) string {
-	var hints []string
-	hints = append(hints, "This may be a permission issue. Try:")
-	hints = append(hints, "  sudo setcap cap_net_raw,cap_net_admin=eip "+tcpdumpBin)
-	hints = append(hints, "If using a BPF filter, check the filter syntax.")
-	return strings.Join(hints, "\n")
-}
-
 // buildBPFFilter constructs the effective BPF filter expression.
 // By default, SSH management traffic (host <-> gateway on port 22) is excluded
 // to reduce noise from abox ssh sessions. The exclusion is skipped when
@@ -303,17 +305,4 @@ func buildBPFFilter(userFilter, gateway string, includeSSH bool) string {
 	}
 
 	return strings.Join(parts, " and ")
-}
-
-// needsEscalation checks whether tcpdump needs privilege escalation to capture.
-func needsEscalation(tcpdumpBin string) bool {
-	if os.Getuid() == 0 {
-		return false
-	}
-	out, err := exec.Command("getcap", tcpdumpBin).Output()
-	if err != nil {
-		return true
-	}
-	s := string(out)
-	return !strings.Contains(s, "cap_net_raw") || !strings.Contains(s, "cap_net_admin")
 }

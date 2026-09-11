@@ -25,8 +25,8 @@ import (
 	initcmd "github.com/sandialabs/abox/pkg/cmd/init"
 	"github.com/sandialabs/abox/pkg/cmd/list"
 	"github.com/sandialabs/abox/pkg/cmd/logs"
+	"github.com/sandialabs/abox/pkg/cmd/migrate"
 	"github.com/sandialabs/abox/pkg/cmd/monitor"
-	"github.com/sandialabs/abox/pkg/cmd/mount"
 	"github.com/sandialabs/abox/pkg/cmd/net"
 	"github.com/sandialabs/abox/pkg/cmd/overrides"
 	"github.com/sandialabs/abox/pkg/cmd/provision"
@@ -34,22 +34,22 @@ import (
 	"github.com/sandialabs/abox/pkg/cmd/remove"
 	"github.com/sandialabs/abox/pkg/cmd/restart"
 	"github.com/sandialabs/abox/pkg/cmd/scp"
+	"github.com/sandialabs/abox/pkg/cmd/secrets"
 	"github.com/sandialabs/abox/pkg/cmd/snapshot"
 	"github.com/sandialabs/abox/pkg/cmd/ssh"
 	"github.com/sandialabs/abox/pkg/cmd/start"
 	"github.com/sandialabs/abox/pkg/cmd/status"
 	"github.com/sandialabs/abox/pkg/cmd/stop"
 	"github.com/sandialabs/abox/pkg/cmd/tap"
-	"github.com/sandialabs/abox/pkg/cmd/unmount"
 	"github.com/sandialabs/abox/pkg/cmd/up"
 	versioncmd "github.com/sandialabs/abox/pkg/cmd/version"
 
 	"github.com/spf13/cobra"
-
-	// Register VM backends via blank imports.
-	// Backends self-register in their init() functions.
-	_ "github.com/sandialabs/abox/internal/backend/libvirt"
 )
+
+// VM backends self-register in their init() functions via blank imports, which
+// are platform-gated in backends_<goos>.go files. On platforms with no
+// backend, none registers and backend.AutoDetect returns ErrNoBackendAvailable.
 
 // Command group IDs for organizing help output.
 const (
@@ -210,10 +210,12 @@ func addSubcommands(cmd *cobra.Command, f *factory.Factory) {
 	addGroupedCommand(cmd, restart.NewCmdRestart(f, nil), groupLifecycle)
 	addGroupedCommand(cmd, status.NewCmdStatus(f, nil), groupLifecycle)
 	addGroupedCommand(cmd, list.NewCmdList(f, nil), groupLifecycle)
+	addGroupedCommand(cmd, migrate.NewCmdMigrate(f, nil), groupLifecycle)
 
 	// Security commands
 	addGroupedCommand(cmd, net.NewCmdNet(f), groupSecurity)
 	addGroupedCommand(cmd, allowlist.NewCmdAllowlist(f), groupSecurity)
+	addGroupedCommand(cmd, secrets.NewCmdSecrets(f), groupSecurity)
 	addGroupedCommand(cmd, dns.NewCmdDNS(f), groupSecurity)
 	addGroupedCommand(cmd, http.NewCmdHTTP(f), groupSecurity)
 	addGroupedCommand(cmd, monitor.NewCmdMonitor(f), groupSecurity)
@@ -226,9 +228,11 @@ func addSubcommands(cmd *cobra.Command, f *factory.Factory) {
 	addGroupedCommand(cmd, provision.NewCmdProvision(f, nil), groupAccess)
 	addGroupedCommand(cmd, forward.NewCmdForward(f), groupAccess)
 
-	// File transfer commands
-	addGroupedCommand(cmd, mount.NewCmdMount(f, nil), groupFiles)
-	addGroupedCommand(cmd, unmount.NewCmdUnmount(f, nil), groupFiles)
+	// File transfer commands.
+	// Platform-specific commands (mount/unmount on Linux; teardown-pf on
+	// macOS) are registered by registerPlatformCommands in
+	// root_platform_<goos>.go.
+	registerPlatformCommands(cmd, f)
 	addGroupedCommand(cmd, export.NewCmdExport(f, nil), groupFiles)
 	addGroupedCommand(cmd, importcmd.NewCmdImport(f, nil), groupFiles)
 

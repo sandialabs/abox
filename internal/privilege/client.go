@@ -3,7 +3,8 @@ package privilege
 import (
 	"fmt"
 	"os"
-	"syscall"
+
+	"github.com/sandialabs/abox/internal/sysutil"
 )
 
 // FindAboxBinary finds the abox binary securely.
@@ -26,13 +27,15 @@ func FindAboxBinary() (string, error) {
 			continue
 		}
 		// Defense-in-depth: verify root ownership for binaries that will
-		// be executed via sudo/pkexec with elevated privileges.
-		stat, ok := info.Sys().(*syscall.Stat_t)
+		// be executed via sudo/pkexec with elevated privileges. If ownership
+		// cannot be determined (unsupported platform), fail closed by skipping
+		// this candidate rather than trusting an unverifiable binary.
+		uidOwner, _, ok := sysutil.FileOwner(info)
 		if !ok {
 			continue
 		}
-		if stat.Uid != 0 {
-			return "", fmt.Errorf("abox binary %s not owned by root (uid %d)", loc, stat.Uid)
+		if uidOwner != 0 {
+			return "", fmt.Errorf("abox binary %s not owned by root (uid %d)", loc, uidOwner)
 		}
 		return loc, nil
 	}

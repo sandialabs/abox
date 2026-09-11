@@ -30,6 +30,32 @@ func TestNewCmdUp_FlagParsing(t *testing.T) {
 	}
 }
 
+func TestNewCmdUp_SuffixFlag(t *testing.T) {
+	for _, arg := range []string{"--suffix", "-s"} {
+		t.Run(arg, func(t *testing.T) {
+			ios, _, _, _ := iostreams.Test()
+			f := &factory.Factory{IO: ios, ColorScheme: cmdutil.NewColorScheme(false)}
+
+			var gotOpts *Options
+			cmd := NewCmdUp(f, func(o *Options) error {
+				gotOpts = o
+				return nil
+			})
+			cmd.SetArgs([]string{arg, "1"})
+
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if gotOpts == nil {
+				t.Fatal("runF was not called")
+			}
+			if gotOpts.Suffix != "1" {
+				t.Errorf("Suffix = %q, want %q", gotOpts.Suffix, "1")
+			}
+		})
+	}
+}
+
 func TestNewCmdUp_DefaultDir(t *testing.T) {
 	ios, _, _, _ := iostreams.Test()
 	f := &factory.Factory{IO: ios, ColorScheme: cmdutil.NewColorScheme(false)}

@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -147,7 +148,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateDiagramStateByID(CheckSSH, msg.sshResult)
 		m.phase = 4
 		// Pass data through the message
-		return m, runPhase4Cmd(m.instanceName, msg.inst, msg.paths, msg.vmIP, msg.sshWorks, msg.dnsResult, msg.httpResult)
+		return m, runPhase4Cmd(msg.inst, msg.paths, msg.vmIP, msg.sshWorks, msg.dnsResult, msg.httpResult)
 
 	case phase4ResultMsg:
 		m.results = append(m.results, msg.results...)
@@ -507,8 +508,8 @@ func skipOrRun(name string, sshWorks bool, fn func() CheckResult) CheckResult {
 	return fn()
 }
 
-// checkNWFilterExists checks whether the nwfilter resource exists for the instance.
-func checkNWFilterExists(instanceName string, inst *config.Instance) bool {
+// checkNWFilterExists checks whether the nwfilter is defined for the instance.
+func checkNWFilterExists(inst *config.Instance) bool {
 	be, err := backend.ForInstance(inst)
 	if err != nil {
 		be, _ = backend.AutoDetect()
@@ -516,15 +517,15 @@ func checkNWFilterExists(instanceName string, inst *config.Instance) bool {
 	if be == nil {
 		return false
 	}
-	names := be.ResourceNames(instanceName)
-	if ti := be.TrafficInterceptor(); ti != nil {
-		return ti.FilterExists(names.Filter)
+	if ec := be.EgressController(); ec != nil {
+		ok, _ := ec.Verify(context.Background(), inst)
+		return ok
 	}
 	return false
 }
 
 // runPhase4Cmd returns a command that runs phase 4 checks.
-func runPhase4Cmd(instanceName string, inst *config.Instance, paths *config.Paths, vmIP string, sshWorks bool, dnsResult, httpResult CheckResult) tea.Cmd {
+func runPhase4Cmd(inst *config.Instance, paths *config.Paths, vmIP string, sshWorks bool, dnsResult, httpResult CheckResult) tea.Cmd {
 	return func() tea.Msg {
 		user := inst.GetUser()
 		results := []CheckResult{
@@ -545,7 +546,7 @@ func runPhase4Cmd(instanceName string, inst *config.Instance, paths *config.Path
 		return phase4ResultMsg{
 			results:        results,
 			securityMode:   "filtered",
-			nwfilterExists: checkNWFilterExists(instanceName, inst),
+			nwfilterExists: checkNWFilterExists(inst),
 		}
 	}
 }

@@ -16,7 +16,7 @@ import (
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/instance"
 	"github.com/sandialabs/abox/internal/logging"
-	"github.com/sandialabs/abox/internal/rpc"
+	"github.com/sandialabs/abox/internal/profiling"
 	"github.com/sandialabs/abox/internal/tui"
 	"github.com/sandialabs/abox/internal/version"
 	"github.com/sandialabs/abox/pkg/cmd/completion"
@@ -25,6 +25,10 @@ import (
 
 	"github.com/spf13/cobra"
 )
+
+// ArchiveFormat is the manifest.Format value identifying an abox export archive.
+// Import validates against it, so it is shared rather than duplicated as a literal.
+const ArchiveFormat = "abox-archive"
 
 // Manifest represents the archive manifest.json structure.
 type Manifest struct {
@@ -104,6 +108,11 @@ func runExport(ctx context.Context, opts *Options, name, outputPath string) erro
 		return err
 	}
 
+	// Legacy root-owned storage can't be read unprivileged; require migration.
+	if err := instance.RequireMigrated(inst, paths); err != nil {
+		return err
+	}
+
 	// Get the backend for this instance
 	factory.Ensure(&opts.Factory)
 	be, err := opts.Factory.BackendFor(name)
@@ -132,27 +141,21 @@ func runExport(ctx context.Context, opts *Options, name, outputPath string) erro
 		}
 	}
 
-	// Get privilege client for backend disk operations
-	client, err := opts.Factory.PrivilegeClientFor(name)
-	if err != nil {
-		return fmt.Errorf("failed to get privilege client: %w", err)
-	}
-
 	if opts.Factory.IO.IsTerminal() {
-		return runExportTUI(ctx, opts, name, outputPath, inst, paths, be, client)
+		return runExportTUI(ctx, opts, name, outputPath, inst, paths, be)
 	}
-	return runExportPlain(ctx, opts, name, outputPath, inst, paths, be, client)
+	return runExportPlain(ctx, opts, name, outputPath, inst, paths, be)
 }
 
 // ---------------------------------------------------------------------------
 // Plain text path (non-TTY or pipe)
 // ---------------------------------------------------------------------------
 
-func runExportPlain(ctx context.Context, opts *Options, name, outputPath string, inst *config.Instance, paths *config.Paths, be backend.Backend, client rpc.PrivilegeClient) error {
+func runExportPlain(ctx context.Context, opts *Options, name, outputPath string, inst *config.Instance, paths *config.Paths, be backend.Backend) error {
 	w := opts.Factory.IO.Out
 	fmt.Fprintf(w, "Exporting instance %q...\n", name)
 
-	if err := doExport(ctx, w, opts, name, outputPath, inst, paths, be, client, tui.NoopNotifier{}); err != nil {
+	if err := doExport(ctx, w, opts, name, outputPath, inst, paths, be, tui.NoopNotifier{}); err != nil {
 		return err
 	}
 
@@ -164,7 +167,7 @@ func runExportPlain(ctx context.Context, opts *Options, name, outputPath string,
 // TUI path
 // ---------------------------------------------------------------------------
 
-func runExportTUI(ctx context.Context, opts *Options, name, outputPath string, inst *config.Instance, paths *config.Paths, be backend.Backend, client rpc.PrivilegeClient) error {
+func runExportTUI(ctx context.Context, opts *Options, name, outputPath string, inst *config.Instance, paths *config.Paths, be backend.Backend) error {
 	diskStep := "Flatten disk"
 	if opts.Snapshot {
 		diskStep = "Copy disk (snapshot)"
@@ -187,7 +190,7 @@ func runExportTUI(ctx context.Context, opts *Options, name, outputPath string, i
 		defer f.IO.RestoreOutput()
 		old := logging.StderrWriter().Swap(errOut)
 		defer logging.StderrWriter().Swap(old)
-		return doExport(ctx, out, opts, name, outputPath, inst, paths, be, client, notify)
+		return doExport(ctx, out, opts, name, outputPath, inst, paths, be, notify)
 	})
 	if err != nil {
 		return err
@@ -203,7 +206,7 @@ func runExportTUI(ctx context.Context, opts *Options, name, outputPath string, i
 // Unified work function
 // ---------------------------------------------------------------------------
 
-func doExport(ctx context.Context, w io.Writer, opts *Options, name, outputPath string, inst *config.Instance, paths *config.Paths, be backend.Backend, client rpc.PrivilegeClient, notify tui.PhaseNotifier) error {
+func doExport(ctx context.Context, w io.Writer, opts *Options, name, outputPath string, inst *config.Instance, paths *config.Paths, be backend.Backend, notify tui.PhaseNotifier) error {
 	// Phase 0: Prepare
 	notify.PhaseStart(0)
 
@@ -224,7 +227,10 @@ func doExport(ctx context.Context, w io.Writer, opts *Options, name, outputPath 
 		fmt.Fprintln(w, "Flattening disk (this may take a while)...")
 	}
 	diskPath := filepath.Join(tempDir, "disk.qcow2")
-	if err := be.Disk().Export(ctx, client, diskPath, paths, opts.Snapshot); err != nil {
+	diskTimer := profiling.Track("export:disk")
+	err = be.Disk().Export(ctx, diskPath, paths, opts.Snapshot)
+	diskTimer()
+	if err != nil {
 		notify.PhaseDone(1, err)
 		return fmt.Errorf("failed to export disk: %w", err)
 	}
@@ -254,7 +260,7 @@ func doExport(ctx context.Context, w io.Writer, opts *Options, name, outputPath 
 	// Create manifest
 	manifest := Manifest{
 		Version:     1,
-		Format:      "abox-archive",
+		Format:      ArchiveFormat,
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
 		AboxVersion: version.Version,
 		Snapshot:    opts.Snapshot,
@@ -280,7 +286,10 @@ func doExport(ctx context.Context, w io.Writer, opts *Options, name, outputPath 
 	// Phase 3: Archive
 	notify.PhaseStart(3)
 	fmt.Fprintln(w, "Creating archive...")
-	if err := createTarGz(outputPath, tempDir); err != nil {
+	archiveTimer := profiling.Track("export:archive")
+	err = createTarGz(outputPath, tempDir)
+	archiveTimer()
+	if err != nil {
 		notify.PhaseDone(3, err)
 		return fmt.Errorf("failed to create archive: %w", err)
 	}
@@ -345,7 +354,16 @@ func createTarGz(archivePath, sourceDir string) error {
 		return err
 	}
 
-	gw := gzip.NewWriter(file)
+	// The archive is dominated by disk.qcow2, which the disk export already
+	// compresses (qemu-img convert -c). Re-compressing that with gzip's default
+	// level is pure CPU cost for negligible gain, so use BestSpeed: it keeps a
+	// valid gzip stream (import is unchanged) while still lightly compressing the
+	// small text members (config/manifest/keys/allowlist).
+	gw, err := gzip.NewWriterLevel(file, gzip.BestSpeed)
+	if err != nil {
+		file.Close()
+		return err
+	}
 	tw := tar.NewWriter(gw)
 
 	walkErr := filepath.WalkDir(sourceDir, func(path string, d fs.DirEntry, err error) error {

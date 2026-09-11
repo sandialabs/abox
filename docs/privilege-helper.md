@@ -1,6 +1,63 @@
 # Privilege Helper
 
-abox requires root privileges for certain operations (iptables rules, disk image management, UFW firewall rules). By default, it spawns a privilege helper process via `sudo` or `pkexec`, which prompts for a password.
+abox requires root privileges for two host-side jobs:
+
+1. **Egress enforcement** — installing the iptables DNS REDIRECT + INPUT accepts
+   for the per-instance dnsfilter/httpfilter ports.
+2. **Disk storage root** — the ONE privileged step disk handling needs:
+   provisioning the caller's per-user storage root
+   (`/var/lib/libvirt/images/abox/<uid>`), owned by the caller and setgid to the
+   QEMU runtime group. Every image the caller then creates underneath inherits
+   that group, so the VM process (libvirt-qemu/qemu) reads them by group
+   membership — **no ACLs and no `$HOME` traversal**. All per-instance disk
+   operations (create/copy/import/qemu-img) run unprivileged.
+
+By default abox spawns a privilege helper process via `sudo` or `pkexec`, which
+prompts for a password.
+
+On macOS the helper instead exposes a separate pfctl-only `Pf` service (the
+egress enforcement mechanism there is a pf anchor, not iptables); see
+[docs/macos.md](macos.md). The `Egress` service described below is the Linux path.
+
+The helper exposes a minimal `Egress` gRPC service — 6 RPCs total:
+
+| RPC | Purpose |
+|-----|---------|
+| `EnsureStorageRoot` | provision the caller's per-user disk storage root (owned by the caller, setgid to the QEMU group), idempotent. The helper derives the caller from the socket peer uid and creates only `<parent>/<uid>` — never an arbitrary path. With `regroup` set (used by `abox migrate`) it also re-groups the caller's own subtree to the QEMU group after files were relocated. |
+| `Apply`    | install the DNS REDIRECT (nat table) + INPUT accepts for a bridge (idempotent) |
+| `Remove`   | flush abox's egress rules for a bridge — scoped to abox's own ports so unrelated rules survive (idempotent) |
+| `Verify`   | report whether the host-side DNS redirect + accepts are in force |
+| `Ping`     | health check (no auth required) |
+| `Shutdown` | graceful helper shutdown |
+
+## Disk storage ownership
+
+The per-user storage root is created **once** (root-owned shared parent
+`/var/lib/libvirt/images/abox`, then the per-user `<uid>` subdir owned by the
+caller and setgid `2750` to the resolved QEMU group). The QEMU group is resolved
+from, in order: an uncommented `group = "..."` in `/etc/libvirt/qemu.conf`, the
+QEMU runtime user's primary group, then the known names (`libvirt-qemu`, `qemu`,
+`kvm`). If it resolves via the broad `kvm` fallback the helper emits a warning —
+the storage tree would then be group-readable by every `kvm` member, so pin the
+exact group with `group = "..."` in `qemu.conf`.
+
+Disk files are mode `0640` (owner-rw, group-**read**) and directories `2750`
+(setgid). This assumes libvirtd's default `dynamic_ownership = 1`, under which
+libvirt chowns the writable disk to the QEMU user at VM start (granting
+owner-write). **Caveat:** if you set `dynamic_ownership = 0` in `qemu.conf`, the
+writable disk must be group-**writable**; adjust the disk mode accordingly, since
+the VM process would otherwise be unable to write its CoW layer.
+
+> **UFW removed.** Earlier versions used `ufw allow in on <bridge>` to open the
+> bridge. The helper now installs scoped iptables INPUT accepts for exactly the
+> dnsfilter and httpfilter ports instead, so it works on default-DROP hosts
+> without ufw and never depends on `ufw`. **Upgrade note:** instances created by
+> an older abox while ufw was active left a `ufw allow in on <bridge>` rule that
+> the new code no longer removes; remove it manually with
+> `sudo ufw delete allow in on <bridge>` if desired.
+>
+> The helper still runs setuid-root; scoping it to `CAP_NET_ADMIN` is a planned
+> follow-up.
 
 For automated/headless workflows, there are two ways to eliminate password prompts.
 

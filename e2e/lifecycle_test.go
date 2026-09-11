@@ -9,7 +9,7 @@ import (
 
 // TestInstanceLifecycle tests the full create -> start -> stop -> remove cycle.
 func TestInstanceLifecycle(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 
 	env := newTestEnv(t)
@@ -17,6 +17,7 @@ func TestInstanceLifecycle(t *testing.T) {
 
 	// Test create
 	t.Run("create", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		inst.create()
 
 		// Verify instance appears in list
@@ -28,6 +29,7 @@ func TestInstanceLifecycle(t *testing.T) {
 
 	// Test start
 	t.Run("start", func(t *testing.T) {
+		inst := inst.sub(t)
 		inst.start()
 
 		// Wait for instance to be running
@@ -44,6 +46,7 @@ func TestInstanceLifecycle(t *testing.T) {
 
 	// Test stop
 	t.Run("stop", func(t *testing.T) {
+		inst := inst.sub(t)
 		inst.forceStop()
 
 		// Verify instance is stopped - use regex to match "State: running"
@@ -56,6 +59,7 @@ func TestInstanceLifecycle(t *testing.T) {
 
 	// Test remove
 	t.Run("remove", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		inst.remove()
 
 		// Verify instance no longer appears in list
@@ -68,13 +72,14 @@ func TestInstanceLifecycle(t *testing.T) {
 
 // TestCreateWithOptions tests instance creation with various options.
 func TestCreateWithOptions(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
 	env := newTestEnv(t)
 
 	t.Run("custom-resources", func(t *testing.T) {
+		env := env.sub(t)
 		inst := env.newTestInstance()
 		inst.createWithArgs("--cpus", "2", "--memory", "1024", "--disk", "10G", "--base", getBaseImage())
 
@@ -106,7 +111,7 @@ func TestCreateWithOptions(t *testing.T) {
 
 // TestStatusCommand tests the status command output.
 func TestStatusCommand(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -115,6 +120,7 @@ func TestStatusCommand(t *testing.T) {
 	inst.create()
 
 	t.Run("stopped-instance", func(t *testing.T) {
+		inst := inst.sub(t)
 		status := inst.status()
 
 		// Should show instance info even when stopped
@@ -124,6 +130,7 @@ func TestStatusCommand(t *testing.T) {
 	})
 
 	t.Run("running-instance", func(t *testing.T) {
+		inst := inst.sub(t)
 		inst.start()
 		defer inst.forceStop()
 
@@ -140,7 +147,7 @@ func TestStatusCommand(t *testing.T) {
 
 // TestListCommand tests the list command.
 func TestListCommand(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -156,6 +163,7 @@ func TestListCommand(t *testing.T) {
 	})
 
 	t.Run("with-instances", func(t *testing.T) {
+		env := env.sub(t)
 		inst := env.newTestInstance()
 		inst.create()
 
@@ -175,7 +183,7 @@ func TestListCommand(t *testing.T) {
 
 // TestRemoveConfirmation tests that remove requires confirmation.
 func TestRemoveConfirmation(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 

@@ -64,6 +64,38 @@ func TestValidate_MaxConnections(t *testing.T) {
 	}
 }
 
+func TestApplySuffix(t *testing.T) {
+	tests := []struct {
+		name   string
+		base   string
+		suffix string
+		want   string
+	}{
+		{"empty suffix is a no-op", "my-agent", "", "my-agent"},
+		{"numeric suffix", "my-agent", "1", "my-agent-1"},
+		{"word suffix", "my-agent", "feature", "my-agent-feature"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := DefaultBoxfile()
+			b.Name = tt.base
+			b.ApplySuffix(tt.suffix)
+			if b.Name != tt.want {
+				t.Errorf("Name = %q, want %q", b.Name, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplySuffix_InvalidNameRejectedByValidate(t *testing.T) {
+	b := DefaultBoxfile()
+	b.Name = "my-agent"
+	b.ApplySuffix("bad suffix") // space is invalid in an instance name
+	if err := b.Validate(""); err == nil {
+		t.Fatal("expected Validate to reject suffixed name with a space, got nil")
+	}
+}
+
 func TestCurrentBoxfileVersionConstant(t *testing.T) {
 	if CurrentBoxfileVersion != 1 {
 		t.Errorf("CurrentBoxfileVersion = %d, want 1", CurrentBoxfileVersion)

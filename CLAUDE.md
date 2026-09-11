@@ -67,7 +67,7 @@ flowchart TB
     CLI --> Resources
 
     subgraph Resources["Per-Instance Resources"]
-        network["Network: abox-&lt;name&gt; bridge with NAT"]
+        network["Network: abox-&lt;name&gt; host-only bridge (isolated, no NAT/uplink)"]
         vm["VM: abox-&lt;name&gt; libvirt domain"]
         dns["DNS: dnsfilter on unique port per instance"]
         http["HTTP: httpfilter proxy on unique port per instance"]
@@ -83,7 +83,7 @@ flowchart TB
 | `pkg/cmd/root/root.go` | Root command and subcommand registration |
 | `internal/instance/` | Instance lifecycle and security (create, start, stop, remove) |
 | `internal/backend/` | Pluggable VM backend interface and registry |
-| `internal/libvirt/` | XML generation, virsh commands |
+| `internal/virsh/` | XML generation, virsh commands |
 | `internal/config/` | Instance config, paths, allocation |
 | `internal/boxfile/` | abox.yaml parsing and validation |
 | `internal/dnsfilter/` | DNS filtering service and radix tree |
@@ -133,4 +133,4 @@ When adding new commands:
 3. Use `config.Load()` to get instance config
 4. Use backend abstraction via `factory.BackendFor(name)` for VM/network operations
 
-Note: The codebase uses a backend abstraction layer (`internal/backend/`) to support multiple VM backends. Currently only libvirt is implemented, but commands should use the backend interface rather than calling `internal/libvirt/` directly.
+Note: The codebase uses a backend abstraction layer (`internal/backend/`) to support multiple VM backends: **libvirt** (Linux, default), **vfkit** (macOS), and an experimental **vmware** backend (`ABOX_BACKEND=vmware`). Commands should use the backend interface via `factory.BackendFor(name)` rather than calling the `internal/virsh/` primitives directly. Backend-specific helpers live in `internal/vmrun/` (VMware), `internal/vfkit/` + `internal/vmnethelper/` (macOS). See [docs/macos.md](docs/macos.md), [docs/vmware.md](docs/vmware.md), and [docs/support-matrix.md](docs/support-matrix.md).

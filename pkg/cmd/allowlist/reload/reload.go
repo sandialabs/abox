@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/sandialabs/abox/internal/config"
-	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/rpc"
 	"github.com/sandialabs/abox/pkg/cmd/completion"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
@@ -75,7 +74,9 @@ func runReload(f *factory.Factory, name string) error {
 		return fmt.Errorf("no filters running for instance %q", name)
 	}
 
-	logging.AuditInstance(name, logging.ActionAllowlistReload)
+	// Audit is emitted by each filter daemon (service layer) so direct socket
+	// callers are recorded; expect one entry per running daemon. See
+	// internal/allowlist/api.go.
 
 	return nil
 }

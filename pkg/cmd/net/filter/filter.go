@@ -116,14 +116,9 @@ func runFilter(f *factory.Factory, name, mode string) error {
 		fmt.Fprintln(out, "Use 'abox net profile "+name+" export' to view captured domains.")
 	}
 
-	// Only log if we actually changed the mode
-	if mode != "" {
-		action := logging.ActionModeActive
-		if mode == modePassive {
-			action = logging.ActionModePassive
-		}
-		logging.AuditInstance(name, action)
-	}
+	// Audit is emitted by each filter daemon (service layer) whenever a mode is
+	// set, so direct socket callers and `abox up` are also recorded (one entry
+	// per daemon that applied it); see internal/allowlist/api.go SetMode.
 
 	// Return error if both failed
 	if dnsErr != nil && httpErr != nil {

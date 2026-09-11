@@ -234,6 +234,12 @@ func (h *handler) requestHandler(connectTarget string) http.Handler {
 			_, _ = io.WriteString(w, d.body)
 			return
 		}
+		// Mark genuinely MITM-intercepted requests (connectTarget != "") so the
+		// Rewrite hook injects secrets only for them, never for forward-proxy
+		// absolute-URI requests whose target host is fully guest-controlled.
+		if connectTarget != "" {
+			r = r.WithContext(withMITM(r.Context()))
+		}
 		h.s.reverseProxy.ServeHTTP(w, r)
 	})
 }
@@ -310,14 +316,16 @@ func (h *handler) tunnel(w http.ResponseWriter, r *http.Request) {
 // newReverseProxy constructs the upstream-forwarding ReverseProxy used by all
 // allowed requests (forward and post-MITM). The Transport is shared so
 // connections pool across requests.
-func newReverseProxy(transport *http.Transport) *httputil.ReverseProxy {
+func newReverseProxy(s *Server) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
-		Transport: transport,
-		Rewrite: func(_ *httputil.ProxyRequest) {
+		Transport: s.transport,
+		Rewrite: func(pr *httputil.ProxyRequest) {
 			// Out is cloned from In before Rewrite runs, with Scheme/Host
 			// populated by our requestHandler and RawQuery already sanitized
-			// by stdlib's cleanQueryParams. No further changes needed.
-			// (Aliasing Out.URL to In.URL would undo the query sanitization.)
+			// by stdlib's cleanQueryParams. We only add/remove headers on Out
+			// here — aliasing Out.URL to In.URL would undo the query
+			// sanitization, so injectSecrets must not touch Out.URL.
+			s.injectSecrets(pr)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			logging.Debug("http upstream error",

@@ -42,6 +42,94 @@ jobs:
       - name: Build
         run: go build -v ./...
 
+  cross-platform:
+    name: Cross-platform seams
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          check-latest: true
+          cache-dependency-path: go.sum
+
+      # Fast pre-filter: fail if platform-specific imports leak into non-gated
+      # files. The authoritative portability check is the cross-compile gate below.
+      - name: Import guard
+        run: ./scripts/check-portable-imports.sh
+
+      # Authoritative portability gate: `go build ./...` for GOOS=darwin and
+      # GOOS=windows (whole tree), plus a SCOPED `go vet` of the cross-platform
+      # packages. `go vet` (unlike `go build`) type-checks the OS-gated
+      # *_other_test.go stubs, so the fail-closed assertions in
+      # sysutil/procutil/privilege/rpc are compiled for their target here even
+      # though they only EXECUTE on the non-Linux runners below. The vet is scoped
+      # (not ./...) because some Linux-only test files import Linux-only packages;
+      # see the script header for details.
+      - name: Cross-compile gate
+        run: ./scripts/cross-compile.sh
+
+  # Execute (not just type-check) the fail-closed stub tests on real non-Linux
+  # runners. These tests are tagged !unix / !linux, so on ubuntu-latest they
+  # never run — only their compilation is checked (by the cross-compile gate). A
+  # full `go test ./...` here would fail: most of the tree is Linux-only. So this
+  # job is deliberately SCOPED to the genuinely cross-platform packages that carry
+  # gated tests. This list is that deliberately-chosen set of cross-platform
+  # packages CARRYING OS-GATED TESTS — not the full set of darwin/windows-buildable
+  # packages. When you add gated tests to a new package, add it here (and to
+  # scripts/cross-compile.sh's VET_PKGS) after confirming it builds on both
+  # darwin and windows via `GOOS=... go build`/`go vet`. Darwin-only packages
+  # (e.g. internal/vfkit) report "no test files" on the windows runner, which is
+  # expected and non-fatal.
+  non-linux-test:
+    name: Non-Linux tests
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+        # Run the darwin-gated concurrency (audit sink, pf enforcer, vmnet helper,
+        # vfkit lifecycle) under the race detector on macOS — the Linux `test` job
+        # cannot compile these //go:build darwin files, so macOS is the only place
+        # they can be race-checked. Windows lacks cgo/race support by default, so it
+        # runs without -race.
+        include:
+          - os: macos-latest
+            race: "-race"
+          - os: windows-latest
+            race: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          check-latest: true
+          cache-dependency-path: go.sum
+
+      - name: Test cross-platform packages
+        run: >-
+          go test ${{ matrix.race }}
+          ./internal/sysutil/...
+          ./internal/procutil/...
+          ./internal/privilege/...
+          ./internal/rpc/...
+          ./internal/config/...
+          ./internal/fsutil/...
+          ./internal/logging/...
+          ./internal/vmrun/...
+          ./internal/vfkit/...
+          ./internal/vmnethelper/...
+          ./internal/backend/vfkit/...
+          ./internal/backend/egress/...
+          ./internal/backend/vmware/...
+          ./internal/backend/conformance/...
+          ./internal/dnsfilter/...
+          ./internal/daemon/...
+          ./pkg/cmd/checkdeps/...
+          ./pkg/cmd/start/...
+
   test:
     name: Test
     runs-on: ubuntu-latest

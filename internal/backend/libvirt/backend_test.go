@@ -17,7 +17,6 @@ func TestResourceNames(t *testing.T) {
 		wantInstance string
 		wantVM       string
 		wantNetwork  string
-		wantFilter   string
 	}{
 		{
 			name:         "simple",
@@ -25,7 +24,6 @@ func TestResourceNames(t *testing.T) {
 			wantInstance: "dev",
 			wantVM:       "abox-dev",
 			wantNetwork:  config.GenerateBridgeName("dev"),
-			wantFilter:   "abox-dev-traffic",
 		},
 		{
 			name:         "with-hyphen",
@@ -33,7 +31,6 @@ func TestResourceNames(t *testing.T) {
 			wantInstance: "my-instance",
 			wantVM:       "abox-my-instance",
 			wantNetwork:  config.GenerateBridgeName("my-instance"),
-			wantFilter:   "abox-my-instance-traffic",
 		},
 		{
 			name:         "with-underscore",
@@ -41,7 +38,6 @@ func TestResourceNames(t *testing.T) {
 			wantInstance: "my_instance",
 			wantVM:       "abox-my_instance",
 			wantNetwork:  config.GenerateBridgeName("my_instance"),
-			wantFilter:   "abox-my_instance-traffic",
 		},
 		{
 			name:         "with-numbers",
@@ -49,7 +45,6 @@ func TestResourceNames(t *testing.T) {
 			wantInstance: "dev123",
 			wantVM:       "abox-dev123",
 			wantNetwork:  config.GenerateBridgeName("dev123"),
-			wantFilter:   "abox-dev123-traffic",
 		},
 		{
 			name:         "long-name",
@@ -57,7 +52,6 @@ func TestResourceNames(t *testing.T) {
 			wantInstance: "very-long-instance-name-for-testing",
 			wantVM:       "abox-very-long-instance-name-for-testing",
 			wantNetwork:  config.GenerateBridgeName("very-long-instance-name-for-testing"),
-			wantFilter:   "abox-very-long-instance-name-for-testing-traffic",
 		},
 	}
 
@@ -73,9 +67,6 @@ func TestResourceNames(t *testing.T) {
 			}
 			if names.Network != tt.wantNetwork {
 				t.Errorf("ResourceNames(%q).Network = %q, want %q", tt.instanceName, names.Network, tt.wantNetwork)
-			}
-			if names.Filter != tt.wantFilter {
-				t.Errorf("ResourceNames(%q).Filter = %q, want %q", tt.instanceName, names.Filter, tt.wantFilter)
 			}
 		})
 	}
@@ -94,7 +85,34 @@ func TestResourceNames_Consistency(t *testing.T) {
 
 func TestStorageDir(t *testing.T) {
 	b := &Backend{}
-	if got := b.StorageDir(); got != config.LibvirtImagesDir {
-		t.Errorf("StorageDir() = %q, want %q", got, config.LibvirtImagesDir)
+	if got := b.StorageDir(); got != config.LibvirtStorageDir() {
+		t.Errorf("StorageDir() = %q, want %q", got, config.LibvirtStorageDir())
+	}
+}
+
+func TestRequiredTools(t *testing.T) {
+	b := &Backend{}
+	got := make(map[string]bool)
+	for _, tool := range b.RequiredTools() {
+		got[tool.Name] = true
+	}
+	// virsh is required; ACL tooling (setfacl) is no longer needed since the QEMU
+	// process reaches images via group ownership of the setgid storage root.
+	if !got["virsh"] {
+		t.Errorf("RequiredTools() missing %q; got %v", "virsh", got)
+	}
+	if got["setfacl"] {
+		t.Errorf("RequiredTools() should no longer require setfacl; got %v", got)
+	}
+}
+
+func TestMonitorTransport(t *testing.T) {
+	b := &Backend{}
+	mt := b.MonitorTransport()
+	if mt == nil {
+		t.Fatal("MonitorTransport() = nil, want non-nil")
+	}
+	if got, want := mt.GuestDevice(), "/dev/virtio-ports/abox.monitor.0"; got != want {
+		t.Errorf("GuestDevice() = %q, want %q", got, want)
 	}
 }

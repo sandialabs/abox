@@ -8,7 +8,6 @@ import (
 
 	"github.com/sandialabs/abox/internal/backend"
 	"github.com/sandialabs/abox/internal/config"
-	"github.com/sandialabs/abox/internal/rpc"
 )
 
 // Backend implements backend.Backend with configurable function hooks.
@@ -17,17 +16,18 @@ import (
 //
 //	&struct{ *mock.Backend; mock.TemplateValidator }{ ... }
 type Backend struct {
-	NameFunc               func() string
-	IsAvailableFunc        func() error
-	VMFunc                 func() backend.VMManager
-	NetworkFunc            func() backend.NetworkManager
-	DiskFunc               func() backend.DiskManager
-	SnapshotFunc           func() backend.SnapshotManager
-	TrafficInterceptorFunc func() backend.TrafficInterceptor
-	DryRunFunc             func(inst *config.Instance, paths *config.Paths, w io.Writer, opts backend.VMCreateOptions) error
-	ResourceNamesFunc      func(string) backend.ResourceNames
-	GenerateMACFunc        func() string
-	StorageDirFunc         func() string
+	NameFunc             func() string
+	IsAvailableFunc      func() error
+	VMFunc               func() backend.VMManager
+	NetworkFunc          func() backend.NetworkManager
+	DiskFunc             func() backend.DiskManager
+	SnapshotFunc         func() backend.SnapshotManager
+	EgressControllerFunc func() backend.EgressController
+	MonitorTransportFunc func() backend.MonitorTransport
+	DryRunFunc           func(inst *config.Instance, paths *config.Paths, w io.Writer, opts backend.VMCreateOptions) error
+	ResourceNamesFunc    func(string) backend.ResourceNames
+	GenerateMACFunc      func() string
+	StorageDirFunc       func() string
 }
 
 func (b *Backend) Name() string {
@@ -72,12 +72,27 @@ func (b *Backend) Snapshot() backend.SnapshotManager {
 	return &SnapshotManager{}
 }
 
-func (b *Backend) TrafficInterceptor() backend.TrafficInterceptor {
-	if b.TrafficInterceptorFunc != nil {
-		return b.TrafficInterceptorFunc()
+func (b *Backend) EgressController() backend.EgressController {
+	if b.EgressControllerFunc != nil {
+		return b.EgressControllerFunc()
 	}
-	return &TrafficInterceptor{}
+	return &EgressController{}
 }
+
+func (b *Backend) MonitorTransport() backend.MonitorTransport {
+	if b.MonitorTransportFunc != nil {
+		return b.MonitorTransportFunc()
+	}
+	return MonitorTransport{Device: "/dev/virtio-ports/abox.monitor.0"}
+}
+
+// MonitorTransport is a mock backend.MonitorTransport.
+type MonitorTransport struct {
+	Device string
+}
+
+// GuestDevice returns the configured guest device path.
+func (t MonitorTransport) GuestDevice() string { return t.Device }
 
 func (b *Backend) DryRun(inst *config.Instance, paths *config.Paths, w io.Writer, opts backend.VMCreateOptions) error {
 	if b.DryRunFunc != nil {
@@ -95,7 +110,6 @@ func (b *Backend) ResourceNames(instanceName string) backend.ResourceNames {
 		Instance: instanceName,
 		VM:       "mock-" + instanceName,
 		Network:  "mock-" + instanceName,
-		Filter:   "mock-" + instanceName + "-filter",
 	}
 }
 
@@ -305,44 +319,52 @@ func (m *NetworkManager) IsActive(name string) bool {
 
 // DiskManager implements backend.DiskManager with configurable function hooks.
 type DiskManager struct {
-	CreateFunc          func(ctx context.Context, client rpc.PrivilegeClient, inst *config.Instance, paths *config.Paths) error
-	DeleteFunc          func(ctx context.Context, client rpc.PrivilegeClient, paths *config.Paths) error
-	EnsureBaseImageFunc func(ctx context.Context, client rpc.PrivilegeClient, inst *config.Instance, paths *config.Paths) error
-	ImportFunc          func(ctx context.Context, client rpc.PrivilegeClient, src string, inst *config.Instance, paths *config.Paths, snapshot bool) error
-	ExportFunc          func(ctx context.Context, client rpc.PrivilegeClient, dst string, paths *config.Paths, snapshot bool) error
+	CreateFunc          func(ctx context.Context, inst *config.Instance, paths *config.Paths) error
+	DeleteFunc          func(ctx context.Context, paths *config.Paths) error
+	EnsureBaseImageFunc func(ctx context.Context, inst *config.Instance, paths *config.Paths) error
+	EnsureAccessFunc    func(ctx context.Context, inst *config.Instance, paths *config.Paths) error
+	ImportFunc          func(ctx context.Context, src string, inst *config.Instance, paths *config.Paths, snapshot bool) error
+	ExportFunc          func(ctx context.Context, dst string, paths *config.Paths, snapshot bool) error
 }
 
-func (m *DiskManager) Create(ctx context.Context, client rpc.PrivilegeClient, inst *config.Instance, paths *config.Paths) error {
+func (m *DiskManager) Create(ctx context.Context, inst *config.Instance, paths *config.Paths) error {
 	if m.CreateFunc != nil {
-		return m.CreateFunc(ctx, client, inst, paths)
+		return m.CreateFunc(ctx, inst, paths)
 	}
 	return nil
 }
 
-func (m *DiskManager) Delete(ctx context.Context, client rpc.PrivilegeClient, paths *config.Paths) error {
+func (m *DiskManager) Delete(ctx context.Context, paths *config.Paths) error {
 	if m.DeleteFunc != nil {
-		return m.DeleteFunc(ctx, client, paths)
+		return m.DeleteFunc(ctx, paths)
 	}
 	return nil
 }
 
-func (m *DiskManager) EnsureBaseImage(ctx context.Context, client rpc.PrivilegeClient, inst *config.Instance, paths *config.Paths) error {
+func (m *DiskManager) EnsureBaseImage(ctx context.Context, inst *config.Instance, paths *config.Paths) error {
 	if m.EnsureBaseImageFunc != nil {
-		return m.EnsureBaseImageFunc(ctx, client, inst, paths)
+		return m.EnsureBaseImageFunc(ctx, inst, paths)
 	}
 	return nil
 }
 
-func (m *DiskManager) Import(ctx context.Context, client rpc.PrivilegeClient, src string, inst *config.Instance, paths *config.Paths, snapshot bool) error {
+func (m *DiskManager) EnsureAccess(ctx context.Context, inst *config.Instance, paths *config.Paths) error {
+	if m.EnsureAccessFunc != nil {
+		return m.EnsureAccessFunc(ctx, inst, paths)
+	}
+	return nil
+}
+
+func (m *DiskManager) Import(ctx context.Context, src string, inst *config.Instance, paths *config.Paths, snapshot bool) error {
 	if m.ImportFunc != nil {
-		return m.ImportFunc(ctx, client, src, inst, paths, snapshot)
+		return m.ImportFunc(ctx, src, inst, paths, snapshot)
 	}
 	return nil
 }
 
-func (m *DiskManager) Export(ctx context.Context, client rpc.PrivilegeClient, dst string, paths *config.Paths, snapshot bool) error {
+func (m *DiskManager) Export(ctx context.Context, dst string, paths *config.Paths, snapshot bool) error {
 	if m.ExportFunc != nil {
-		return m.ExportFunc(ctx, client, dst, paths, snapshot)
+		return m.ExportFunc(ctx, dst, paths, snapshot)
 	}
 	return nil
 }
@@ -399,54 +421,46 @@ func (m *SnapshotManager) GetInfo(vmName, snapshotName string) (backend.Snapshot
 	return backend.SnapshotInfo{Name: snapshotName}, nil
 }
 
-// TrafficInterceptor implements backend.TrafficInterceptor with configurable function hooks.
-type TrafficInterceptor struct {
-	DefineFilterFunc  func(ctx context.Context, inst *config.Instance) error
-	ApplyFilterFunc   func(ctx context.Context, vmName, networkName, filterName, macAddress string, cpus int) error
-	RemoveFilterFunc  func(ctx context.Context, vmName, networkName, macAddress string, cpus int) error
-	DeleteFilterFunc  func(ctx context.Context, filterName string) error
-	FilterExistsFunc  func(filterName string) bool
-	GetFilterUUIDFunc func(filterName string) string
+// EgressController implements backend.EgressController with configurable function hooks.
+type EgressController struct {
+	DefineFunc         func(ctx context.Context, inst *config.Instance, p backend.EgressPolicy) error
+	ApplyFunc          func(ctx context.Context, inst *config.Instance) error
+	RemoveFunc         func(ctx context.Context, inst *config.Instance) error
+	VerifyFunc         func(ctx context.Context, inst *config.Instance) (bool, error)
+	VerifyEnforcedFunc func(ctx context.Context, inst *config.Instance) (bool, error)
 }
 
-func (m *TrafficInterceptor) DefineFilter(ctx context.Context, inst *config.Instance) error {
-	if m.DefineFilterFunc != nil {
-		return m.DefineFilterFunc(ctx, inst)
+func (m *EgressController) Define(ctx context.Context, inst *config.Instance, p backend.EgressPolicy) error {
+	if m.DefineFunc != nil {
+		return m.DefineFunc(ctx, inst, p)
 	}
 	return nil
 }
 
-func (m *TrafficInterceptor) ApplyFilter(ctx context.Context, vmName, networkName, filterName, macAddress string, cpus int) error {
-	if m.ApplyFilterFunc != nil {
-		return m.ApplyFilterFunc(ctx, vmName, networkName, filterName, macAddress, cpus)
+func (m *EgressController) Apply(ctx context.Context, inst *config.Instance) error {
+	if m.ApplyFunc != nil {
+		return m.ApplyFunc(ctx, inst)
 	}
 	return nil
 }
 
-func (m *TrafficInterceptor) RemoveFilter(ctx context.Context, vmName, networkName, macAddress string, cpus int) error {
-	if m.RemoveFilterFunc != nil {
-		return m.RemoveFilterFunc(ctx, vmName, networkName, macAddress, cpus)
+func (m *EgressController) Remove(ctx context.Context, inst *config.Instance) error {
+	if m.RemoveFunc != nil {
+		return m.RemoveFunc(ctx, inst)
 	}
 	return nil
 }
 
-func (m *TrafficInterceptor) DeleteFilter(ctx context.Context, filterName string) error {
-	if m.DeleteFilterFunc != nil {
-		return m.DeleteFilterFunc(ctx, filterName)
+func (m *EgressController) Verify(ctx context.Context, inst *config.Instance) (bool, error) {
+	if m.VerifyFunc != nil {
+		return m.VerifyFunc(ctx, inst)
 	}
-	return nil
+	return false, nil
 }
 
-func (m *TrafficInterceptor) FilterExists(filterName string) bool {
-	if m.FilterExistsFunc != nil {
-		return m.FilterExistsFunc(filterName)
+func (m *EgressController) VerifyEnforced(ctx context.Context, inst *config.Instance) (bool, error) {
+	if m.VerifyEnforcedFunc != nil {
+		return m.VerifyEnforcedFunc(ctx, inst)
 	}
-	return false
-}
-
-func (m *TrafficInterceptor) GetFilterUUID(filterName string) string {
-	if m.GetFilterUUIDFunc != nil {
-		return m.GetFilterUUIDFunc(filterName)
-	}
-	return ""
+	return false, nil
 }

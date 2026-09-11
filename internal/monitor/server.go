@@ -7,7 +7,6 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
@@ -90,8 +89,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 // getUID returns the current user ID.
 func getUID() int {
-	// Import os here would create a cycle, use syscall
-	return syscall.Getuid()
+	return os.Getuid()
 }
 
 // readLoop continuously reads from the virtio-serial socket and logs events.

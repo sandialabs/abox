@@ -12,7 +12,7 @@ import (
 
 // TestForward tests the port forwarding commands.
 func TestForward(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -25,11 +25,11 @@ func TestForward(t *testing.T) {
 		t.Fatal("Instance did not start")
 	}
 	if !inst.waitForSSH(120 * time.Second) {
-		inst.dumpDiagnostics()
 		t.Fatal("SSH did not become available")
 	}
 
 	t.Run("add-list-remove", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		// Add a port forward
 		result := env.mustRun("forward", "add", inst.name, "18080:80")
 		if !strings.Contains(result.Stdout, "Forwarding") {
@@ -59,6 +59,7 @@ func TestForward(t *testing.T) {
 	})
 
 	t.Run("connectivity", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		// Start a simple HTTP server in the VM
 		// Use Python's http.server module which is available by default
 		sshResult := inst.ssh("bash", "-c", "nohup python3 -m http.server 8000 > /dev/null 2>&1 &")
@@ -99,6 +100,7 @@ func TestForward(t *testing.T) {
 	})
 
 	t.Run("duplicate-port", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		// Add a forward
 		env.mustRun("forward", "add", inst.name, "18081:81")
 		defer env.run("forward", "remove", inst.name, "18081")
@@ -114,6 +116,7 @@ func TestForward(t *testing.T) {
 	})
 
 	t.Run("requires-running", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		// Stop the instance
 		inst.forceStop()
 
@@ -130,7 +133,7 @@ func TestForward(t *testing.T) {
 
 // TestForwardReverse tests reverse port forwarding (guest accesses host).
 func TestForwardReverse(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -143,11 +146,11 @@ func TestForwardReverse(t *testing.T) {
 		t.Fatal("Instance did not start")
 	}
 	if !inst.waitForSSH(120 * time.Second) {
-		inst.dumpDiagnostics()
 		t.Fatal("SSH did not become available")
 	}
 
 	t.Run("reverse-add-list-remove", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		// Add a reverse forward
 		result := env.mustRun("forward", "add", inst.name, "19000:9000", "-R")
 		if !strings.Contains(result.Stdout, "Reverse") {
@@ -171,6 +174,7 @@ func TestForwardReverse(t *testing.T) {
 	})
 
 	t.Run("reverse-connectivity", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		hostPort := 19001
 		guestPort := 9001
 

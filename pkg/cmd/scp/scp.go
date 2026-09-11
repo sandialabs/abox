@@ -6,11 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/instance"
 	"github.com/sandialabs/abox/internal/logging"
+	"github.com/sandialabs/abox/internal/procutil"
 	"github.com/sandialabs/abox/internal/sshutil"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 
@@ -141,7 +141,8 @@ func parseAndValidateArgs(srcs []string, dst string) (*parsedArgs, error) {
 
 // buildSCPArgs constructs the scp command-line arguments including remote paths.
 func (o *Options) buildSCPArgs(pa *parsedArgs, sshUser, ip string, paths *config.Paths) []string {
-	scpArgs := sshutil.CommonOptions(paths)
+	// Bound the connection phase: scp is always non-interactive here.
+	scpArgs := append(sshutil.ConnectTimeoutOptions(), sshutil.CommonOptions(paths)...)
 
 	if o.Recursive {
 		scpArgs = append(scpArgs, "-r")
@@ -202,9 +203,13 @@ func (o *Options) Run() error {
 		direction = "download"
 	}
 
-	// Log SCP access before exec replaces this process
+	// Log SCP access before exec replaces this process. procutil.Exec is
+	// syscall.Exec (it replaces the process image), so the deferred CloseLogFile in
+	// main never runs — flush the audit sink here or the macOS logger-pipe line is
+	// lost with the process image.
 	logging.AuditInstance(pa.instanceName, logging.ActionSCP, "direction", direction)
+	logging.CloseLogFile()
 
 	// Replace current process with scp
-	return syscall.Exec(scpBin, append([]string{"scp"}, scpArgs...), os.Environ())
+	return procutil.Exec(scpBin, append([]string{"scp"}, scpArgs...), os.Environ())
 }

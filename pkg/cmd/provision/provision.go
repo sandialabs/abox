@@ -166,7 +166,7 @@ func runScript(w io.Writer, paths *config.Paths, inst *config.Instance, ip strin
 
 	// Execute script via SSH
 	sshUser := inst.GetUser()
-	sshArgs := sshutil.BuildSSHArgs(paths, sshUser, ip, "sudo", "bash", "-s")
+	sshArgs := sshutil.BuildAutomatedSSHArgs(paths, sshUser, ip, "sudo", "bash", "-s")
 
 	sshCmd := exec.Command("ssh", sshArgs...)
 	sshCmd.Stdin = strings.NewReader(scriptWithEnv)
@@ -216,14 +216,14 @@ func isSSHConnectionError(err error) bool {
 
 // checkMarker tests whether the completion marker file exists in the VM.
 func checkMarker(paths *config.Paths, user, ip, marker string) bool {
-	args := sshutil.BuildSSHArgs(paths, user, ip, "test", "-f", marker)
+	args := sshutil.BuildAutomatedSSHArgs(paths, user, ip, "test", "-f", marker)
 	cmd := exec.Command("ssh", args...)
 	return cmd.Run() == nil
 }
 
 // cleanupMarker removes the completion marker file from the VM (best-effort).
 func cleanupMarker(paths *config.Paths, user, ip, marker string) {
-	args := sshutil.BuildSSHArgs(paths, user, ip, "rm", "-f", marker)
+	args := sshutil.BuildAutomatedSSHArgs(paths, user, ip, "rm", "-f", marker)
 	cmd := exec.Command("ssh", args...)
 	_ = cmd.Run()
 }
@@ -310,7 +310,7 @@ func mountOverlay(w io.Writer, paths *config.Paths, user, ip, localDir string) e
 	// This is more reliable than scp with "/." syntax which fails on some OpenSSH versions.
 	// We create a tar stream locally and extract it remotely via ssh.
 	tarCmd := exec.Command("tar", "-C", absLocalDir, "-cf", "-", ".")
-	sshArgs := sshutil.BuildSSHArgs(paths, user, ip, "tar", "-C", overlayMountPoint, "-xf", "-")
+	sshArgs := sshutil.BuildAutomatedSSHArgs(paths, user, ip, "tar", "-C", overlayMountPoint, "-xf", "-")
 	sshCmd := exec.Command("ssh", sshArgs...)
 
 	// Pipe tar output to ssh input
@@ -355,7 +355,7 @@ func unmountOverlay(w io.Writer, paths *config.Paths, user, ip string) {
 // This avoids shell injection by not concatenating arguments into a shell string.
 // Each argument is passed to ssh separately, which joins them with spaces.
 func runSSHCommand(w io.Writer, paths *config.Paths, user, ip string, args ...string) error {
-	sshArgs := sshutil.BuildSSHArgs(paths, user, ip, args...)
+	sshArgs := sshutil.BuildAutomatedSSHArgs(paths, user, ip, args...)
 	cmd := exec.Command("ssh", sshArgs...)
 	cmd.Stdout = w
 	cmd.Stderr = w

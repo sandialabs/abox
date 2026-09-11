@@ -12,7 +12,7 @@ import (
 
 // TestMount tests the mount and unmount commands.
 func TestMount(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipIfNoSSHFS(t)
 	skipInShortMode(t)
@@ -26,7 +26,6 @@ func TestMount(t *testing.T) {
 		t.Fatal("Instance did not start")
 	}
 	if !inst.waitForSSH(120 * time.Second) {
-		inst.dumpDiagnostics()
 		t.Fatal("SSH did not become available")
 	}
 
@@ -38,6 +37,7 @@ func TestMount(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	t.Run("mount-unmount", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		mountPoint := filepath.Join(tempDir, "home-mount")
 
 		// Mount the home directory
@@ -86,6 +86,7 @@ func TestMount(t *testing.T) {
 	})
 
 	t.Run("read-only", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		mountPoint := filepath.Join(tempDir, "readonly-mount")
 
 		// Mount as read-only
@@ -107,6 +108,7 @@ func TestMount(t *testing.T) {
 	})
 
 	t.Run("unmount-by-instance", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		// Create multiple mount points
 		mountPoint1 := filepath.Join(tempDir, "multi-mount-1")
 		mountPoint2 := filepath.Join(tempDir, "multi-mount-2")
@@ -125,6 +127,7 @@ func TestMount(t *testing.T) {
 	})
 
 	t.Run("requires-running", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		// Stop the instance
 		inst.forceStop()
 

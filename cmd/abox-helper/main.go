@@ -1,3 +1,5 @@
+//go:build linux
+
 // abox-helper is a minimal setuid root binary for the abox privilege helper.
 //
 // It is designed to be installed as:
@@ -107,13 +109,9 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "warning: failed to init logging: %v\n", err)
 	}
 
-	logging.Audit("privilege-helper.start",
-		"action", "privilege-helper.start",
-		"caller_uid", ruid,
-		"pid", os.Getpid(),
-		"socket", socketPath,
-		"mode", "setuid",
-	)
+	// The startup audit record (caller UID/pid/socket) is emitted by
+	// privilege.RunHelper below, so it is recorded uniformly on both the Linux
+	// setuid path (here) and the darwin `abox privilege-helper` path.
 
 	// Step 9: Resolve absolute paths for external commands.
 	if err := privilege.ResolveCommands(); err != nil {

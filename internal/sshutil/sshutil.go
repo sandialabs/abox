@@ -26,11 +26,32 @@ const (
 	sshOptStrictHostKey = "StrictHostKeyChecking=accept-new"
 	sshOptControlPath   = "ControlPath=none"
 	sshOptLogLevel      = "LogLevel=ERROR"
+	// sshOptIdentitiesOnly pins auth to the identity we pass explicitly (-i, or
+	// IdentityFile= for sshfs), so a populated ssh-agent (e.g. macOS Keychain)
+	// can't offer other keys first and exhaust the server's MaxAuthTries before
+	// ours is tried.
+	sshOptIdentitiesOnly = "IdentitiesOnly=yes"
+	// sshOptPubkeyAlgos re-enables ed25519 (abox's only key type) for this
+	// connection. Hardened clients (corporate/MDM-managed macOS) may exclude
+	// ssh-ed25519 from the accepted pubkey algorithms, causing the client to
+	// skip our key and fail with "Permission denied (publickey)". The leading
+	// '+' appends to the client's built-in default set, and a command-line -o
+	// overrides the config-file value, so this affects abox connections only.
+	//
+	// We use the pre-8.5 keyword PubkeyAcceptedKeyTypes rather than the modern
+	// PubkeyAcceptedAlgorithms: OpenSSH 8.5 renamed the option but kept the old
+	// name as a permanent alias, so PubkeyAcceptedKeyTypes is understood by
+	// every client from 7.0 onward. Passing the 8.5-only name would make older
+	// clients (Ubuntu 20.04's 8.2, RHEL 8's 8.0, macOS Big Sur's 8.1) abort
+	// with "Bad configuration option" and exit 255 before connecting.
+	sshOptPubkeyAlgos = "PubkeyAcceptedKeyTypes=+ssh-ed25519"
 )
 
 func CommonOptions(paths *config.Paths) []string {
 	return []string{
 		"-i", paths.SSHKey,
+		"-o", sshOptIdentitiesOnly,
+		"-o", sshOptPubkeyAlgos,
 		"-o", sshOptStrictHostKey,
 		"-o", "UserKnownHostsFile=" + paths.KnownHosts,
 		"-o", sshOptControlPath,
@@ -52,6 +73,14 @@ func BuildSSHArgs(paths *config.Paths, user, ip string, cmd ...string) []string 
 	return args
 }
 
+// BuildAutomatedSSHArgs is BuildSSHArgs with ConnectTimeoutOptions prepended,
+// for non-interactive ssh invocations (provisioning, marker checks, overlay
+// transfer) that should never block on connect or prompt for input. Do not use
+// it for the interactive `abox ssh` shell — see ConnectTimeoutOptions.
+func BuildAutomatedSSHArgs(paths *config.Paths, user, ip string, cmd ...string) []string {
+	return append(ConnectTimeoutOptions(), BuildSSHArgs(paths, user, ip, cmd...)...)
+}
+
 // BuildSCPArgs builds a complete SCP argument list.
 // The source and dest should include the user@host: prefix as needed.
 func BuildSCPArgs(paths *config.Paths, source, dest string, recursive bool) []string {
@@ -70,6 +99,18 @@ func BuildSCPArgs(paths *config.Paths, source, dest string, recursive bool) []st
 // RemotePath formats a remote path for SCP as user@host:path.
 func RemotePath(user, ip, path string) string {
 	return fmt.Sprintf("%s@%s:%s", user, ip, path)
+}
+
+// ConnectTimeoutOptions returns SSH options that bound the connection phase
+// (ConnectTimeout) and disable interactive prompts (BatchMode). Automated,
+// non-interactive ssh/scp invocations should prepend these so a black-holed
+// network or an unexpected password prompt can't block indefinitely. abox uses
+// passphraseless ed25519 keys, so BatchMode never suppresses a wanted prompt.
+//
+// Do NOT use these for the interactive `abox ssh` shell — BatchMode there would
+// break any legitimate prompt.
+func ConnectTimeoutOptions() []string {
+	return []string{"-o", "ConnectTimeout=5", "-o", "BatchMode=yes"}
 }
 
 // TunnelOptions returns SSH options optimized for long-running tunnels.
@@ -96,9 +137,8 @@ func WaitForSSH(paths *config.Paths, user, ip string, maxWait time.Duration) err
 		attempt++
 		// Try a simple SSH connection with a short timeout
 		args := CommonOptions(paths)
+		args = append(args, ConnectTimeoutOptions()...)
 		args = append(args,
-			"-o", "ConnectTimeout=5",
-			"-o", "BatchMode=yes",
 			Target(user, ip),
 			"true", // Just run 'true' to test connectivity
 		)

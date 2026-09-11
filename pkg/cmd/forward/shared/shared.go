@@ -7,12 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
-	"strings"
-	"syscall"
 	"time"
 
 	"github.com/sandialabs/abox/internal/config"
+	"github.com/sandialabs/abox/internal/procutil"
 	"github.com/sandialabs/abox/internal/sshutil"
 )
 
@@ -107,51 +105,14 @@ func FindForwardByHostPort(instanceDir string, hostPort int) (*ForwardEntry, err
 	return nil, nil //nolint:nilnil // nil means no matching forward found
 }
 
-// FindPIDByPattern scans /proc/*/cmdline for a process matching the given pattern.
-func FindPIDByPattern(pattern string) (int, error) {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return 0, fmt.Errorf("failed to read /proc: %w", err)
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil {
-			continue // Not a PID directory
-		}
-
-		// No /proc/[pid]/exe check: this function finds SSH tunnel processes
-		// (not abox processes), so the exe is /usr/bin/ssh, not our binary.
-		// The cmdline pattern (e.g. "localhost:8080:localhost:80") is specific
-		// enough to avoid false matches.
-		cmdlinePath := filepath.Join("/proc", entry.Name(), "cmdline")
-		data, err := os.ReadFile(cmdlinePath)
-		if err != nil {
-			continue // Process may have exited
-		}
-
-		// cmdline uses null bytes as separators
-		cmdline := strings.ReplaceAll(string(data), "\x00", " ")
-		if strings.Contains(cmdline, pattern) {
-			return pid, nil
-		}
-	}
-
-	return 0, fmt.Errorf("no process found matching pattern: %s", pattern)
-}
+// FindPIDByPattern returns the PID of a process whose command line contains the
+// given pattern. The lookup mechanism is platform-specific (see the
+// pid_{linux,darwin,other}.go variants) because there is no portable process
+// table: Linux scans /proc, darwin shells out to pgrep.
 
 // IsPIDRunning checks if a process with the given PID is still running.
 func IsPIDRunning(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	// Sending signal 0 to a process checks if it exists without actually sending a signal
-	err := syscall.Kill(pid, 0)
-	return err == nil
+	return procutil.IsAlive(pid)
 }
 
 // UpdateForwardPID updates the PID for an existing forward entry identified by host port.
@@ -174,6 +135,9 @@ func UpdateForwardPID(instanceDir string, hostPort int, newPID int) error {
 // StartTunnel spawns an SSH tunnel for the given forward entry and returns the PID.
 func StartTunnel(paths *config.Paths, user, ip string, entry ForwardEntry) (int, error) {
 	sshArgs := sshutil.CommonOptions(paths)
+	// Bound the connection phase so a stalled auth can't hang StartTunnel before
+	// ssh -f forks (which happens only after authentication).
+	sshArgs = append(sshArgs, sshutil.ConnectTimeoutOptions()...)
 	sshArgs = append(sshArgs, sshutil.TunnelOptions()...)
 
 	var forwardArg string
@@ -227,7 +191,7 @@ func CleanupForwards(instanceDir string) error {
 
 	for _, f := range forwards.Forwards {
 		if IsPIDRunning(f.PID) {
-			_ = syscall.Kill(f.PID, syscall.SIGTERM)
+			_ = procutil.TerminatePID(f.PID)
 		}
 	}
 

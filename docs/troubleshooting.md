@@ -181,11 +181,12 @@ This checks: host configuration, VM state, network, DNS/HTTP filter services, SS
    ```
    The HTTP proxy uses the same allowlist as DNS filtering.
 
-### VM Has No IP Address
+### VM Is Not Reachable
 
-**Symptoms:**
-- `abox ssh dev` hangs
-- `abox status dev` shows no IP
+The guest's IP is static (baked into cloud-init at create; `abox status dev` shows
+it whenever the VM is running), so "no IP" is not the failure mode — the guest not
+coming up on that IP is. `abox ssh dev` hangs when the guest hasn't finished booting
+or its network didn't come up.
 
 **Troubleshooting:**
 
@@ -202,7 +203,7 @@ This checks: host configuration, VM state, network, DNS/HTTP filter services, SS
    virsh net-list | grep abox-dev
    ```
 
-4. **Restart DHCP:**
+4. **Restart the instance:**
    ```bash
    abox restart dev
    ```
@@ -273,6 +274,18 @@ This checks: host configuration, VM state, network, DNS/HTTP filter services, SS
    virsh net-undefine abox-dev
    ```
 
+3. **VPN / host route claims the VM subnet (macOS):** if the VM boots and guest
+   egress works (the DNS/HTTP filter logs show traffic) but host-to-guest `ssh`
+   and `mount` time out, a host route — usually a VPN — likely owns the VM's `/24`.
+   abox skips host-routed subnets when it auto-allocates, but an explicit
+   `--subnet` (or a VPN that connects after `create`) can still collide. Confirm
+   and pick a clear subnet:
+   ```bash
+   route -n get 192.168.128.1      # interface: utunN => a VPN owns this /24
+   netstat -rn | grep 192.168.128
+   abox create dev --subnet 192.168.211.0/24   # or disconnect the VPN
+   ```
+
 ### Mount Command Fails
 
 **Symptoms:**
@@ -341,7 +354,6 @@ This checks: host configuration, VM state, network, DNS/HTTP filter services, SS
 - `abox monitor logs <name>` is empty even though Tetragon is running in the VM
 - `abox monitor status <name>` shows `Events logged: 0` (with the socket reported as
   existing and the daemon running)
-- `TestMonitorEventTypes` e2e subtests fail with "no ... event found"
 
 **Cause:**
 
@@ -370,7 +382,8 @@ libvirt versions, which is why group membership is required.)
    abox monitor status <name>     # Events logged: should be > 0
    ```
 
-`abox start` prints a warning naming the exact group when it detects this.
+`abox start` prints a warning naming the exact group when it detects this. (libvirt
+backend only; the macOS/vfkit backend does not support monitoring.)
 
 ## Log Locations
 
@@ -425,20 +438,55 @@ abox monitor serve dev
 
 These commands run the filter in the foreground with direct log output, useful for diagnosing startup failures.
 
+### Profiling Performance
+
+Slow operations (notably `export`/`import`, which flatten and archive the full disk) can be measured with
+three opt-in environment variables. All are no-ops when unset, so normal runs are unaffected.
+
+```bash
+# Per-operation wall-clock timings, printed to stderr (e.g. "abox: export:disk took 3m12s").
+# Best for time spent in subprocesses like qemu-img, which a CPU profile cannot see.
+ABOX_TIMINGS=1 abox export dev /tmp/dev.abox.tar.gz
+
+# Whole-process CPU profile — pinpoints in-process hot spots (gzip, tar, io.Copy).
+ABOX_CPUPROFILE=/tmp/cpu.prof abox export dev /tmp/dev.abox.tar.gz
+go tool pprof ./abox /tmp/cpu.prof        # then: top, list <func>, web
+
+# Whole-process execution trace.
+ABOX_TRACE=/tmp/trace.out abox export dev /tmp/dev.abox.tar.gz
+go tool trace /tmp/trace.out
+```
+
+Because `qemu-img convert` runs as a subprocess, its cost shows up only in `ABOX_TIMINGS`, while
+`ABOX_CPUPROFILE` attributes the in-process archiving work — use them together.
+
 ### System Logs
 ```bash
 # libvirt logs
 journalctl -u libvirtd
 
-# Audit events (all privileged operations)
+# Audit events (all privileged operations) — Linux
 journalctl -t abox
+
+# Audit events — macOS (unified log; --info is required)
+log show --predicate 'process == "logger" && eventMessage BEGINSWITH "abox"' --info   # recent, best-effort
+log stream --predicate 'process == "logger" && eventMessage BEGINSWITH "abox"' --info   # live (reliable)
 
 # Check for VM errors
 virsh dominfo abox-dev
 virsh dumpxml abox-dev
 ```
 
-The `journalctl -t abox` audit log records: instance create, start, stop, remove, import, export, SSH access, SCP transfers, provision runs, mount/unmount, and filter mode changes.
+The abox audit log records: instance create, start, stop, remove, import, export,
+SSH access, SCP transfers, provision runs, mount/unmount, and filter mode changes.
+On Linux it goes to syslog (`journalctl -t abox`), a durable root-owned trail. On
+macOS it goes to the system unified log via `logger`, which keeps events out of a
+user-writable `$HOME` file. Note a current macOS limitation: the CLI writes at
+os_log INFO level, so events land in the in-memory buffer and are not guaranteed to
+persist to the on-disk store — they can age out under load or across a reboot, and
+`log show` may miss older events. For reliable capture use `log stream` (above)
+from the start of a session. A fully durable macOS trail is planned. `abox logs`
+prints the exact read-back command for your platform.
 
 ## Getting Help
 

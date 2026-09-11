@@ -9,7 +9,6 @@ import (
 	"github.com/sandialabs/abox/internal/backend"
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/daemon"
-	"github.com/sandialabs/abox/internal/firewall"
 	"github.com/sandialabs/abox/internal/instance"
 	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/pkg/cmd/completion"
@@ -85,11 +84,16 @@ func runStop(ctx context.Context, opts *Options, name string) error {
 		return nil
 	}
 
+	// Allow the vmnet-helper teardown (inside stopVM, on macOS ≤15) to prompt for a
+	// password when attached to a terminal, so stop can kill the root-owned helper
+	// without a passwordless-kill sudoers grant. No-op off macOS / on a non-TTY.
+	opts.Factory.ConfigureInteractiveHelperSignaling()
+
 	if err := stopVM(ctx, w, be, name, opts.Force); err != nil {
 		return err
 	}
 
-	cleanupAfterStop(w, opts, inst, name)
+	cleanupAfterStop(ctx, w, opts, inst, name)
 
 	if !opts.Brief {
 		fmt.Fprintf(w, "\nInstance %q stopped.\n", name)
@@ -144,16 +148,29 @@ func gracefulStop(ctx context.Context, w io.Writer, be backend.Backend, name str
 	return nil
 }
 
-// cleanupAfterStop removes firewall rules, stops daemons, and cleans up UFW.
-func cleanupAfterStop(w io.Writer, opts *Options, inst *config.Instance, name string) {
-	// Remove iptables DNS redirect rules (flush all rules for this bridge).
-	// Privilege is acquired lazily (best-effort) so stop succeeds even
-	// without sudo — the VM shuts down regardless and firewall rules
-	// become inert.
+// cleanupAfterStop tears down egress enforcement and stops the filter/monitor daemons.
+func cleanupAfterStop(ctx context.Context, w io.Writer, opts *Options, inst *config.Instance, name string) {
+	// Tear down egress enforcement (Linux: iptables DNS redirect + nwfilter;
+	// macOS: the per-instance pf anchor) via the egress seam. Privilege is acquired
+	// lazily; how much it may prompt is decided per-platform below. Any unprivileged
+	// resource (e.g. the nwfilter) is removed regardless.
 	if opts.Factory != nil {
-		if client, err := opts.Factory.PrivilegeClientFor(name); err == nil {
-			fmt.Fprintln(w, "Removing DNS redirect rules...")
-			firewall.NewIPTablesClient(client).Flush(inst.Bridge)
+		// Decide whether egress teardown may prompt for a password. The choice is
+		// platform-specific (see configureStopPrivilege): Linux forces
+		// non-interactive because its escalation paths (setuid helper, root,
+		// external, already-running) are non-interactive, so teardown never blocks;
+		// macOS gates on the TTY so that an interactive `abox stop` can flush the pf
+		// anchor (its only escalation is interactive sudo) while a non-TTY run stays
+		// best-effort. Leaving a stale pf anchor loaded after every stop is the leak
+		// this avoids.
+		configureStopPrivilege(opts.Factory)
+		if be, err := opts.Factory.BackendFor(name); err == nil && be != nil {
+			if ec := be.EgressController(); ec != nil {
+				fmt.Fprintln(w, "Removing egress rules...")
+				if err := ec.Remove(ctx, inst); err != nil {
+					logging.Warn("failed to remove egress rules", "error", err, "instance", name)
+				}
+			}
 		}
 	}
 
@@ -167,10 +184,4 @@ func cleanupAfterStop(w io.Writer, opts *Options, inst *config.Instance, name st
 
 	fmt.Fprintln(w, "Stopping DNS filter...")
 	daemon.StopDNSFilter(name)
-
-	if opts.Factory != nil {
-		if client, err := opts.Factory.PrivilegeClientFor(name); err == nil {
-			firewall.NewUFWClient(client).Cleanup(w, inst.Bridge, "")
-		}
-	}
 }

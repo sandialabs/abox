@@ -108,7 +108,7 @@ func collectInstance(f *factory.Factory, name string) instanceJSON {
 
 	be, err := f.BackendFor(name)
 	if err != nil {
-		be, err = backend.AutoDetect()
+		be, err = f.AutoDetectBackend()
 		if err != nil {
 			item.State = "unknown"
 			return item

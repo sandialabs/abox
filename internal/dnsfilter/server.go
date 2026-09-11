@@ -40,7 +40,12 @@ type Server struct {
 	filterbase.TrafficLoggerMixin // embedded traffic logger
 	filter                        *allowlist.Filter
 	upstream                      string
-	stats                         Stats
+	// targetChecker is the DNS-rebinding policy: an answer resolving to a
+	// dangerous IP (loopback/private/link-local/metadata) is blocked unless the
+	// operator permitted the range via allow_private_targets. Set once before
+	// Start; the nil/zero value denies all dangerous ranges (fail-closed).
+	targetChecker *filterbase.TargetChecker
+	stats         Stats
 }
 
 // NewServer creates a new DNS server.
@@ -60,14 +65,29 @@ func NewServer(filter *allowlist.Filter, upstream string, passive bool) (*Server
 	}
 
 	s := &Server{
-		filter:   filter,
-		upstream: normalizedUpstream,
+		filter:        filter,
+		upstream:      normalizedUpstream,
+		targetChecker: &filterbase.TargetChecker{}, // deny all dangerous ranges until configured
 		stats: Stats{
 			StartTime: time.Now(),
 		},
 	}
 	s.SetActive(!passive)
 	return s, nil
+}
+
+// SetAllowPrivateTargets configures the opt-in list of otherwise-blocked answer
+// CIDRs (config: http.allow_private_targets, shared with the HTTP proxy). An
+// empty list keeps the default deny-all-dangerous rebinding posture. Must be
+// called before Start. On an invalid CIDR it returns the error and leaves the
+// previous (fail-closed) checker in place.
+func (s *Server) SetAllowPrivateTargets(cidrs []string) error {
+	tc, err := filterbase.NewTargetChecker(cidrs)
+	if err != nil {
+		return err
+	}
+	s.targetChecker = tc
+	return nil
 }
 
 // InitTrafficLogger initializes the traffic logger for this server.
@@ -221,7 +241,6 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	// Track explicit allowlist match separately from passive-mode "allow everything".
-	// Explicitly allowlisted domains skip rebinding protection (the user trusts them).
 	explicitlyAllowed := s.filter.IsAllowed(q.Name)
 	allowed := explicitlyAllowed || !s.IsActive()
 
@@ -236,8 +255,6 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		}
 		return
 	}
-
-	atomic.AddUint64(&s.stats.AllowedQueries, 1)
 
 	clientUsedTCP := false
 	if _, ok := w.RemoteAddr().(*net.TCPAddr); ok {
@@ -262,17 +279,25 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
+	// Validate DNS response doesn't contain dangerous IPs (rebinding protection).
+	// Runs for allowlisted domains too: the host-side proxy dials the resolved
+	// IP, so an allowlisted name rebound/poisoned to a private or metadata address
+	// would otherwise be an SSRF vector. Ranges in allow_private_targets are
+	// permitted (see checkRebinding). This runs BEFORE the allowed-count/LogAllow
+	// below so a blocked answer is accounted as blocked (not allowed) and logged
+	// exactly once (as a block). The HTTP filter enforces the same resolved-IP gate
+	// at dial time (httpfilter dialControl), though its per-dial accounting differs
+	// from this per-query path.
+	if s.checkRebinding(w, r, resp, q, source) {
+		return
+	}
+
+	atomic.AddUint64(&s.stats.AllowedQueries, 1)
+
 	// Log allow to traffic log
 	if logger := s.TrafficLogger(); logger != nil {
 		logger.LogAllow(q.Name, source,
 			logging.WithType(dns.TypeToString[q.Qtype]))
-	}
-
-	// Validate DNS response doesn't contain private/blocked IPs (rebinding protection).
-	// Skip for explicitly allowlisted domains — if the user trusts the domain,
-	// they trust where it resolves.
-	if !explicitlyAllowed && s.checkRebinding(w, r, resp, q, source) {
-		return
 	}
 
 	// Write final response
@@ -318,7 +343,8 @@ func (s *Server) checkRebinding(w dns.ResponseWriter, r *dns.Msg, resp *dns.Msg,
 		default:
 			continue
 		}
-		if filterbase.IsBlockedIP(ip) {
+		if s.targetChecker.IsBlocked(ip) {
+			atomic.AddUint64(&s.stats.BlockedQueries, 1)
 			if logger := s.TrafficLogger(); logger != nil {
 				logger.LogBlock(q.Name, "dns_rebinding", source,
 					logging.WithType(dns.TypeToString[q.Qtype]))

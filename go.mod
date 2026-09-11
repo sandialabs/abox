@@ -2,6 +2,12 @@ module github.com/sandialabs/abox
 
 go 1.26.0
 
+// Build with go1.26.6+, which carries the stdlib security fixes govulncheck
+// flags (net/http, crypto/tls, net/url, os, encoding/*). The `go` directive
+// stays at 1.26.0 so this does not raise the minimum Go version for consumers;
+// CI (go-version "1.26" + check-latest) already floats to the newest patch.
+toolchain go1.26.6
+
 require (
 	charm.land/bubbletea/v2 v2.0.8
 	charm.land/lipgloss/v2 v2.0.5

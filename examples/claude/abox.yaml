@@ -23,3 +23,13 @@ dns:
 allowlist:
   - api.anthropic.com
   - platform.claude.com
+
+# Inject the Anthropic API key on the host so the agent in the VM never holds it.
+# Store the value with:  abox secrets set claude anthropic --from-env ANTHROPIC_API_KEY
+# then unset it from the guest environment. Requires http.mitm (on by default).
+http:
+  secret_injections:
+    - key: anthropic          # references the value stored via 'abox secrets set'
+      host: api.anthropic.com
+      header: x-api-key
+      path_prefix: /v1/       # only inject on the API paths

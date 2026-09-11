@@ -5,30 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/fsnotify/fsnotify"
-	"golang.org/x/sys/unix"
 
 	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/validation"
 )
-
-// OpenFileNoFollow opens a file with O_NOFOLLOW to prevent symlink attacks.
-// This provides atomic TOCTOU protection - the check and open happen in one syscall.
-func OpenFileNoFollow(path string, flag int, perm os.FileMode) (*os.File, error) {
-	fd, err := unix.Open(path, flag|unix.O_NOFOLLOW, uint32(perm))
-	if err != nil {
-		if err == unix.ELOOP {
-			return nil, fmt.Errorf("path is a symlink (security risk): %s", path)
-		}
-		return nil, err
-	}
-	return os.NewFile(uintptr(fd), path), nil
-}
 
 // Loader handles loading and watching the allowlist configuration file.
 type Loader struct {
@@ -98,6 +82,11 @@ func (l *Loader) parseFile() ([]string, error) {
 		// strip the wildcard prefix for storage
 		line = strings.TrimPrefix(line, "*.")
 
+		// Convert IDN/Unicode entries to punycode before validation so a Unicode
+		// allowlist line matches the ASCII form DNS queries arrive in (and passes
+		// the ASCII-only domain validation below).
+		line = toASCIIDomain(line)
+
 		// Validate domain format (skip invalid entries silently)
 		if err := validation.ValidateDomain(line); err != nil {
 			continue
@@ -130,9 +119,10 @@ func (l *Loader) Watch() error {
 		return fmt.Errorf("failed to watch config directory: %w", err)
 	}
 
-	// Set up SIGHUP handler
-	l.sighup = make(chan os.Signal, 1)
-	signal.Notify(l.sighup, syscall.SIGHUP)
+	// Set up the manual reload signal handler (SIGHUP on Unix; no-op on
+	// platforms without it, where l.sighup is nil and the select case below
+	// simply never fires).
+	l.sighup = registerReloadSignal()
 
 	go l.watchLoop(l.sighup)
 
@@ -148,11 +138,12 @@ func (l *Loader) watchLoop(sighup chan os.Signal) {
 		case <-l.stopCh:
 			return
 
-		case sig := <-sighup:
-			if sig == syscall.SIGHUP {
-				if err := l.Load(); err != nil && l.onReload != nil {
-					l.onReload(0, err)
-				}
+		case <-sighup:
+			// A value on this channel is always the reload signal (the channel
+			// is registered for it specifically). On platforms without the
+			// signal, sighup is nil and this case never fires.
+			if err := l.Load(); err != nil && l.onReload != nil {
+				l.onReload(0, err)
 			}
 
 		case event, ok := <-l.watcher.Events:
@@ -188,9 +179,7 @@ func (l *Loader) handleWatcherEvent(event fsnotify.Event, filename string) {
 // Stop stops the file watcher.
 func (l *Loader) Stop() {
 	close(l.stopCh)
-	if l.sighup != nil {
-		signal.Stop(l.sighup)
-	}
+	stopReloadSignal(l.sighup)
 	if l.watcher != nil {
 		_ = l.watcher.Close()
 	}

@@ -1,3 +1,13 @@
+//go:build linux
+
+// These tests exercise the override registry, which today is populated only by
+// the libvirt backend (linux-only): it is the sole backend that registers an
+// override default ("libvirt.template"). The vfkit backend registers none, so on
+// darwin the registry is empty, availableKeys() is empty, and there is no
+// "<backend>.template" key to dump. Gate the whole file to linux rather than
+// blank-importing a package with no buildable files on darwin (which breaks
+// `go test ./...` on macOS). The dump command itself is platform-agnostic and is
+// still compiled on darwin by the normal build.
 package dump
 
 import (

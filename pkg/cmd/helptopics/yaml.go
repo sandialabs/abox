@@ -8,7 +8,7 @@ LOCATION
 FIELDS
   version          int      Configuration version (required, must be 1)
   name             string   Instance name (required)
-  backend          string   VM backend (default: auto-detect, currently only "libvirt")
+  backend          string   VM backend (default: auto-detect; libvirt on Linux, vfkit on macOS, or vmware)
   cpus             int      CPU cores (default: 2)
   memory           int      Memory in MB (default: 4096)
   disk             string   Disk size (default: "20G")
@@ -24,6 +24,8 @@ FIELDS
 
   http:                     HTTP proxy configuration object
     mitm           bool     Enable TLS MITM for HTTPS inspection (default: true)
+    allow_private_targets []string CIDRs the filters may reach despite the default SSRF
+                           deny of private/loopback/link-local/metadata IPs (default: none)
 
   monitor:                  Agent monitoring configuration
     enabled        bool     Enable Tetragon monitoring via virtio-serial (default: false)
