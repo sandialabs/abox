@@ -54,7 +54,13 @@ type Server struct {
 	// nil/zero value denies all dangerous ranges, so the filter is fail-closed
 	// even if a setter is never called.
 	targetChecker *filterbase.TargetChecker
-	stats         Stats
+	// mitmExceptions holds domains carried as a transparent tunnel even when MITM is
+	// enabled (cert-pinned apps). It is consulted in decideConnect only after the
+	// allowlist + SSRF checks pass, so it never grants access — it only downgrades an
+	// already-allowed host from interception to a tunnel. Never nil (see NewServer);
+	// an empty matcher makes the feature an inert no-op. Set once before Start.
+	mitmExceptions *allowlist.Filter
+	stats          Stats
 
 	// HTTP server + proxy plumbing
 	server       *http.Server
@@ -149,8 +155,9 @@ func (k *keyLogWriter) Write(p []byte) (int, error) {
 // NewServer creates a new HTTP proxy server.
 func NewServer(filter *allowlist.Filter, passive bool) *Server {
 	s := &Server{
-		filter:        filter,
-		targetChecker: &filterbase.TargetChecker{}, // deny all dangerous ranges until configured
+		filter:         filter,
+		targetChecker:  &filterbase.TargetChecker{}, // deny all dangerous ranges until configured
+		mitmExceptions: allowlist.NewFilter(),       // empty = no exceptions until SetMITMExceptions
 		stats: Stats{
 			StartTime: time.Now(),
 		},
@@ -322,6 +329,26 @@ func (s *Server) decideConnect(host string) connectAction {
 		return actionTunnel
 	}
 
+	// MITM exception: the host is allowlisted and passed SSRF, but is configured to
+	// bypass interception (e.g. a TLS-pinned app the proxy cannot MITM). Downgrade to
+	// a transparent tunnel. This never grants access — access was decided above. We
+	// forfeit inner-Host/domain-fronting inspection for this host, identical to global
+	// mitm:false but scoped to one domain, so audit it distinctly. The mitmReady guard
+	// above means this branch is reached only when MITM is on, so it cannot double-count
+	// with the no-CA tunnel branch.
+	if s.mitmExceptions.IsAllowed(host) {
+		atomic.AddUint64(&s.stats.TotalRequests, 1)
+		atomic.AddUint64(&s.stats.AllowedRequests, 1)
+		logging.Audit("https tunneled without MITM inspection (mitm_exception)",
+			"action", logging.ActionHTTPTunnelException,
+			"host", host,
+		)
+		if logger := s.TrafficLogger(); logger != nil {
+			logger.LogAllow(host, "", logging.WithReason("mitm_exception"))
+		}
+		return actionTunnel
+	}
+
 	return actionIntercept
 }
 
@@ -445,6 +472,26 @@ func (s *Server) SetAllowPrivateTargets(cidrs []string) error {
 	}
 	s.targetChecker = tc
 	return nil
+}
+
+// SetMITMExceptions configures the domains carried as a transparent tunnel even
+// when MITM is enabled (config: http.mitm_exceptions), for apps that pin
+// certificates and break under interception. Matching is suffix-based (a host
+// covers its subdomains), mirroring the allowlist. An empty list disables the
+// feature. Must be called before Start. Exceptions never grant access — the
+// allowlist + SSRF checks in decideConnect run first and still apply.
+//
+// A leading "*." is stripped so "*.example.com" behaves like "example.com" (the
+// suffix matcher already covers subdomains). This mirrors the allowlist loader and
+// config.ValidateMITMExceptions, so runtime matching honors exactly what config
+// validation accepts — otherwise a "*."-prefixed entry would be stored with the
+// literal "*" label and silently match nothing.
+func (s *Server) SetMITMExceptions(domains []string) {
+	normalized := make([]string, len(domains))
+	for i, d := range domains {
+		normalized[i] = strings.TrimPrefix(strings.TrimSpace(d), "*.")
+	}
+	s.mitmExceptions.Replace(normalized)
 }
 
 // dialControl is the net.Dialer.Control callback installed on every direct dial

@@ -79,12 +79,20 @@ func runServe(opts *Options, name string) error {
 		return fmt.Errorf("invalid http.allow_private_targets: %w", err)
 	}
 
+	// Apply the MITM exception list: allowlisted hosts carried as a transparent
+	// tunnel even when MITM is on (cert-pinned apps). Domains were validated at
+	// config Load (config.ValidateMITMExceptions); Replace skips any that slip past.
+	server.SetMITMExceptions(setup.Inst.HTTP.MITMExceptions)
+
 	// Load CA certificate for TLS MITM if enabled
 	if setup.Inst.HTTP.MITM {
 		if err := server.LoadCA(setup.Paths.CACert, setup.Paths.CAKey); err != nil {
 			return fmt.Errorf("failed to load CA certificate: %w (run 'abox remove %s && abox create %s' to regenerate)", err, name, name)
 		}
 		fmt.Fprintf(os.Stderr, "TLS MITM enabled (domain fronting protection)\n")
+		if n := len(setup.Inst.HTTP.MITMExceptions); n > 0 {
+			fmt.Fprintf(os.Stderr, "MITM exceptions: %d domain(s) tunneled without inspection\n", n)
+		}
 	} else {
 		fmt.Fprintf(os.Stderr, "WARNING: TLS MITM disabled - domain fronting protection unavailable\n")
 	}
@@ -166,6 +174,12 @@ func applySecretInjections(server *httpfilter.Server, setup *filterbase.DaemonSe
 	}
 	if passive {
 		return fmt.Errorf("http.secret_injections cannot be used in passive mode for instance %q (would transmit credentials while profiling)", name)
+	}
+	// Defense-in-depth against a hand-edited config.yaml that slipped past Load-time
+	// validation: a binding host covered by a MITM exception would be tunneled, so
+	// the credential could never be injected (nor a guest-supplied one stripped).
+	if err := config.ValidateMITMExceptions(setup.Inst.HTTP.MITMExceptions, bindings); err != nil {
+		return fmt.Errorf("instance %q: %w", name, err)
 	}
 
 	// An upstream proxy (http_proxy/https_proxy) resolves the target itself, so the

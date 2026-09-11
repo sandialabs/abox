@@ -8,7 +8,9 @@ LOCATION
 FIELDS
   version          int      Configuration version (required, must be 1)
   name             string   Instance name (required)
-  backend          string   VM backend (default: auto-detect; libvirt on Linux, vfkit on macOS, or vmware)
+  backend          string   VM backend (default: auto-detect; libvirt on Linux, vfkit on macOS).
+                            ABOX_BACKEND overrides it. Experimental backends (vmware) are
+                            rejected here; select those with ABOX_BACKEND.
   cpus             int      CPU cores (default: 2)
   memory           int      Memory in MB (default: 4096)
   disk             string   Disk size (default: "20G")
@@ -24,8 +26,24 @@ FIELDS
 
   http:                     HTTP proxy configuration object
     mitm           bool     Enable TLS MITM for HTTPS inspection (default: true)
+    max_connections int     Cap on concurrent client connections to the proxy (default: 512).
+                           Keep below the host's 'ulimit -n'.
     allow_private_targets []string CIDRs the filters may reach despite the default SSRF
                            deny of private/loopback/link-local/metadata IPs (default: none)
+    mitm_exceptions []string Domains carried as a transparent TLS tunnel (no interception)
+                           even when mitm is enabled, for certificate-pinning apps. Matches
+                           the domain and its subdomains. A domain must still be allowlisted
+                           to be reachable — an exception only downgrades interception to a
+                           tunnel, it never grants access. Keep the list minimal.
+    secret_injections []object Bind values from the per-instance secret store into outbound
+                           request headers, so the guest never holds the raw credential:
+                             key          string  Name in the secret store (required)
+                             host         string  Exact host to inject into (required)
+                             header       string  Header name to set (required)
+                             path_prefix  string  Only inject under this path prefix (default: all)
+                             value_prefix string  Prepended to the value (e.g. "Bearer ")
+                           A secret_injections host cannot also be a mitm_exceptions domain:
+                           injection needs a request to modify. See 'abox secrets --help'.
 
   monitor:                  Agent monitoring configuration
     enabled        bool     Enable Tetragon monitoring via virtio-serial (default: false)
@@ -60,7 +78,13 @@ FULL EXAMPLE
   dns:
     upstream: "1.1.1.1:53"
   http:
-    mitm: true              # Disable with false for certificate-pinning apps
+    mitm: true              # Prefer mitm_exceptions over disabling this globally
+    # mitm_exceptions:      # Tunnel these without interception (pinned certs)
+    #   - pinned.example.com
+    # secret_injections:    # Value comes from 'abox secrets set', never from this file
+    #   - key: api-key
+    #     host: api.anthropic.com
+    #     header: x-api-key
   monitor:
     enabled: true
     # version: v1.3.0  # Optional: pin to specific version

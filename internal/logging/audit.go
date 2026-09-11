@@ -33,6 +33,10 @@ const (
 
 	// Filter allows worth auditing (permitted, but notable)
 	ActionHTTPAllowFronting = "http.allow.cross_origin"
+	// ActionHTTPTunnelException marks an allowlisted host carried as a transparent
+	// tunnel because it is a configured MITM exception — TLS is not intercepted, so
+	// inner-Host/domain-fronting inspection is skipped for this connection.
+	ActionHTTPTunnelException = "http.tunnel.mitm_exception"
 
 	// TLS key logging (writes session secrets to disk — security-sensitive)
 	ActionKeyLogStart = "http.keylog.start"

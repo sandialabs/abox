@@ -99,7 +99,7 @@ monitor:
 |-------|------|---------|-------------|
 | `version` | int | (required) | Configuration version. Must be `1`. |
 | `name` | string | (required) | Instance identifier. Must start with a letter, contain only letters/numbers/underscores/hyphens, max 63 chars. |
-| `backend` | string | (auto) | VM backend for the instance. Auto-detects `libvirt` on Linux and `vfkit` on macOS. The `vmware` backend is not auto-detected; select it with `ABOX_BACKEND=vmware` (see `abox help environment`). |
+| `backend` | string | (auto) | VM backend for the instance. Auto-detects `libvirt` on Linux and `vfkit` on macOS. `ABOX_BACKEND` takes precedence over this key. Experimental backends (`vmware`) are rejected here and must be selected with `ABOX_BACKEND=vmware` — an `abox.yaml` is committed and shared across a team, which is a wider trust surface than that gate is meant for (see `abox help environment`). |
 | `cpus` | int | 2 | Number of virtual CPU cores |
 | `memory` | int | 4096 | RAM in megabytes |
 | `disk` | string | "20G" | Disk size (e.g., "20G", "50G", "100G") |
@@ -113,6 +113,7 @@ monitor:
 | `dns.upstream` | string | host system resolver | Upstream DNS server for allowed queries. When unset, abox uses the host's system resolver (from `/etc/resolv.conf`, or SystemConfiguration on macOS), falling back to a public resolver (`8.8.8.8:53`) only if it can't be determined. Port defaults to 53 if not specified (e.g., "8.8.8.8" is valid). |
 | `http` | object | {} | HTTP proxy configuration (see below) |
 | `http.mitm` | bool | true | Enable TLS MITM for HTTPS inspection and domain fronting protection |
+| `http.mitm_exceptions` | []string | [] | Domains carried as a transparent TLS tunnel (no interception) even when `http.mitm` is enabled, for apps that pin certificates. Each entry matches the domain and its subdomains. A domain must still be allowlisted to be reachable — an exception only downgrades interception to a tunnel, it never grants access. See [MITM exceptions for pinned apps](#mitm-exceptions-for-pinned-apps). |
 | `http.max_connections` | int | 512 | Cap on concurrent client connections to the HTTP proxy, bounding host fd/goroutine use against a runaway or hostile VM. Raise for heavy parallel workloads; keep below the host's `ulimit -n`. Existing instances without this key use the default automatically. |
 | `http.allow_private_targets` | []string | [] | Opt-in list of CIDRs the DNS/HTTP filters may connect to despite the default SSRF deny of private/loopback/link-local/metadata ranges. Shared by both filters. See [Reaching internal hosts](#reaching-internal-hosts). |
 | `http.secret_injections` | []object | [] | Bind host-side secret values to outbound request headers so the guest never holds the raw credential. See [Secret injection](#secret-injection) and [docs/secrets.md](secrets.md). |
@@ -219,6 +220,54 @@ $ abox up
 Error: provision script not found: scripts/missing.sh
 ```
 
+### Unknown keys are rejected
+
+`abox.yaml` is parsed strictly: a key abox does not recognize is an error, not a
+silent no-op. A misspelled key would otherwise leave a setting you asked for
+quietly unapplied — and for keys like `http.secret_injections` or
+`http.mitm_exceptions` that means a security control that is not actually in
+effect.
+
+```
+$ abox up
+Error: 2 problems in abox.yaml
+
+  abox.yaml line 3: unknown key "memroy"
+  abox.yaml line 5: unknown key "http.mtim"
+
+did you mean "memory"?
+did you mean "http.mitm"?
+
+see 'abox yaml' for the full key reference
+```
+
+Two deliberate exceptions:
+
+- **`abox down` parses leniently.** Teardown needs only the instance name, so a
+  typo never stands between you and stopping a running VM.
+- **A newer `version:` wins over unknown keys.** A file written by a later abox
+  reports `version N is newer than supported; please upgrade abox` rather than
+  listing keys this build does not have yet.
+
+Keys inside `overrides:` are not covered — that section is a free-form map, so a
+typo there is still silently ignored.
+
+### Most keys apply at creation only
+
+`abox up` on an **existing** instance re-syncs the `allowlist` and nothing else.
+Everything under `http:` and `monitor:` — including `secret_injections`,
+`mitm_exceptions`, `mitm`, `max_connections` and `allow_private_targets` — is
+written into the instance config when the instance is created and is not
+reconciled afterwards. Editing those keys and re-running `abox up` reports
+success while the running instance keeps its original settings, so a change you
+intend as a tightening will not take effect.
+
+To change them, recreate the instance:
+
+```bash
+abox down --remove && abox up
+```
+
 ## Example Workflows
 
 ### Minimal Configuration
@@ -266,6 +315,36 @@ http:
 ```
 
 **Warning:** Setting `http.mitm: false` disables domain fronting protection. HTTPS connections will be proxied without inspection, so attackers could potentially bypass the allowlist by using domain fronting techniques.
+
+### MITM exceptions for pinned apps
+
+If only a few domains pin certificates, prefer `http.mitm_exceptions` over disabling MITM
+globally. Listed domains are carried as a transparent TLS tunnel (no interception) while every
+other domain is still inspected:
+
+```yaml
+version: 1
+name: dev
+allowlist:
+  - example.com
+  - pinned.example.com          # must also be allowlisted to be reachable
+http:
+  mitm: true                    # inspection stays on for everything else
+  mitm_exceptions:
+    - pinned.example.com        # matches pinned.example.com and its subdomains
+```
+
+Notes and caveats:
+
+- An exception **only downgrades interception to a tunnel** for an already-allowlisted host. It
+  never grants access: a domain not in the allowlist is still blocked, and the SSRF/DNS-rebinding
+  gate still applies to the tunneled connection.
+- Tunneling forfeits domain-fronting protection **for those domains only** (the proxy can no longer
+  see the inner Host). Keep the list minimal — it is a scoped equivalent of `http.mitm: false`.
+- A domain cannot be both a MITM exception and a `secret_injections` target: injection requires
+  interception, so a tunneled host could never receive its credential. This is rejected at create time.
+- The list is read when the HTTP filter starts; change it via `abox.yaml`/`config.yaml` and restart
+  the instance's filter to apply.
 
 ### Reaching internal hosts
 

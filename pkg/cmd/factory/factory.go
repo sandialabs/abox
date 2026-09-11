@@ -279,10 +279,53 @@ func (f *Factory) injectStorageProvider(b backend.Backend, name string) {
 // (instance-less) so the returned backend is safe to use for egress operations
 // should a caller need to.
 func (f *Factory) AutoDetectBackend() (backend.Backend, error) {
-	b, err := resolveBackend()
+	return f.BackendForNew("")
+}
+
+// BackendForNew returns the backend for a new instance, honoring a preference
+// declared in abox.yaml (backend:). Precedence is ABOX_BACKEND > preferred >
+// auto-detection, so a per-invocation env override always wins and an empty
+// preferred behaves exactly like AutoDetectBackend.
+//
+// Note it reads ABOX_BACKEND itself rather than delegating to resolveBackend:
+// resolveBackend falls through to AutoDetect when the variable is unset, so
+// calling it first would consume the auto-detect tier and make preferred
+// unreachable on every host where detection succeeds.
+//
+// An experimental backend is rejected here even though backend.Get would return
+// it. Auto-detection never selects one, and ABOX_BACKEND is a deliberate
+// per-operator action; abox.yaml is committed to a repo and shared across a
+// team, which is a wider trust surface than that gate was designed for.
+func (f *Factory) BackendForNew(preferred string) (backend.Backend, error) {
+	var (
+		b   backend.Backend
+		err error
+	)
+	switch {
+	case os.Getenv(EnvBackend) != "":
+		// resolveBackend emits the experimental warning for this tier itself.
+		b, err = resolveBackend()
+	case preferred != "":
+		if backend.IsExperimental(preferred) {
+			return nil, fmt.Errorf("backend %q from abox.yaml is experimental; select it with %s=%s instead",
+				preferred, EnvBackend, preferred)
+		}
+		b, err = backend.Get(preferred)
+		if err != nil {
+			// No "is not available" here: backend.Get's own error already says
+			// that (or "not found"), and repeating it reads as a stutter.
+			return nil, fmt.Errorf("backend %q from abox.yaml: %w", preferred, err)
+		}
+	default:
+		b, err = backend.AutoDetect()
+	}
 	if err != nil {
 		return nil, err
 	}
+	// No warnIfExperimental here: the env tier warns inside resolveBackend, the
+	// preferred tier rejects experimental backends outright, and AutoDetect never
+	// returns one. Warning again would just duplicate the line.
+
 	f.injectEgressProvider(b, "")
 	f.injectPfProvider(b, "")
 	f.injectStorageProvider(b, "")
