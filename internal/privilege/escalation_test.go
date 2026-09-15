@@ -1,4 +1,11 @@
+//go:build unix
+
 package privilege
+
+// SelectEscalationTool selects between sudo and pkexec — both Unix-only tools
+// with no Windows equivalent — so its behavior is only meaningful (and only
+// tested) on unix. The privilege helper itself fails closed on Windows (see
+// helper_other.go), which is why this test file is unix-gated.
 
 import (
 	"os"

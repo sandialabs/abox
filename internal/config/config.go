@@ -388,7 +388,7 @@ func GetPathsWithStorage(name, storageDir string) (*Paths, error) {
 
 	// Check that the cleaned path is still under instances directory
 	rel, err := filepath.Rel(cleanInstancesDir, cleanInstanceDir)
-	if err != nil || rel == ".." || (len(rel) >= 3 && rel[:3] == "../") {
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return nil, errors.New("invalid instance name: path traversal detected")
 	}
 

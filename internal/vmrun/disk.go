@@ -388,6 +388,12 @@ func checkExtentPath(name, dir string) error {
 	if filepath.IsAbs(name) {
 		return fmt.Errorf("vmdk extent path is absolute (%q); not self-contained", name)
 	}
+	// filepath.IsAbs is platform-dependent: a POSIX-absolute path ("/etc/shadow")
+	// is not absolute on Windows. The descriptor is portable text authored on any
+	// host, so reject a leading-slash path explicitly regardless of GOOS.
+	if strings.HasPrefix(name, "/") {
+		return fmt.Errorf("vmdk extent path is absolute (%q); not self-contained", name)
+	}
 	// Reject a Windows-style absolute path (e.g. C:\...) too: the descriptor is
 	// portable text and must not resolve outside dir on any host.
 	if len(name) >= 2 && name[1] == ':' {

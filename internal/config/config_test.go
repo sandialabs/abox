@@ -95,6 +95,7 @@ func TestGenerateBridgeName_UniqueHashes(t *testing.T) {
 }
 
 func TestLoad_WithMock(t *testing.T) {
+	skipOnWindows(t)
 	mock := NewMockFileSystem()
 	mock.Files["/home/testuser/.local/share/abox/instances/test/config.yaml"] = []byte(`
 version: 1
@@ -242,6 +243,7 @@ func TestSave_BackendConfigRoundTrip(t *testing.T) {
 }
 
 func TestExists_WithMock(t *testing.T) {
+	skipOnWindows(t)
 	mock := NewMockFileSystem()
 	mock.Files["/home/testuser/.local/share/abox/instances/test/config.yaml"] = []byte("version: 1\nname: test")
 	prev := SetFileSystem(mock)
@@ -256,6 +258,7 @@ func TestExists_WithMock(t *testing.T) {
 }
 
 func TestList_WithMock(t *testing.T) {
+	skipOnWindows(t)
 	mock := NewMockFileSystem()
 	mock.DirEntries["/home/testuser/.local/share/abox/instances"] = []os.DirEntry{
 		&mockDirEntry{nameVal: "dev", isDirVal: true},
@@ -295,6 +298,7 @@ func TestList_EmptyDir(t *testing.T) {
 }
 
 func TestUsedInstanceSubnets_WithMock(t *testing.T) {
+	skipOnWindows(t)
 	const base = "/home/testuser/.local/share/abox/instances"
 	mock := NewMockFileSystem()
 	mock.DirEntries[base] = []os.DirEntry{
@@ -480,6 +484,7 @@ func TestInstance_GetUser(t *testing.T) {
 }
 
 func TestGetPaths_XDGEnvVars(t *testing.T) {
+	skipOnWindows(t)
 	mock := NewMockFileSystem()
 	mock.EnvVars["XDG_DATA_HOME"] = "/custom/data"
 	mock.EnvVars["XDG_RUNTIME_DIR"] = "/run/user/1000"
@@ -502,6 +507,7 @@ func TestGetPaths_XDGEnvVars(t *testing.T) {
 }
 
 func TestRuntimeDir(t *testing.T) {
+	skipOnWindows(t)
 	tests := []struct {
 		name     string
 		xdg      string // value of XDG_RUNTIME_DIR ("" = unset)
@@ -562,6 +568,7 @@ func TestRuntimeDir(t *testing.T) {
 // path built from a trailing-slash runtime dir (via filepath.Join, as in
 // factory.PrivilegeClient) must satisfy the setuid helper's ValidateSocketPath.
 func TestRuntimeDir_SocketPathValid(t *testing.T) {
+	skipOnWindows(t)
 	mock := NewMockFileSystem()
 	mock.EnvVars["XDG_RUNTIME_DIR"] = "/run/user/1000/"
 	mock.Dirs["/run/user/1000"] = true
@@ -579,6 +586,7 @@ func TestRuntimeDir_SocketPathValid(t *testing.T) {
 }
 
 func TestDelete_WithMock(t *testing.T) {
+	skipOnWindows(t)
 	mock := NewMockFileSystem()
 	mock.Dirs["/home/testuser/.local/share/abox/instances/test"] = true
 	mock.Files["/home/testuser/.local/share/abox/instances/test/config.yaml"] = []byte("version: 1\nname: test")
@@ -597,6 +605,7 @@ func TestDelete_WithMock(t *testing.T) {
 }
 
 func TestLoad_ValidationRejectsInvalidUser(t *testing.T) {
+	skipOnWindows(t)
 	mock := NewMockFileSystem()
 	mock.Files["/home/testuser/.local/share/abox/instances/test/config.yaml"] = []byte(`
 version: 1
@@ -615,6 +624,7 @@ user: user$(whoami)
 }
 
 func TestLoad_ValidationRejectsInvalidInstanceName(t *testing.T) {
+	skipOnWindows(t)
 	mock := NewMockFileSystem()
 	mock.Files["/home/testuser/.local/share/abox/instances/test/config.yaml"] = []byte(`
 version: 1
@@ -632,6 +642,7 @@ memory: 4096
 }
 
 func TestLoad_ValidationRejectsInvalidMAC(t *testing.T) {
+	skipOnWindows(t)
 	mock := NewMockFileSystem()
 	mock.Files["/home/testuser/.local/share/abox/instances/test/config.yaml"] = []byte(`
 version: 1
@@ -650,6 +661,7 @@ mac_address: invalid-mac
 }
 
 func TestLoad_ValidationRejectsInvalidDNSLogLevel(t *testing.T) {
+	skipOnWindows(t)
 	mock := NewMockFileSystem()
 	mock.Files["/home/testuser/.local/share/abox/instances/test/config.yaml"] = []byte(`
 version: 1
@@ -672,6 +684,7 @@ dns:
 }
 
 func TestLoad_ValidationRejectsInvalidHTTPLogLevel(t *testing.T) {
+	skipOnWindows(t)
 	mock := NewMockFileSystem()
 	mock.Files["/home/testuser/.local/share/abox/instances/test/config.yaml"] = []byte(`
 version: 1
@@ -694,6 +707,7 @@ http:
 }
 
 func TestLoad_ValidationAcceptsValidConfig(t *testing.T) {
+	skipOnWindows(t)
 	mock := NewMockFileSystem()
 	mock.Files["/home/testuser/.local/share/abox/instances/test/config.yaml"] = []byte(`
 version: 1
@@ -832,6 +846,7 @@ func TestInstance_Validate(t *testing.T) {
 }
 
 func TestLoad_RejectsMissingVersion(t *testing.T) {
+	skipOnWindows(t)
 	mock := NewMockFileSystem()
 	mock.Files["/home/testuser/.local/share/abox/instances/test/config.yaml"] = []byte(`
 name: test
@@ -851,6 +866,7 @@ memory: 4096
 }
 
 func TestLoad_RejectsNewerVersion(t *testing.T) {
+	skipOnWindows(t)
 	mock := NewMockFileSystem()
 	mock.Files["/home/testuser/.local/share/abox/instances/test/config.yaml"] = []byte(`
 version: 999

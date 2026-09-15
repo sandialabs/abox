@@ -1,6 +1,7 @@
 package privilege
 
 import (
+	"runtime"
 	"testing"
 )
 
@@ -46,6 +47,13 @@ func TestValidateBridgeName(t *testing.T) {
 }
 
 func TestValidateSocketPath(t *testing.T) {
+	// ValidateSocketPath guards the Unix-domain helper socket path. Its
+	// cleanliness check uses filepath.Clean, which rewrites '/'→'\' on Windows
+	// and rejects every POSIX-style path in this table. The helper is unsupported
+	// on Windows anyway (helper_other.go), so this is a unix-only concern.
+	if runtime.GOOS == "windows" {
+		t.Skip("ValidateSocketPath validates POSIX helper socket paths; helper is unsupported on Windows")
+	}
 	tests := []struct {
 		name    string
 		path    string

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sandialabs/abox/internal/backend/backendtest"
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/vmrun"
 )
@@ -15,7 +16,7 @@ import (
 // Network().Create can allocate and persist a vnet, then returns it.
 func setupNetworkInstance(t *testing.T) *config.Instance {
 	t.Helper()
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", backendtest.ShortDataHome(t))
 	// Redirect the (root-owned) VMware networking answer-file to a temp path and
 	// fake tool resolution so ConfigureHostOnly runs hermetically regardless of
 	// the host OS. The exact per-platform command/file shape is covered by

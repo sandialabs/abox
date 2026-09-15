@@ -8,6 +8,7 @@ import (
 )
 
 func TestValidateStorageDir(t *testing.T) {
+	skipOnWindows(t)
 	tests := []struct {
 		name    string
 		dir     string
@@ -32,6 +33,7 @@ func TestValidateStorageDir(t *testing.T) {
 }
 
 func TestIsLegacyStorage(t *testing.T) {
+	skipOnWindows(t)
 	tests := []struct {
 		name       string
 		storageDir string

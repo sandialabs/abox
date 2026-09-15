@@ -5,10 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/sandialabs/abox/internal/backend"
+	"github.com/sandialabs/abox/internal/backend/backendtest"
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/vmrun"
 )
@@ -31,7 +33,7 @@ func testInstance() *config.Instance {
 // succeeds), and returns the resolved paths.
 func setupPaths(t *testing.T) *config.Paths {
 	t.Helper()
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", backendtest.ShortDataHome(t))
 	inst := testInstance()
 	p, err := config.GetPaths(inst.Name)
 	if err != nil {
@@ -74,10 +76,13 @@ func TestCreateWritesVMX(t *testing.T) {
 		t.Error("Exists should be true after Create")
 	}
 
-	// Verify 0o600 perms.
-	info, _ := os.Stat(vmxPath)
-	if info.Mode().Perm() != 0o600 {
-		t.Errorf("vmx perms = %o want 600", info.Mode().Perm())
+	// Verify 0o600 perms. Windows does not model Unix permission bits (Go reports
+	// 0666/0444 from the read-only attribute), so this check is unix-only.
+	if runtime.GOOS != "windows" {
+		info, _ := os.Stat(vmxPath)
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("vmx perms = %o want 600", info.Mode().Perm())
+		}
 	}
 }
 

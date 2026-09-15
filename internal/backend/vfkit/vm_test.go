@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandialabs/abox/internal/backend/backendtest"
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/vfkit"
 	"github.com/sandialabs/abox/internal/vmnethelper"
@@ -281,7 +282,7 @@ func startTestInstance() *config.Instance {
 // to be returned.
 func setupStartInstance(t *testing.T) {
 	t.Helper()
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", backendtest.ShortDataHome(t))
 
 	// ResolveBinaryPath honors ABOX_VMNET_HELPER_PATH; point it at a real file so
 	// Start gets past binary resolution without a Homebrew install.

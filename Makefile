@@ -1,4 +1,4 @@
-.PHONY: build build-helper install install-helper test test-e2e test-e2e-short test-e2e-all test-e2e-all-short lint clean release-dry-run proto cross-compile check-portable-imports
+.PHONY: build build-helper codesign install install-helper test test-e2e test-e2e-short test-e2e-all test-e2e-all-short lint clean release-dry-run proto cross-compile check-portable-imports
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
@@ -17,7 +17,13 @@ LDFLAGS := -s -w \
 # applied to `abox` itself below. There is no macOS abox-helper to build or sign.
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o abox ./cmd/abox
-	@if [ "$$(uname -s)" = "Darwin" ]; then codesign --force --sign - abox; fi
+	@$(MAKE) codesign BINARY=abox
+
+# codesign re-applies an ad-hoc signature to a freshly linked darwin binary
+# (see the comment above `build`). No-op on other OSes. Also used by goreleaser's
+# post-build hook; pass the binary via BINARY=.
+codesign:
+	@if [ "$$(uname -s)" = "Darwin" ]; then codesign --force --sign - "$(BINARY)"; fi
 
 # abox-helper is a setuid root binary and is //go:build linux only. On any other
 # OS `go build ./cmd/abox-helper` fails with "build constraints exclude all Go
