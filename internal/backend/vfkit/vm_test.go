@@ -272,6 +272,10 @@ func startTestInstance() *config.Instance {
 		Gateway:    "192.168.64.1",
 		IPAddress:  "192.168.64.10",
 		MACAddress: "00:0c:29:ab:cd:ef",
+		// Disk is required: Start -> loadInstanceState -> config.Load runs
+		// Validate(), which rejects an empty disk size before Start reaches the
+		// fail-closed teardown logic these tests exercise.
+		Disk: "20G",
 	}
 }
 

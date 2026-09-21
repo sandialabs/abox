@@ -216,6 +216,10 @@ func TestRemoveDeletesVMXNotDiskDir(t *testing.T) {
 }
 
 func TestSnapshotManagerArgVectors(t *testing.T) {
+	// Pin the vmrun host driver so the expected "-T ws" args are stable across
+	// platforms: without this, vmrunHostType() defaults to "fusion" on macOS
+	// (hosttype_darwin.go) and the arg vectors would not match.
+	t.Setenv("ABOX_VMRUN_HOSTTYPE", "ws")
 	paths := setupPaths(t)
 	vmxPath := vmrun.VMXPath(paths)
 	s := &SnapshotManager{}
@@ -299,8 +303,12 @@ func TestBackendSnapshotNotNil(t *testing.T) {
 // Before the fix, Create wrote the .vmx under the custom storage but Exists/
 // GetUUID/Remove/Redefine looked under the default dir and silently failed.
 func TestNonDefaultStorageDir(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	storageDir := t.TempDir() // a custom, NON-default storage root
+	// Use short temp roots: on macOS t.TempDir() returns a long /var/folders/...
+	// path that overflows the 103-byte sun_path cap once the instance socket
+	// paths are appended, so config.EnsureDirs -> ValidateSocketPaths fails. The
+	// socket resolves from the custom storageDir, so that root must be short too.
+	t.Setenv("XDG_DATA_HOME", backendtest.ShortDataHome(t))
+	storageDir := backendtest.ShortDataHome(t) // a custom, NON-default storage root
 
 	inst := testInstance()
 	inst.StorageDir = storageDir
