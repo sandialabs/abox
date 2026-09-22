@@ -9,7 +9,7 @@ go 1.26.0
 toolchain go1.26.6
 
 require (
-	charm.land/bubbletea/v2 v2.0.8
+	charm.land/bubbletea/v2 v2.0.9
 	charm.land/lipgloss/v2 v2.0.5
 	github.com/armon/go-radix v1.0.0
 	github.com/fsnotify/fsnotify v1.10.1
