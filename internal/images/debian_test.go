@@ -5,6 +5,22 @@ import (
 	"testing"
 )
 
+func TestDebianImageFilename(t *testing.T) {
+	cases := []struct {
+		version, arch, want string
+	}{
+		{"13", "amd64", "debian-13-generic-amd64.qcow2"},
+		{"13", "arm64", "debian-13-generic-arm64.qcow2"},
+		{"14", "arm64", "debian-14-generic-arm64.qcow2"},
+	}
+	for _, tc := range cases {
+		got := debianImageFilename(tc.version, tc.arch)
+		if got != tc.want {
+			t.Errorf("debianImageFilename(%q, %q) = %q, want %q", tc.version, tc.arch, got, tc.want)
+		}
+	}
+}
+
 // Realistic debian.csv snippet based on actual upstream format.
 // Tests the full parseDistroInfo pipeline: header parsing, EOL filtering,
 // release date filtering, and version gating (only 13+ returned).

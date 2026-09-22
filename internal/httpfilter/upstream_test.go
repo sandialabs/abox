@@ -131,6 +131,7 @@ func testProxyViaUpstream(t *testing.T, upstreamCA *x509.CertPool, upstreamURL *
 	filter := allowlist.NewFilter()
 	filter.Add("127.0.0.1")
 	server := NewServer(filter, false)
+	allowLoopback(t, server)
 	if err := server.LoadCA(cp, kp); err != nil {
 		t.Fatalf("LoadCA: %v", err)
 	}
@@ -293,6 +294,7 @@ func tunnelModeServer(t *testing.T) *Server {
 	filter := allowlist.NewFilter()
 	filter.Add("127.0.0.1")
 	server := NewServer(filter, false)
+	allowLoopback(t, server)
 	return server
 }
 

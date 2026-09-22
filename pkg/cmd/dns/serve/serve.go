@@ -68,6 +68,12 @@ func runServe(opts *Options, name string) error {
 		return fmt.Errorf("failed to create DNS server: %w", err)
 	}
 
+	// Apply the opt-in private-target allow-list (rebinding policy, shared with
+	// the HTTP proxy). An invalid CIDR must fail closed, so surface it.
+	if err := server.SetAllowPrivateTargets(setup.Inst.HTTP.AllowPrivateTargets); err != nil {
+		return fmt.Errorf("invalid http.allow_private_targets: %w", err)
+	}
+
 	// Initialize profile logger for domain capture (passive mode logs to this)
 	if err := server.InitProfileLogger(setup.Paths.ProfileLog); err != nil {
 		logging.Warn("failed to initialize profile logger", "error", err, "instance", name)
@@ -79,8 +85,11 @@ func runServe(opts *Options, name string) error {
 	}
 	defer server.CloseTrafficLogger()
 
-	// Listen on the gateway IP because iptables REDIRECT sends packets to the bridge IP.
-	listenAddr := fmt.Sprintf("%s:%d", setup.Inst.Gateway, setup.Inst.DNS.Port)
+	// Bind address depends on the platform's DNS redirect target: on Linux the
+	// iptables REDIRECT sends packets to the bridge/gateway IP, while on macOS the
+	// pfctl rdr rule redirects guest DNS to 127.0.0.1. The seam picks the right one.
+	bindHost := filterbase.DNSListenAddress(setup.Inst.Gateway)
+	listenAddr := fmt.Sprintf("%s:%d", bindHost, setup.Inst.DNS.Port)
 
 	dnsServer, err := server.Start(listenAddr)
 	if err != nil {
@@ -88,10 +97,10 @@ func runServe(opts *Options, name string) error {
 	}
 	defer func() { _ = dnsServer.Shutdown() }()
 
-	fmt.Fprintf(os.Stderr, "DNS server listening on %s:%d (UDP+TCP)\n", setup.Inst.Gateway, dnsServer.Port)
+	fmt.Fprintf(os.Stderr, "DNS server listening on %s:%d (UDP+TCP)\n", bindHost, dnsServer.Port)
 
 	// Start API server
-	api := dnsfilter.NewAPIServer(setup.Paths.DNSSocket, setup.Filter, server, setup.Loader)
+	api := dnsfilter.NewAPIServer(setup.Paths.DNSSocket, setup.Filter, server, setup.Loader, name)
 	if err := api.Start(); err != nil {
 		return fmt.Errorf("failed to start API server: %w", err)
 	}

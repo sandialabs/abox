@@ -7,15 +7,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/sandialabs/abox/internal/backend"
 	"github.com/sandialabs/abox/internal/boxfile"
 	"github.com/sandialabs/abox/internal/cert"
 	"github.com/sandialabs/abox/internal/config"
+	"github.com/sandialabs/abox/internal/instance"
 	"github.com/sandialabs/abox/internal/logging"
-	"github.com/sandialabs/abox/internal/rpc"
-	"github.com/sandialabs/abox/internal/timeout"
 	"github.com/sandialabs/abox/internal/validation"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 	"github.com/sandialabs/abox/pkg/cmdutil"
@@ -23,30 +23,38 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// monitorGuestArch is the guest architecture used to gate arch-limited features
+// (currently Tetragon monitoring, which ships amd64-only). It mirrors the host
+// arch, matching the arch-aware base-image selection in internal/images. It is a
+// package variable so tests can exercise the gate deterministically on any host.
+var monitorGuestArch = runtime.GOARCH
+
 // Options holds the options for the create command.
 type Options struct {
-	Factory            *factory.Factory
-	CPUs               int
-	Memory             int
-	Base               string
-	Upstream           string
-	Disk               string
-	Subnet             string
-	User               string
-	DryRun             bool
-	FromFile           string
-	Allowlist          []string // If non-nil, use these instead of defaults
-	MonitorEnabled     bool     // Enable Tetragon monitoring via virtio-serial
-	MonitorVersion     string   // Tetragon version to use (empty = latest)
-	MonitorKprobeMulti bool     // Enable BPF kprobe_multi attachment
-	MonitorKprobes     []string // Curated kprobe names (nil = all defaults)
-	MonitorPolicies    []string // Absolute paths to custom TracingPolicy YAML files
-	MITM               bool     // Enable TLS MITM for domain fronting protection
-	NoMITM             bool     // Disable TLS MITM (inverted to MITM in runCreate)
-	MaxConnections     int      // HTTP proxy concurrent-connection cap (0/unset = default)
-	Brief              bool     // Suppress final summary/next-steps output
-	TemplateContent    string   // Custom domain XML template content (from overrides.<backend>.template)
-	Name               string   // Instance name (positional arg)
+	Factory             *factory.Factory
+	CPUs                int
+	Memory              int
+	Base                string
+	Upstream            string
+	Disk                string
+	Subnet              string
+	User                string
+	DryRun              bool
+	FromFile            string
+	Allowlist           []string                 // If non-nil, use these instead of defaults
+	MonitorEnabled      bool                     // Enable Tetragon monitoring via virtio-serial
+	MonitorVersion      string                   // Tetragon version to use (empty = latest)
+	MonitorKprobeMulti  bool                     // Enable BPF kprobe_multi attachment
+	MonitorKprobes      []string                 // Curated kprobe names (nil = all defaults)
+	MonitorPolicies     []string                 // Absolute paths to custom TracingPolicy YAML files
+	MITM                bool                     // Enable TLS MITM for domain fronting protection
+	NoMITM              bool                     // Disable TLS MITM (inverted to MITM in runCreate)
+	MaxConnections      int                      // HTTP proxy concurrent-connection cap (0/unset = default)
+	AllowPrivateTargets []string                 // opt-in CIDRs the filters may reach despite SSRF deny-by-default
+	SecretInjections    []config.SecretInjection // host-side secret -> outbound header bindings (from abox.yaml)
+	Brief               bool                     // Suppress final summary/next-steps output
+	TemplateContent     string                   // Custom domain XML template content (from overrides.<backend>.template)
+	Name                string                   // Instance name (positional arg)
 }
 
 // NewCmdCreate creates a new create command.
@@ -120,7 +128,6 @@ func Run(ctx context.Context, opts *Options, name string) error {
 
 // cleanupState tracks resources created during instance creation for rollback on failure.
 type cleanupState struct {
-	factory      *factory.Factory
 	backend      backend.Backend
 	inst         *config.Instance
 	paths        *config.Paths
@@ -164,19 +171,14 @@ func (c *cleanupState) cleanupDomain(ctx context.Context) {
 	}
 }
 
-// cleanupDisk removes the disk directory via the privileged helper.
-func (c *cleanupState) cleanupDisk(ctx context.Context) {
-	if !c.diskCreated || c.factory == nil || c.paths.DiskDir == "" || c.inst == nil {
+// cleanupDisk removes the disk directory. Disk storage is user-owned, so this
+// runs unprivileged.
+func (c *cleanupState) cleanupDisk(_ context.Context) {
+	if !c.diskCreated || c.paths.DiskDir == "" {
 		return
 	}
 	fmt.Fprintln(c.out, "  Removing disk...")
-	client, err := c.factory.PrivilegeClientFor(c.inst.Name)
-	if err != nil {
-		return
-	}
-	deleteCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
-	defer cancel()
-	if _, err := client.RemoveAll(deleteCtx, &rpc.PathReq{Path: c.paths.DiskDir}); err != nil {
+	if err := instance.RemoveDiskDir(c.paths); err != nil {
 		logging.Debug("cleanup: failed to remove disk", "path", c.paths.DiskDir, "error", err)
 	}
 }
@@ -229,6 +231,24 @@ func runCreate(ctx context.Context, opts *Options, name string) error {
 		return fmt.Errorf("failed to detect backend: %w", err)
 	}
 
+	// Reject monitoring on backends that provide no monitor transport (e.g.
+	// vfkit on macOS). Fail fast here rather than letting `abox start` die later
+	// with an opaque "monitor guest device is empty" error — and never silently
+	// disable it, since monitoring is a security feature the user opted into.
+	if opts.MonitorEnabled && be.MonitorTransport() == nil {
+		return fmt.Errorf("the %s backend does not support security monitoring; set monitor.enabled: false", be.Name())
+	}
+
+	// Reject monitoring on non-amd64 hosts. Base-image selection is arch-aware
+	// (an arm64 host boots an arm64 guest), but the Tetragon monitor install path
+	// currently downloads and extracts an amd64-only binary, which cannot execute
+	// in a non-amd64 guest. Fail closed here rather than booting a guest whose
+	// opted-in security monitor silently never runs. (Arch-aware Tetragon is a
+	// follow-up.)
+	if opts.MonitorEnabled && monitorGuestArch != "amd64" {
+		return fmt.Errorf("security monitoring (Tetragon) is only supported on amd64 guests, not %s; set monitor.enabled: false", monitorGuestArch)
+	}
+
 	// Get paths using the backend's storage directory
 	paths, err := config.GetPathsWithStorage(name, be.StorageDir())
 	if err != nil {
@@ -278,7 +298,6 @@ func executeCreate(
 	fmt.Fprintf(w, "  Backend: %s\n", be.Name())
 
 	cs := &cleanupState{
-		factory: opts.Factory,
 		backend: be,
 		paths:   paths,
 		out:     w,
@@ -289,14 +308,14 @@ func executeCreate(
 		}
 	}()
 
-	client, inst, subnet, err := initInstance(opts, name, paths, be, tv, templateSupported, cs)
+	inst, subnet, err := initInstance(opts, name, paths, be, tv, templateSupported, cs)
 	if err != nil {
 		return err
 	}
 
 	fmt.Fprintf(w, "  Subnet: %s (gateway: %s)\n", inst.Subnet, inst.Gateway)
 
-	if err := createInstanceResources(ctx, opts, cs, be, tv, templateSupported, paths, inst, client, w); err != nil {
+	if err := createInstanceResources(ctx, opts, cs, be, tv, templateSupported, paths, inst, w); err != nil {
 		return err
 	}
 
@@ -305,8 +324,9 @@ func executeCreate(
 	return nil
 }
 
-// initInstance sets up the privilege client, directories, subnet, instance config,
-// and saves it. Returns the privilege client, instance, subnet string, and any error.
+// initInstance sets up directories, subnet, instance config, and saves it.
+// Returns the instance, subnet string, and any error. Instance creation is
+// fully unprivileged (disk storage is user-owned).
 func initInstance(
 	opts *Options,
 	name string,
@@ -315,20 +335,14 @@ func initInstance(
 	tv backend.TemplateValidator,
 	templateSupported bool,
 	cs *cleanupState,
-) (rpc.PrivilegeClient, *config.Instance, string, error) {
-	// Get privilege client early - this is where the single password prompt happens
-	client, err := opts.Factory.PrivilegeClientFor(name)
-	if err != nil {
-		return nil, nil, "", fmt.Errorf("failed to get privilege client: %w", err)
-	}
-
+) (*config.Instance, string, error) {
 	if err := config.EnsureDirs(paths); err != nil {
-		return nil, nil, "", err
+		return nil, "", err
 	}
 
-	subnet, gateway, err := allocateSubnet(opts)
+	subnet, gateway, err := allocateSubnet(opts, be)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, "", err
 	}
 
 	inst := buildInstanceConfig(opts, name, paths, be, gateway, subnet)
@@ -338,18 +352,18 @@ func initInstance(
 	cs.inst = inst
 
 	if err := config.Save(inst, paths); err != nil {
-		return nil, nil, "", err
+		return nil, "", err
 	}
 	cs.configSaved = true
 
 	// Store custom domain template if provided.
 	if opts.TemplateContent != "" && templateSupported {
 		if err := tv.StoreCustomTemplate(paths, opts.TemplateContent); err != nil {
-			return nil, nil, "", err
+			return nil, "", err
 		}
 	}
 
-	return client, inst, subnet, nil
+	return inst, subnet, nil
 }
 
 // loadFromBoxfile loads and applies boxfile configuration to opts when --from-file is specified.
@@ -399,6 +413,8 @@ func loadFromBoxfile(opts *Options, name string) (*boxfile.Boxfile, string, stri
 	}
 	opts.MITM = box.GetMITM()
 	opts.MaxConnections = box.GetMaxConnections()
+	opts.AllowPrivateTargets = box.GetAllowPrivateTargets()
+	opts.SecretInjections = box.GetSecretInjections()
 
 	return box, boxDir, name, nil
 }
@@ -424,11 +440,15 @@ func validateCreateInputs(opts *Options, name string) error {
 		return err
 	}
 
-	normalizedUpstream, err := validation.NormalizeUpstreamDNS(opts.Upstream)
-	if err != nil {
-		return err
+	// An empty upstream means "use the host's system resolver" (resolved in
+	// dnsfilter.NewServer at daemon start); accept it without normalization.
+	if opts.Upstream != "" {
+		normalizedUpstream, err := validation.NormalizeUpstreamDNS(opts.Upstream)
+		if err != nil {
+			return err
+		}
+		opts.Upstream = normalizedUpstream
 	}
-	opts.Upstream = normalizedUpstream
 
 	return nil
 }
@@ -470,19 +490,32 @@ func warnCustomTemplate(opts *Options, be backend.Backend) {
 }
 
 // allocateSubnet validates or allocates a subnet and returns subnet, gateway, and any error.
-func allocateSubnet(opts *Options) (string, string, error) {
-	if opts.Subnet != "" {
-		gateway, _, err := config.ValidateSubnet(opts.Subnet)
-		if err != nil {
+// It routes through the backend so a backend that implements
+// backend.NetworkDefaulter (e.g. macOS vmnet's host-mode pool) can supply its
+// own allocation; libvirt/vmware do not, so they fall back to the shared
+// config.AllocateSubnet pool — byte-for-byte unchanged.
+func allocateSubnet(opts *Options, be backend.Backend) (string, string, error) {
+	subnet, gateway, _, err := backend.ResolveNetwork(be, opts.Subnet)
+	if err != nil {
+		if opts.Subnet != "" {
 			return "", "", fmt.Errorf("invalid subnet: %w", err)
 		}
-		return opts.Subnet, gateway, nil
-	}
-
-	subnet, gateway, _, err := config.AllocateSubnet("")
-	if err != nil {
 		return "", "", fmt.Errorf("failed to allocate subnet: %w", err)
 	}
+
+	// An explicit --subnet bypasses the auto-allocator's route-aware skipping, so
+	// warn (never fail -- it's a deliberate override) when the host already routes
+	// the chosen subnet elsewhere (e.g. a VPN split-include), which would leave the
+	// guest unreachable from the host. No-op under test (RouteConflicts defaults to
+	// a no-op unless the binary wired the real prober).
+	if opts.Subnet != "" && config.RouteConflicts(gateway) {
+		cs := opts.Factory.ColorScheme
+		errOut := opts.Factory.IO.ErrOut
+		fmt.Fprintln(errOut, cs.Yellow(cs.Bold("WARNING:"))+cs.Yellow(fmt.Sprintf(" subnet %s appears already routed by the host (VPN?).", subnet)))
+		fmt.Fprintln(errOut, cs.Yellow("host-to-guest traffic (SSH, mount) may be unreachable. Choose a different"))
+		fmt.Fprintln(errOut, cs.Yellow("--subnet or disconnect the VPN."))
+	}
+
 	return subnet, gateway, nil
 }
 
@@ -504,8 +537,10 @@ func buildInstanceConfig(opts *Options, name string, paths *config.Paths, be bac
 			Upstream: opts.Upstream,
 		},
 		HTTP: config.HTTPConfig{
-			MITM:           opts.MITM,
-			MaxConnections: opts.MaxConnections,
+			MITM:                opts.MITM,
+			MaxConnections:      opts.MaxConnections,
+			AllowPrivateTargets: opts.AllowPrivateTargets,
+			SecretInjections:    opts.SecretInjections,
 		},
 		Monitor: config.MonitorConfig{
 			Enabled:     opts.MonitorEnabled,
@@ -518,7 +553,7 @@ func buildInstanceConfig(opts *Options, name string, paths *config.Paths, be bac
 		User:       opts.User,
 		Disk:       opts.Disk,
 		MACAddress: be.GenerateMAC(),
-		IPAddress:  deriveIPAddress(gateway),
+		IPAddress:  config.DeriveHostIP(gateway),
 	}
 }
 
@@ -533,7 +568,6 @@ func createInstanceResources(
 	templateSupported bool,
 	paths *config.Paths,
 	inst *config.Instance,
-	client rpc.PrivilegeClient,
 	w io.Writer,
 ) error {
 	// Generate SSH key
@@ -580,13 +614,13 @@ func createInstanceResources(
 
 	// Ensure base image is available for the backend
 	fmt.Fprintln(w, "  Preparing base image...")
-	if err := be.Disk().EnsureBaseImage(ctx, client, inst, paths); err != nil {
+	if err := be.Disk().EnsureBaseImage(ctx, inst, paths); err != nil {
 		return fmt.Errorf("failed to prepare base image: %w", err)
 	}
 
 	// Create disk from base image
 	fmt.Fprintln(w, "  Creating disk image...")
-	if err := be.Disk().Create(ctx, client, inst, paths); err != nil {
+	if err := be.Disk().Create(ctx, inst, paths); err != nil {
 		return fmt.Errorf("failed to create disk: %w", err)
 	}
 	cs.diskCreated = true
@@ -721,16 +755,6 @@ func WriteAllowlist(path string, domains []string) error {
 	return os.WriteFile(path, []byte(sb.String()), 0o600)
 }
 
-const defaultTimeout = timeout.Default
-
-// deriveIPAddress derives the VM IP address from the gateway address.
-// Gateway "10.10.20.1" becomes VM IP "10.10.20.10".
-func deriveIPAddress(gateway string) string {
-	var a, b, c int
-	_, _ = fmt.Sscanf(gateway, "%d.%d.%d", &a, &b, &c)
-	return fmt.Sprintf("%d.%d.%d.10", a, b, c)
-}
-
 // runDryRun generates and prints backend-specific config using example values
 // without creating any resources.
 func runDryRun(opts *Options, name string, paths *config.Paths, be backend.Backend) error {
@@ -780,7 +804,7 @@ func runDryRun(opts *Options, name string, paths *config.Paths, be backend.Backe
 		User:       opts.User,
 		Disk:       opts.Disk,
 		MACAddress: be.GenerateMAC(),
-		IPAddress:  deriveIPAddress(gateway),
+		IPAddress:  config.DeriveHostIP(gateway),
 	}
 	if opts.TemplateContent != "" && templateSupported {
 		tv.SetCustomTemplate(inst, true)

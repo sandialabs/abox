@@ -2,6 +2,7 @@
 package doctor
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -10,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/sandialabs/abox/internal/backend"
@@ -19,6 +19,7 @@ import (
 	"github.com/sandialabs/abox/internal/httpfilter"
 	"github.com/sandialabs/abox/internal/instance"
 	"github.com/sandialabs/abox/internal/sshutil"
+	"github.com/sandialabs/abox/internal/sysutil"
 	"github.com/sandialabs/abox/pkg/cmd/completion"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 
@@ -43,7 +44,7 @@ const maxGuestDiskUsagePercent = 90
 const hintCheckCloudInit = "Check cloud-init configuration"
 
 // sshTimeoutOpts are the common SSH options for quick connectivity tests.
-var sshTimeoutOpts = []string{"-o", "ConnectTimeout=5", "-o", "BatchMode=yes"}
+var sshTimeoutOpts = sshutil.ConnectTimeoutOptions()
 
 // Options holds the options for the doctor command.
 type Options struct {
@@ -86,7 +87,7 @@ regardless of filter mode or allowlist configuration.`,
 			}
 			// Use plain mode if explicitly requested or if stdout is not a TTY
 			if opts.Plain || !f.IO.IsTerminal() {
-				return runDoctor(f.IO.Out, args[0])
+				return runDoctor(f, args[0])
 			}
 			return runDoctorTUI(args[0])
 		},
@@ -97,7 +98,8 @@ regardless of filter mode or allowlist configuration.`,
 	return cmd
 }
 
-func runDoctor(w io.Writer, name string) error {
+func runDoctor(f *factory.Factory, name string) error {
+	w := f.IO.Out
 	fmt.Fprintf(w, "Diagnosing instance: %s\n\n", name)
 
 	var results []CheckResult
@@ -105,7 +107,7 @@ func runDoctor(w io.Writer, name string) error {
 
 	// Phase 1: Host Checks
 	fmt.Fprintln(w, "[Host Checks]")
-	hostResults, inst, paths, be, vmIP, vmRunning := runHostChecks(w, name)
+	hostResults, inst, paths, _, vmIP, vmRunning := runHostChecks(w, name)
 	results = append(results, hostResults...)
 
 	if inst == nil {
@@ -174,16 +176,66 @@ func runDoctor(w io.Writer, name string) error {
 
 	// Phase 5: Security Status (informational)
 	fmt.Fprintln(w, "\n[Security]")
-
-	names := be.ResourceNames(name)
-	if ti := be.TrafficInterceptor(); ti != nil && ti.FilterExists(names.Filter) {
-		fmt.Fprintf(w, "  nwfilter: defined (%s)\n", names.Filter)
-	} else {
-		fmt.Fprintln(w, "  nwfilter: not defined")
-	}
+	reportEgress(w, f, name, inst)
 
 	printSummary(w, results)
 	return nil
+}
+
+// reportEgress reports both halves of egress enforcement: the unprivileged
+// nwfilter definition and the privileged host-side iptables rules (DNS redirect
+// + INPUT accepts). Reporting them separately avoids a false all-clear when the
+// host rules have been flushed while the nwfilter persists. The host-side check
+// uses a factory-acquired backend so the privileged enforcer provider is
+// injected; if it cannot be verified (e.g. no privilege available), that is
+// reported rather than treated as a failure.
+func reportEgress(w io.Writer, f *factory.Factory, name string, inst *config.Instance) {
+	be, err := f.BackendFor(name)
+	if err != nil {
+		fmt.Fprintln(w, "  egress filter: unsupported")
+		return
+	}
+	ec := be.EgressController()
+	if ec == nil {
+		fmt.Fprintln(w, "  egress filter: unsupported")
+		return
+	}
+
+	// On a non-TTY (CI/scripts), don't let the privileged host-rule check launch
+	// an interactive sudo/pkexec prompt; report "unknown" instead. A setuid helper
+	// (or an already-running/external helper) still verifies non-interactively.
+	f.SetNonInteractivePrivilegeFromTTY()
+
+	if ok, _ := ec.Verify(context.Background(), inst); ok {
+		fmt.Fprintf(w, "  %s: defined\n", egressFilterName)
+	} else {
+		fmt.Fprintf(w, "  %s: not defined\n", egressFilterName)
+	}
+
+	switch ok, err := ec.VerifyEnforced(context.Background(), inst); {
+	case err != nil:
+		fmt.Fprintf(w, "  DNS redirect: unknown (could not verify: %v)\n", err)
+	case ok && !enforcementAuthoritative(ec):
+		// The controller reports VerifyEnforced from a best-effort applied-marker,
+		// not a live kernel query (macOS pf). Don't conflate it with the
+		// kernel-verified "active" the Linux iptables path emits.
+		fmt.Fprintln(w, "  DNS redirect: loaded (abox marker present; live pf state not verified)")
+	case ok:
+		fmt.Fprintln(w, "  DNS redirect: active")
+	default:
+		fmt.Fprintf(w, "  DNS redirect: NOT active (%s missing)\n", dnsRedirectMechanism)
+	}
+}
+
+// enforcementAuthoritative reports whether ec.VerifyEnforced reflects live
+// kernel/firewall state. A controller that does not implement
+// backend.EnforcementAuthority is treated as authoritative (the Linux iptables
+// path); the macOS pf backends implement it returning false (marker-based).
+func enforcementAuthoritative(ec backend.EgressController) bool {
+	if a, ok := ec.(backend.EnforcementAuthority); ok {
+		return a.EnforcementIsAuthoritative()
+	}
+	return true
 }
 
 // runHostChecks runs Phase 1 host diagnostics: config, VM state, network, IP, disk.
@@ -248,12 +300,21 @@ func runHostChecks(w io.Writer, name string) (results []CheckResult, inst *confi
 	if !vmRunning {
 		result.Skipped = true
 	} else {
+		// Guests are statically addressed (config.IPAddress, baked into cloud-init),
+		// so this reports the configured static IP rather than probing the guest;
+		// actual reachability is verified separately by the SSH check below.
 		vmIP, err = be.VM().GetIP(name)
-		result.Passed = err == nil
-		if err != nil {
+		switch {
+		case err != nil:
+			result.Passed = false
 			result.Details = err.Error()
-			result.Hint = "VM may still be booting, wait a moment and retry"
-		} else {
+			result.Hint = "could not read the instance config to determine its IP"
+		case vmIP == "":
+			result.Passed = false
+			result.Details = "no static IP configured"
+			result.Hint = "instance config has no ip_address; recreate the instance to assign one"
+		default:
+			result.Passed = true
 			result.Details = vmIP
 		}
 	}
@@ -264,6 +325,25 @@ func runHostChecks(w io.Writer, name string) (results []CheckResult, inst *confi
 	result = checkHostDiskSpace(paths)
 	printResult(w, result)
 	results = append(results, result)
+
+	// Check 6: Legacy disk location. Instances created before disk storage was
+	// de-privileged keep their image under the root-owned LibvirtImagesDir, which
+	// abox can no longer manage unprivileged (qemu-img/RemoveAll run as the user).
+	result = CheckResult{Name: "Disk location", Passed: true}
+	if config.IsLegacyStorage(inst, paths) {
+		result.Passed = false
+		result.Details = "disk is in the legacy root-owned location " + config.LibvirtImagesDir
+		result.Hint = "this disk predates de-privileged storage and can't be managed unprivileged; run `abox migrate " + inst.Name + "` to move it under " + config.LibvirtStorageDir()
+	}
+	printResult(w, result)
+	results = append(results, result)
+
+	// Platform-specific host prerequisites (macOS: pf anchor wiring,
+	// vmnet-helper, vfkit). No-op on other platforms.
+	for _, r := range platformHostChecks() {
+		printResult(w, r)
+		results = append(results, r)
+	}
 
 	return results, inst, paths, be, vmIP, vmRunning
 }
@@ -281,7 +361,7 @@ func runInVMChecks(w io.Writer, paths *config.Paths, inst *config.Instance, vmIP
 		result.Details = inst.Gateway
 	default:
 		result.Details = "cannot reach gateway " + inst.Gateway
-		result.Hint = "Check network configuration and nwfilter rules"
+		result.Hint = "Check network configuration and " + filterRulesDesc
 	}
 	printResult(w, result)
 	results = append(results, result)
@@ -332,9 +412,9 @@ func checkInVMDNS(paths *config.Paths, inst *config.Instance, vmIP string, sshWo
 	}
 	result.Details = fmt.Sprintf("DNS query to %s failed", dnsfilter.HealthcheckDomain)
 	if testTCPConnect(paths, inst.GetUser(), vmIP, inst.Gateway, 53) {
-		result.Hint = "TCP connection to DNS port 53 works but dig query failed - check dnsfilter or iptables NAT rules"
+		result.Hint = "TCP connection to DNS port 53 works but dig query failed - check dnsfilter or " + natRulesDesc
 	} else {
-		result.Hint = "Cannot establish TCP connection to gateway:53 - check nwfilter rules"
+		result.Hint = "Cannot establish TCP connection to gateway:53 - check " + filterRulesDesc
 	}
 	return result
 }
@@ -353,7 +433,7 @@ func checkInVMHTTP(paths *config.Paths, inst *config.Instance, vmIP string, sshW
 	if testTCPConnect(paths, inst.GetUser(), vmIP, inst.Gateway, inst.HTTP.Port) {
 		result.Hint = "TCP connection to HTTP proxy works but proxy not responding correctly - check httpfilter configuration"
 	} else {
-		result.Hint = fmt.Sprintf("Cannot establish TCP connection to gateway:%d - check nwfilter rules", inst.HTTP.Port)
+		result.Hint = fmt.Sprintf("Cannot establish TCP connection to gateway:%d - check %s", inst.HTTP.Port, filterRulesDesc)
 	}
 	return result
 }
@@ -471,14 +551,15 @@ func checkHostDiskSpace(paths *config.Paths) CheckResult {
 
 	// Check the instances directory which is under ~/.local/share/abox/
 	dataDir := paths.Instances
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(dataDir, &stat); err != nil {
-		result.Passed = false
-		result.Details = fmt.Sprintf("failed to check disk space: %v", err)
+	availableBytes, err := sysutil.DiskFreeBytes(dataDir)
+	if err != nil {
+		// Degrade gracefully: on platforms without a disk-free query (or a real
+		// statfs failure) skip the check rather than fail the whole doctor run.
+		result.Passed = true
+		result.Details = fmt.Sprintf("skipped: %v", err)
 		return result
 	}
 
-	availableBytes := stat.Bavail * uint64(stat.Bsize) //nolint:gosec // Bsize is always positive on Linux
 	availableMB := availableBytes / (1024 * 1024)
 
 	if availableBytes < minHostDiskSpaceBytes {
@@ -544,8 +625,15 @@ func checkDNSUpstream(inst *config.Instance) CheckResult {
 	result := CheckResult{Name: CheckNameDNSUpstream}
 
 	// An empty upstream means "use the host's system resolver"; resolve it the
-	// same way the DNS daemon does so the check reflects real behavior.
+	// same way the daemon does so the reachability check targets the real server.
 	upstream := dnsfilter.ResolveUpstream(inst.DNS.Upstream, "8.8.8.8:53")
+
+	// Prefer dig when present; macOS 12+ ships no dig (BIND tools removed), so
+	// fall back to a native Go resolver query aimed at the same upstream rather
+	// than reporting a spurious "upstream unreachable".
+	if _, err := exec.LookPath("dig"); err != nil {
+		return checkDNSUpstreamNative(result, upstream)
+	}
 
 	// Use dig to test upstream DNS
 	cmd := exec.Command("dig", "@"+strings.Split(upstream, ":")[0], "google.com", "+short", "+time=2", "+tries=1")
@@ -558,6 +646,39 @@ func checkDNSUpstream(inst *config.Instance) CheckResult {
 	}
 
 	if strings.TrimSpace(string(output)) == "" {
+		result.Passed = false
+		result.Details = "empty response from upstream"
+		result.Hint = "Upstream DNS may be blocked or misconfigured"
+		return result
+	}
+
+	result.Passed = true
+	result.Details = upstream
+	return result
+}
+
+// checkDNSUpstreamNative tests upstream DNS reachability without the dig binary,
+// using a Go resolver whose dialer is pinned to the given upstream (host:port).
+// Used on hosts that do not ship dig (e.g. macOS 12+).
+func checkDNSUpstreamNative(result CheckResult, upstream string) CheckResult {
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 2 * time.Second}
+			return d.DialContext(ctx, network, upstream)
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	addrs, err := resolver.LookupHost(ctx, "google.com")
+	if err != nil {
+		result.Passed = false
+		result.Details = "failed to reach " + upstream
+		result.Hint = "Check host network connectivity and DNS configuration"
+		return result
+	}
+	if len(addrs) == 0 {
 		result.Passed = false
 		result.Details = "empty response from upstream"
 		result.Hint = "Upstream DNS may be blocked or misconfigured"

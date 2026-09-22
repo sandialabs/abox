@@ -5,6 +5,48 @@ import (
 	"testing"
 )
 
+func TestAlmaLinuxImageFilename(t *testing.T) {
+	cases := []struct {
+		version, arch, want string
+		wantErr             bool
+	}{
+		{"9", "amd64", "AlmaLinux-9-GenericCloud-latest.x86_64.qcow2", false},
+		{"9", "arm64", "AlmaLinux-9-GenericCloud-latest.aarch64.qcow2", false},
+		{"10", "arm64", "AlmaLinux-10-GenericCloud-latest.aarch64.qcow2", false},
+		{"9", "riscv64", "", true},
+	}
+	for _, tc := range cases {
+		got, err := almalinuxImageFilename(tc.version, tc.arch)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("almalinuxImageFilename(%q, %q): expected error, got nil", tc.version, tc.arch)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("almalinuxImageFilename(%q, %q): unexpected error: %v", tc.version, tc.arch, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("almalinuxImageFilename(%q, %q) = %q, want %q", tc.version, tc.arch, got, tc.want)
+		}
+	}
+}
+
+func TestAlmaLinuxUpstreamArch(t *testing.T) {
+	cases := map[string]string{
+		"amd64":   "x86_64",
+		"arm64":   "aarch64",
+		"386":     "",
+		"riscv64": "",
+	}
+	for in, want := range cases {
+		if got := almalinuxUpstreamArch(in); got != want {
+			t.Errorf("almalinuxUpstreamArch(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestAlmaLinuxChecksumParsing(t *testing.T) {
 	// AlmaLinux uses standard checksum format: <hash>  <filename>
 	// This is already handled by ParseChecksums in images.go

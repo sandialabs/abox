@@ -17,15 +17,27 @@ const fallbackUpstream = "8.8.8.8:53"
 // OS-specific implementation has a single seam to replace.
 var resolvConfPath = "/etc/resolv.conf"
 
+// systemUpstreamFn discovers the host's system resolver. It is a package
+// variable so an OS-specific implementation can replace it: on macOS,
+// resolver_darwin.go swaps in a scutil-based lookup because /etc/resolv.conf is
+// often absent or stale there (the real config lives in SystemConfiguration).
+// The default reads resolvConfPath, which is correct on Linux.
+var systemUpstreamFn = resolvConfUpstream
+
 // systemUpstream returns the host's first configured IPv4 nameserver as
-// "ip:53", read from resolvConfPath at call time. The second return value is
-// false if the file is missing/unreadable or lists no IPv4 nameservers.
+// "ip:53". The second return value is false if the resolver cannot be
+// determined (missing/unreadable config or no IPv4 nameservers).
+func systemUpstream() (string, bool) {
+	return systemUpstreamFn()
+}
+
+// resolvConfUpstream reads the first IPv4 nameserver from resolvConfPath.
 //
 // IPv6 nameservers are skipped: the upstream validation and forwarding path
 // only support IPv4, so returning an IPv6 address would fail NewServer and
 // prevent the daemon from starting. Falling back to the public resolver is
 // preferable to a hard failure on IPv6-first hosts.
-func systemUpstream() (string, bool) {
+func resolvConfUpstream() (string, bool) {
 	cfg, err := dns.ClientConfigFromFile(resolvConfPath)
 	if err != nil {
 		return "", false

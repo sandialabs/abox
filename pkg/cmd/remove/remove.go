@@ -11,11 +11,8 @@ import (
 	"github.com/sandialabs/abox/internal/backend"
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/daemon"
-	"github.com/sandialabs/abox/internal/firewall"
 	"github.com/sandialabs/abox/internal/instance"
 	"github.com/sandialabs/abox/internal/logging"
-	"github.com/sandialabs/abox/internal/rpc"
-	"github.com/sandialabs/abox/internal/timeout"
 	"github.com/sandialabs/abox/pkg/cmd/completion"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 	"github.com/sandialabs/abox/pkg/cmd/forward/shared"
@@ -23,8 +20,6 @@ import (
 
 	"github.com/spf13/cobra"
 )
-
-const defaultTimeout = timeout.Default
 
 // Options holds the options for the remove command.
 type Options struct {
@@ -103,6 +98,13 @@ func runRemove(ctx context.Context, opts *Options, name string) error {
 		return err
 	}
 
+	// Legacy root-owned storage can't be deleted unprivileged; require migration
+	// first (then the disk lives in user-owned storage and removes cleanly) rather
+	// than silently orphaning the root-owned disk.
+	if err := instance.RequireMigrated(inst, paths); err != nil {
+		return err
+	}
+
 	// Get the backend for this instance
 	factory.Ensure(&opts.Factory)
 	w := opts.out()
@@ -119,6 +121,21 @@ func runRemove(ctx context.Context, opts *Options, name string) error {
 	}
 
 	fmt.Fprintf(w, "Removing instance %q...\n", name)
+
+	// Serialize resource teardown against a concurrent create. Freeing the
+	// per-instance allocations (subnet/port, and for VMware the vmnet plus the
+	// shared /etc/vmware/networking edit performed in Network().Delete) races an
+	// allocating create otherwise; this mirrors the lock create holds around
+	// allocation. Acquired after the confirm prompt so it never blocks on input.
+	if err := config.AcquireLock(); err != nil {
+		return fmt.Errorf("failed to acquire lock: %w", err)
+	}
+	defer func() { _ = config.ReleaseLock() }()
+
+	// Allow the vmnet-helper teardown (in cleanupBackendResources, on macOS ≤15) to
+	// prompt for a password when attached to a terminal, so remove can kill the
+	// root-owned helper. No-op off macOS / on a non-TTY.
+	opts.Factory.ConfigureInteractiveHelperSignaling()
 
 	stopServices(w, opts, name, paths)
 	cleanupBackendResources(ctx, w, opts, be, inst, name)
@@ -178,14 +195,10 @@ func stopServices(w io.Writer, opts *Options, name string, paths *config.Paths) 
 	}
 }
 
-// cleanupBackendResources removes UFW rules, the VM, nwfilter, and network.
-func cleanupBackendResources(ctx context.Context, w io.Writer, opts *Options, be backend.Backend, inst *config.Instance, name string) {
-	// Remove UFW rule if UFW is active
-	if client, err := opts.Factory.PrivilegeClientFor(name); err == nil {
-		firewall.NewUFWClient(client).Cleanup(w, inst.Bridge, "  ")
-	}
-
-	// Delete VM
+// cleanupBackendResources tears down the VM, egress enforcement, and network.
+func cleanupBackendResources(ctx context.Context, w io.Writer, _ *Options, be backend.Backend, inst *config.Instance, name string) {
+	// Delete the VM first so the nwfilter is unbound before egress teardown
+	// undefines it (libvirt refuses to undefine a bound nwfilter).
 	if be.VM().Exists(name) {
 		fmt.Fprintln(w, "  Deleting VM...")
 		if err := be.VM().Remove(ctx, name); err != nil {
@@ -193,12 +206,12 @@ func cleanupBackendResources(ctx context.Context, w io.Writer, opts *Options, be
 		}
 	}
 
-	// Delete nwfilter
-	names := be.ResourceNames(name)
-	if ti := be.TrafficInterceptor(); ti != nil && ti.FilterExists(names.Filter) {
-		fmt.Fprintln(w, "  Deleting network filter...")
-		if err := ti.DeleteFilter(ctx, names.Filter); err != nil {
-			logging.Warn("failed to delete nwfilter", "error", err, "instance", name)
+	// Tear down egress enforcement (nwfilter + host iptables rules). Remove is
+	// idempotent, so it runs unconditionally even for never-started instances.
+	if ec := be.EgressController(); ec != nil {
+		fmt.Fprintln(w, "  Removing egress rules...")
+		if err := ec.Remove(ctx, inst); err != nil {
+			logging.Warn("failed to remove egress rules", "error", err, "instance", name)
 		}
 	}
 
@@ -211,28 +224,38 @@ func cleanupBackendResources(ctx context.Context, w io.Writer, opts *Options, be
 	}
 }
 
-// deleteDiskDirectory removes the disk directory in the backend storage location via privilege helper.
-func deleteDiskDirectory(ctx context.Context, opts *Options, name string, paths *config.Paths) {
-	if paths.DiskDir == "" || opts.Factory == nil {
+// deleteDiskDirectory removes the disk directory in the backend storage location.
+// Disk storage is user-owned, so this runs unprivileged.
+func deleteDiskDirectory(_ context.Context, _ *Options, name string, paths *config.Paths) {
+	if paths.DiskDir == "" {
 		return
 	}
-	client, err := opts.Factory.PrivilegeClientFor(name)
-	if err == nil {
-		ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
-		defer cancel()
-		_, err = client.RemoveAll(ctx, &rpc.PathReq{Path: paths.DiskDir})
-	}
-	if err != nil {
+	if err := instance.RemoveDiskDir(paths); err != nil {
 		logging.Warn("failed to delete disk directory", "error", err, "instance", name, "path", paths.DiskDir)
 	}
 }
 
-// removeSocketFiles removes leftover Unix socket files.
+// removeSocketFiles removes leftover runtime files (sockets and PID files) that
+// live in the runtime dir, not the instance dir that config.Delete removes.
+// This is belt-and-suspenders: stopServices already reaps these via the daemon
+// Stop* helpers (cleanupDaemonFiles). It covers all runtime files — DNS, HTTP,
+// and monitor sockets plus their PID files — so it stays self-consistent rather
+// than cleaning an arbitrary subset.
 func removeSocketFiles(paths *config.Paths) {
-	if err := os.Remove(paths.DNSSocket); err != nil && !os.IsNotExist(err) {
-		logging.Warn("failed to remove DNS socket", "path", paths.DNSSocket, "error", err)
+	runtimeFiles := map[string]string{
+		"DNS socket":         paths.DNSSocket,
+		"DNS PID file":       paths.DNSPIDFile,
+		"HTTP socket":        paths.HTTPSocket,
+		"HTTP PID file":      paths.HTTPPIDFile,
+		"monitor RPC socket": paths.MonitorRPCSocket,
+		"monitor PID file":   paths.MonitorPIDFile,
 	}
-	if err := os.Remove(paths.HTTPSocket); err != nil && !os.IsNotExist(err) {
-		logging.Warn("failed to remove HTTP socket", "path", paths.HTTPSocket, "error", err)
+	for label, path := range runtimeFiles {
+		if path == "" {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			logging.Warn("failed to remove "+label, "path", path, "error", err)
+		}
 	}
 }

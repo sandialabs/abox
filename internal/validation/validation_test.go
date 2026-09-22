@@ -637,3 +637,51 @@ func TestValidatePEMCertificate(t *testing.T) {
 		})
 	}
 }
+
+func TestParseDiskSize(t *testing.T) {
+	const (
+		k  = int64(1024)
+		m  = k * 1024
+		g  = m * 1024
+		tb = g * 1024
+	)
+	tests := []struct {
+		name    string
+		in      string
+		want    int64
+		wantErr bool
+	}{
+		{name: "kilobytes upper", in: "8K", want: 8 * k},
+		{name: "kilobytes lower", in: "8k", want: 8 * k},
+		{name: "megabytes upper", in: "16M", want: 16 * m},
+		{name: "megabytes lower", in: "16m", want: 16 * m},
+		{name: "gigabytes upper", in: "20G", want: 20 * g},
+		{name: "gigabytes lower", in: "20g", want: 20 * g},
+		{name: "terabytes upper", in: "2T", want: 2 * tb},
+		{name: "terabytes lower", in: "2t", want: 2 * tb},
+		{name: "trims surrounding whitespace", in: "  20G  ", want: 20 * g},
+		{name: "empty string", in: "", wantErr: true},
+		{name: "bare number (no suffix) is rejected", in: "20", wantErr: true},
+		{name: "single char (too short)", in: "1", wantErr: true},
+		{name: "unknown suffix", in: "10X", wantErr: true},
+		{name: "non-numeric value", in: "abcG", wantErr: true},
+		{name: "suffix only", in: "GG", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseDiskSize(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ParseDiskSize(%q) = %d, want error", tt.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseDiskSize(%q) unexpected error: %v", tt.in, err)
+			}
+			if got != tt.want {
+				t.Errorf("ParseDiskSize(%q) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}

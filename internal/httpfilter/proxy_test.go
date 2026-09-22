@@ -26,6 +26,18 @@ import (
 	"github.com/sandialabs/abox/internal/cert"
 )
 
+// allowLoopback opts the test's loopback origin servers into the SSRF policy.
+// Production proxies never dial loopback; tests use 127.0.0.1 httptest backends
+// as stand-in upstreams, so they must explicitly permit the range — mirroring a
+// user setting http.allow_private_targets. Without this the M1 dial-time gate
+// rejects the connection to the test origin.
+func allowLoopback(t *testing.T, s *Server) {
+	t.Helper()
+	if err := s.SetAllowPrivateTargets([]string{"127.0.0.0/8", "::1/128"}); err != nil {
+		t.Fatalf("SetAllowPrivateTargets: %v", err)
+	}
+}
+
 // testProxy spins up a proxy Server with MITM loaded, allowlists 127.0.0.1
 // (so SSRF doesn't block the loopback test origin), and returns:
 //   - the abox CA PEM (clients must trust this to do the inner TLS handshake)
@@ -50,6 +62,7 @@ func testProxy(t *testing.T, upstreamCA *x509.CertPool) (caPEM []byte, server *S
 	filter := allowlist.NewFilter()
 	filter.Add("127.0.0.1")
 	server = NewServer(filter, false)
+	allowLoopback(t, server)
 	if err := server.LoadCA(cp, kp); err != nil {
 		t.Fatalf("LoadCA: %v", err)
 	}
@@ -329,6 +342,7 @@ func TestProxy_ConnectTunnel(t *testing.T) {
 	filter := allowlist.NewFilter()
 	filter.Add("127.0.0.1")
 	server := NewServer(filter, false)
+	allowLoopback(t, server)
 	if err := server.Start("127.0.0.1:0"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -435,6 +449,7 @@ func TestProxy_Intercept_SlowHandshakeTimesOut(t *testing.T) {
 	filter := allowlist.NewFilter()
 	filter.Add("127.0.0.1")
 	server := NewServer(filter, false)
+	allowLoopback(t, server)
 	// Set the handshake timeout BEFORE Start so the serve goroutine observes the
 	// final value — setting it on an already-running server would be a data race.
 	server.handshakeTimeout = 100 * time.Millisecond
@@ -509,6 +524,7 @@ func TestProxy_Intercept_SlowHeadersTimesOut(t *testing.T) {
 	filter := allowlist.NewFilter()
 	filter.Add("127.0.0.1")
 	server := NewServer(filter, false)
+	allowLoopback(t, server)
 	// Shrink the header-read deadline BEFORE Start so the intercept goroutine
 	// (which reads http1Server.ReadHeaderTimeout per-call) observes the final
 	// value without a data race.
@@ -592,6 +608,7 @@ func TestProxy_StalledConnects_NoLeak(t *testing.T) {
 	filter := allowlist.NewFilter()
 	filter.Add("127.0.0.1")
 	server := NewServer(filter, false)
+	allowLoopback(t, server)
 	server.handshakeTimeout = 200 * time.Millisecond
 	if err := server.LoadCA(cp, kp); err != nil {
 		t.Fatalf("LoadCA: %v", err)
@@ -685,7 +702,8 @@ func TestProxy_MaxConns_Queues(t *testing.T) {
 	filter := allowlist.NewFilter()
 	filter.Add("127.0.0.1")
 	server := NewServer(filter, false) // no MITM → tunnel mode
-	server.maxConns = 1                // set before Start (avoids racing the serve goroutine)
+	allowLoopback(t, server)
+	server.maxConns = 1 // set before Start (avoids racing the serve goroutine)
 	if err := server.Start("127.0.0.1:0"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -755,6 +773,7 @@ func TestProxy_Tunnel_HalfClose_NoTruncation(t *testing.T) {
 	filter := allowlist.NewFilter()
 	filter.Add("127.0.0.1")
 	server := NewServer(filter, false) // tunnel mode
+	allowLoopback(t, server)
 	if err := server.Start("127.0.0.1:0"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -814,6 +833,7 @@ func TestProxy_Tunnel_HalfClose_ClientGetsEOF(t *testing.T) {
 	filter := allowlist.NewFilter()
 	filter.Add("127.0.0.1")
 	server := NewServer(filter, false) // default cap (512) → client conn is wrapped
+	allowLoopback(t, server)
 	if err := server.Start("127.0.0.1:0"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -870,6 +890,7 @@ func TestProxy_Intercept_HTTP2_FrontingAllowedLogged(t *testing.T) {
 	filter.Add("127.0.0.1")        // CONNECT target
 	filter.Add("alt.allowed.test") // inner :authority (also allowed)
 	server := NewServer(filter, false)
+	allowLoopback(t, server)
 	if err := server.LoadCA(cp, kp); err != nil {
 		t.Fatalf("LoadCA: %v", err)
 	}
@@ -944,6 +965,7 @@ func TestProxy_TrafficLog_HTTP1(t *testing.T) {
 	filter := allowlist.NewFilter()
 	filter.Add("127.0.0.1")
 	server := NewServer(filter, false)
+	allowLoopback(t, server)
 	if err := server.LoadCA(cp, kp); err != nil {
 		t.Fatalf("LoadCA: %v", err)
 	}

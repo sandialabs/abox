@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/sandialabs/abox/internal/config"
-	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/rpc"
 	"github.com/sandialabs/abox/internal/validation"
 	"github.com/sandialabs/abox/pkg/cmd/completion"
@@ -63,9 +62,8 @@ func runAdd(f *factory.Factory, name, domain string) error {
 
 		fmt.Fprintln(f.IO.Out, resp.Message)
 
-		logging.AuditInstance(name, logging.ActionAllowlistAdd,
-			"domain", domain,
-		)
+		// Audit is emitted by the filter daemon (service layer) so that direct
+		// socket callers are also recorded; see internal/allowlist/api.go.
 
 		return nil
 	})

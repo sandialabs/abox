@@ -34,6 +34,10 @@ const (
 	// Filter allows worth auditing (permitted, but notable)
 	ActionHTTPAllowFronting = "http.allow.cross_origin"
 
+	// TLS key logging (writes session secrets to disk — security-sensitive)
+	ActionKeyLogStart = "http.keylog.start"
+	ActionKeyLogStop  = "http.keylog.stop"
+
 	// User commands
 	ActionSSH     = "access.ssh"
 	ActionSCP     = "access.scp"
@@ -71,17 +75,26 @@ const (
 	ActionPrune      = "instance.prune"
 	ActionImagePrune = "image.prune"
 
+	// Secret store + injection
+	ActionSecretSet    = "secret.set"
+	ActionSecretRemove = "secret.remove"
+	ActionSecretInject = "secret.inject"
+
 	// Infrastructure (no instance context)
 	ActionSecurityFiltered = "security.filtered"
 	ActionIptablesAddDNS   = "iptables.add_dns_redirect"
 	ActionIptablesFlushDNS = "iptables.flush_dns_redirect"
+	ActionPfctlLoadAnchor  = "pfctl.load_anchor"
+	ActionPfctlFlushAnchor = "pfctl.flush_anchor"
+	ActionPfctlWireAnchors = "pfctl.wire_anchors"
+	ActionPfctlTeardown    = "pfctl.teardown_anchors"
 	ActionTetragonDownload = "tetragon.download"
 	ActionMonitorStatus    = "monitor.status"
 	ActionMonitorShutdown  = "monitor.shutdown"
 )
 
-// AuditInstance logs an audit event to syslog for the specified instance.
-// Events can be viewed with: journalctl -t abox
+// AuditInstance logs an audit event to the platform audit sink for the specified
+// instance. See AuditLogHint for how to read the audit log.
 func AuditInstance(instance, action string, keysAndValues ...any) {
 	args := append([]any{"action", action, "instance", instance}, keysAndValues...)
 	Audit(action, args...)

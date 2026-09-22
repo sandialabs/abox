@@ -259,7 +259,9 @@ func runClear(opts *Options, name string) error {
 		return errors.New("failed to clear profile on both filters")
 	}
 
-	logging.AuditInstance(name, logging.ActionProfileClear)
+	// Audit is emitted by each filter daemon (service layer) on successful
+	// clear, so direct socket callers are also recorded; see
+	// internal/allowlist/api.go Profile.
 
 	return nil
 }

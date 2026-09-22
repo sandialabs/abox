@@ -9,6 +9,7 @@ import (
 
 	"github.com/sandialabs/abox/internal/allowlist"
 	"github.com/sandialabs/abox/internal/filterbase"
+	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/rpc"
 )
 
@@ -20,10 +21,11 @@ type APIServer struct {
 	server *Server
 }
 
-// NewAPIServer creates a new API server.
-func NewAPIServer(socketPath string, filter *allowlist.Filter, server *Server, loader *allowlist.Loader) *APIServer {
+// NewAPIServer creates a new API server. instance is the instance name, used to
+// attribute service-layer audit records.
+func NewAPIServer(socketPath string, filter *allowlist.Filter, server *Server, loader *allowlist.Loader, instance string) *APIServer {
 	return &APIServer{
-		BaseAPIServer: filterbase.NewBaseAPIServer(socketPath, filter, server, loader),
+		BaseAPIServer: filterbase.NewBaseAPIServer(socketPath, filter, server, loader, instance, "http"),
 		server:        server,
 	}
 }
@@ -93,11 +95,16 @@ func (a *APIServer) StartKeyLog(_ context.Context, req *rpc.KeyLogReq) (*rpc.Emp
 	if err := a.server.StartKeyLog(req.Path); err != nil {
 		return nil, err
 	}
+	// Writing TLS session secrets to disk makes captured traffic decryptable;
+	// audit it as a distinct, security-sensitive fact (the tap CLI audits the
+	// broader capture session, not this specific write).
+	logging.AuditInstance(a.Instance, logging.ActionKeyLogStart, "filter", a.Label, "path", req.Path)
 	return &rpc.Empty{}, nil
 }
 
 func (a *APIServer) StopKeyLog(_ context.Context, _ *rpc.Empty) (*rpc.Empty, error) {
 	a.server.StopKeyLog()
+	logging.AuditInstance(a.Instance, logging.ActionKeyLogStop, "filter", a.Label)
 	return &rpc.Empty{}, nil
 }
 

@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sandialabs/abox/internal/errhint"
+	"github.com/sandialabs/abox/internal/fsutil"
 	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/validation"
 )
@@ -25,6 +25,9 @@ type Config struct {
 	Username     string
 	SSHPublicKey string
 	MACAddress   string // VM MAC address for network-config matching
+	IPAddress    string // static guest IPv4 (no DHCP; see GenerateNetworkConfig)
+	Gateway      string // guest default gateway (the host's .1 on the bridge)
+	Prefix       int    // subnet prefix length for IPAddress (e.g. 24)
 	Contributors []Contributor
 }
 
@@ -46,6 +49,14 @@ local-hostname: %s
 }
 
 // GenerateNetworkConfig generates network-config for the cloud-init NoCloud ISO.
+//
+// abox networks are host-only with no DHCP server (see docs/filtering.md): every
+// guest is given a STATIC address so IP assignment is deterministic and needs no
+// DHCP lease, no guest tools, and no ARP scraping. The address is the instance's
+// pre-derived config.IPAddress (gateway's .10); the gateway supplies the default
+// route (so off-subnet traffic reaches the host, where :53 is redirected to the
+// dnsfilter and everything else is dropped), and the guest resolves via the
+// gateway (DNS is transparently redirected).
 //
 // We use network-config version 1, not version 2. Version 1 is maintained for
 // general compatibility across all cloud-init renderers (ENI, networkd, netplan,
@@ -70,14 +81,27 @@ func GenerateNetworkConfig(cfg *Config) ([]byte, error) {
 	if err := validation.ValidateMACAddress(cfg.MACAddress); err != nil {
 		return nil, fmt.Errorf("invalid MAC address for network-config: %w", err)
 	}
+	if err := validation.ValidateIPv4(cfg.IPAddress); err != nil {
+		return nil, fmt.Errorf("invalid static IP for network-config: %w", err)
+	}
+	if err := validation.ValidateIPv4(cfg.Gateway); err != nil {
+		return nil, fmt.Errorf("invalid gateway for network-config: %w", err)
+	}
+	if cfg.Prefix < 1 || cfg.Prefix > 32 {
+		return nil, fmt.Errorf("invalid subnet prefix %d for network-config", cfg.Prefix)
+	}
 	content := fmt.Sprintf(`version: 1
 config:
   - type: physical
     name: id0
     mac_address: "%s"
     subnets:
-      - type: dhcp
-`, cfg.MACAddress)
+      - type: static
+        address: %s/%d
+        gateway: %s
+        dns_nameservers:
+          - %s
+`, cfg.MACAddress, cfg.IPAddress, cfg.Prefix, cfg.Gateway, cfg.Gateway)
 	return []byte(content), nil
 }
 
@@ -261,7 +285,7 @@ func CreateISO(outputPath string, cfg *Config) error {
 		return fmt.Errorf("failed to write meta-data: %w", err)
 	}
 
-	// Generate network-config (needed for reliable first-boot DHCP)
+	// Generate network-config (static addressing; no DHCP)
 	networkConfig, err := GenerateNetworkConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to generate network-config: %w", err)
@@ -324,35 +348,8 @@ func CreateISO(outputPath string, cfg *Config) error {
 	return nil
 }
 
-// copyFile copies a file from src to dst.
-// It refuses to copy symlinks to prevent path traversal attacks.
+// copyFile copies a regular file from src to dst, refusing symlinks/non-regular
+// files (path-traversal guard). Delegates to the shared fsutil.CopyFile.
 func copyFile(src, dst string) error {
-	// Check for symlinks to prevent path traversal attacks
-	info, err := os.Lstat(src)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing to copy symlink: %s", src)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("refusing to copy non-regular file: %s", src)
-	}
-
-	srcFile, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer srcFile.Close()
-
-	dstFile, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-
-	if _, err = io.Copy(dstFile, srcFile); err != nil {
-		dstFile.Close()
-		return err
-	}
-	return dstFile.Close()
+	return fsutil.CopyFile(src, dst)
 }

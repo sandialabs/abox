@@ -6,6 +6,8 @@
 |------|----------|
 | Quick start | [Quickstart Guide](quickstart.md) |
 | System requirements | [Requirements](requirements.md) |
+| macOS support | [macOS Support](macos.md) |
+| Backend support matrix | [Support Matrix](support-matrix.md) |
 | Shell completion | [Shell Completion](shell-completion.md) |
 
 ## Configuration
@@ -13,6 +15,7 @@
 | Topic | Document |
 |-------|----------|
 | abox.yaml reference | [Configuration](abox-yaml.md) |
+| Base images | [Base Images](base-images.md) |
 | Provision scripts | [Provisioning](provisioning.md) |
 
 ## Security & Networking
@@ -22,7 +25,9 @@
 | Security model | [Security Design](security.md) |
 | Hardening | [Hardening](hardening.md) |
 | DNS/HTTP filtering | [Filtering](filtering.md) |
+| Secret injection | [Secrets](secrets.md) |
 | Privilege helper | [Privilege Helper](privilege-helper.md) |
+| VMware backend (experimental) | [VMware Backend](vmware.md) |
 
 ## Operations
 

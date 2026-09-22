@@ -10,7 +10,8 @@ import (
 
 // TestSnapshotLifecycle tests the full snapshot create -> list -> revert -> remove cycle.
 func TestSnapshotLifecycle(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
+	skipIfNoSnapshotSupport(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -21,6 +22,7 @@ func TestSnapshotLifecycle(t *testing.T) {
 	snapshotName := "test-snap"
 
 	t.Run("create", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		// Instance must be stopped to create snapshot
 		result := env.mustRun("snapshot", "create", inst.name, snapshotName)
 		if !strings.Contains(result.Stdout, "created successfully") {
@@ -29,6 +31,7 @@ func TestSnapshotLifecycle(t *testing.T) {
 	})
 
 	t.Run("list", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		result := env.mustRun("snapshot", "list", inst.name)
 
 		// Verify snapshot appears in list
@@ -46,13 +49,13 @@ func TestSnapshotLifecycle(t *testing.T) {
 	})
 
 	t.Run("revert", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		// Start the instance
 		inst.start()
 		if !inst.waitForRunning(60 * time.Second) {
 			t.Fatal("Instance did not start")
 		}
 		if !inst.waitForSSH(120 * time.Second) {
-			inst.dumpDiagnostics()
 			t.Fatal("SSH did not become available")
 		}
 
@@ -97,6 +100,7 @@ func TestSnapshotLifecycle(t *testing.T) {
 	})
 
 	t.Run("remove", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		result := env.mustRun("snapshot", "remove", inst.name, snapshotName, "--force")
 		if !strings.Contains(result.Stdout, "removed") {
 			t.Errorf("Expected removal message, got: %s", result.Stdout)
@@ -110,6 +114,7 @@ func TestSnapshotLifecycle(t *testing.T) {
 	})
 
 	t.Run("requires-stopped", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		// Start instance
 		inst.start()
 		if !inst.waitForRunning(60 * time.Second) {

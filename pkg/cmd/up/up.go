@@ -30,6 +30,7 @@ import (
 type Options struct {
 	Factory *factory.Factory
 	Dir     string
+	Suffix  string
 }
 
 // NewCmdUp creates a new up command.
@@ -53,6 +54,10 @@ and:
 
 Subsequent runs are idempotent - they will just ensure the instance is running.
 
+Use --suffix to run the same abox.yaml as several independent instances; the
+suffix is appended to the name (e.g. name "my-agent" with --suffix 1 becomes
+"my-agent-1").
+
 Example abox.yaml:
   name: my-agent
   cpus: 4
@@ -63,6 +68,9 @@ Example abox.yaml:
   allowlist:
     - "*.github.com"
     - "*.anthropic.com"`,
+		Example: `  abox up                                  # Instance from abox.yaml
+  abox up --suffix 1                       # Same config as a separate instance "<name>-1"
+  abox up --suffix 2                       # Another independent instance "<name>-2"`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if runF != nil {
@@ -73,6 +81,7 @@ Example abox.yaml:
 	}
 
 	cmd.Flags().StringVarP(&opts.Dir, "dir", "d", "", "Directory containing abox.yaml (default: current directory)")
+	cmd.Flags().StringVarP(&opts.Suffix, "suffix", "s", "", "Append a suffix to the instance name (run one abox.yaml as multiple instances)")
 
 	return cmd
 }
@@ -83,6 +92,10 @@ func runUp(ctx context.Context, opts *Options) error {
 	if err != nil {
 		return err
 	}
+
+	// Append the suffix so the same abox.yaml can back several instances.
+	// Validation below checks the final (suffixed) name.
+	box.ApplySuffix(opts.Suffix)
 
 	// Validate configuration
 	if err := box.Validate(boxDir); err != nil {
@@ -128,8 +141,8 @@ func runUpTUI(ctx context.Context, opts *Options, box *boxfile.Boxfile, boxDir s
 	isNew := !config.Exists(box.Name)
 
 	// Pre-authenticate sudo before TUI takes over the terminal.
-	// Both new and existing instances may need privileges (iptables, UFW, etc.).
-	if _, err := opts.Factory.PrivilegeClientFor(box.Name); err != nil {
+	// Both new and existing instances may need privileges (iptables egress rules).
+	if _, err := opts.Factory.EgressClientFor(box.Name); err != nil {
 		return fmt.Errorf("failed to authenticate: %w", err)
 	}
 
@@ -219,22 +232,23 @@ func doNewInstance(ctx context.Context, opts *Options, box *boxfile.Boxfile, box
 	}
 
 	createOpts := &create.Options{
-		Factory:         opts.Factory,
-		CPUs:            box.CPUs,
-		Memory:          box.Memory,
-		Base:            box.Base,
-		Upstream:        box.DNS.Upstream,
-		Disk:            box.Disk,
-		Subnet:          box.Subnet,
-		User:            box.User,
-		Allowlist:       box.Allowlist,
-		MonitorEnabled:  box.Monitor.Enabled,
-		MonitorVersion:  box.Monitor.Version,
-		MonitorKprobes:  box.Monitor.Kprobes,
-		MonitorPolicies: monitorPolicies,
-		MITM:            box.GetMITM(),
-		TemplateContent: templateContent,
-		Brief:           true,
+		Factory:             opts.Factory,
+		CPUs:                box.CPUs,
+		Memory:              box.Memory,
+		Base:                box.Base,
+		Upstream:            box.DNS.Upstream,
+		Disk:                box.Disk,
+		Subnet:              box.Subnet,
+		User:                box.User,
+		Allowlist:           box.Allowlist,
+		MonitorEnabled:      box.Monitor.Enabled,
+		MonitorVersion:      box.Monitor.Version,
+		MonitorKprobes:      box.Monitor.Kprobes,
+		MonitorPolicies:     monitorPolicies,
+		MITM:                box.GetMITM(),
+		AllowPrivateTargets: box.GetAllowPrivateTargets(),
+		TemplateContent:     templateContent,
+		Brief:               true,
 	}
 	if err := create.Run(ctx, createOpts, box.Name); err != nil {
 		notify.PhaseDone(0, err)

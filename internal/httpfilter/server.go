@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/http/httpproxy"
@@ -46,7 +47,14 @@ type Server struct {
 	allowlist.ModeController      // embedded mode controller
 	filterbase.TrafficLoggerMixin // embedded traffic logger
 	filter                        *allowlist.Filter
-	stats                         Stats
+	// targetChecker is the SSRF policy: it blocks connections to dangerous
+	// destination IPs (loopback/private/link-local/metadata) unless the operator
+	// permitted the range via allow_private_targets. Set once before Start; read
+	// on the request path and (authoritatively) in the dial Control callback. The
+	// nil/zero value denies all dangerous ranges, so the filter is fail-closed
+	// even if a setter is never called.
+	targetChecker *filterbase.TargetChecker
+	stats         Stats
 
 	// HTTP server + proxy plumbing
 	server       *http.Server
@@ -60,8 +68,14 @@ type Server struct {
 	// env vars can't drive the proxied path against 127.0.0.1 origins).
 	proxyForURL  func(*url.URL) (*url.URL, error)
 	reverseProxy *httputil.ReverseProxy
-	http1Server  *http.Server  // used as BaseConfig for h2 and as the per-conn http.Server template for h1
-	http2Server  *http2.Server // h2 server for intercepted MITM connections
+
+	// secretInjections holds the active secret-injection rules grouped by canonical
+	// host. Published as an immutable map via an atomic pointer so the Rewrite hot
+	// path reads without locking; nil until SetSecretInjections is called.
+	secretInjections atomic.Pointer[map[string][]SecretRule]
+
+	http1Server *http.Server  // used as BaseConfig for h2 and as the per-conn http.Server template for h1
+	http2Server *http2.Server // h2 server for intercepted MITM connections
 
 	// hijack lifecycle: outer http.Server.Shutdown does not track hijacked
 	// connections, so we manage MITM/tunnel session teardown ourselves.
@@ -135,7 +149,8 @@ func (k *keyLogWriter) Write(p []byte) (int, error) {
 // NewServer creates a new HTTP proxy server.
 func NewServer(filter *allowlist.Filter, passive bool) *Server {
 	s := &Server{
-		filter: filter,
+		filter:        filter,
+		targetChecker: &filterbase.TargetChecker{}, // deny all dangerous ranges until configured
 		stats: Stats{
 			StartTime: time.Now(),
 		},
@@ -148,7 +163,7 @@ func NewServer(filter *allowlist.Filter, passive bool) *Server {
 	s.proxyForURL = httpproxy.FromEnvironment().ProxyFunc()
 	s.transport = &http.Transport{
 		Proxy:                 func(r *http.Request) (*url.URL, error) { return s.proxyForURL(r.URL) },
-		DialContext:           (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
+		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, Control: s.dialControl}).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
@@ -165,7 +180,7 @@ func NewServer(filter *allowlist.Filter, passive bool) *Server {
 		// Should not fail with our config; treat as programming error.
 		logging.Debug("http2.ConfigureTransport failed", "err", err)
 	}
-	s.reverseProxy = newReverseProxy(s.transport)
+	s.reverseProxy = newReverseProxy(s)
 	// http1Server is the config template for intercepted MITM h1 connections
 	// (proxy.go intercept clones the relevant fields per-call). ReadHeaderTimeout
 	// bounds slow-headers attacks; IdleTimeout bounds keepalive lingering. We
@@ -230,14 +245,16 @@ func urlString(r *http.Request) string {
 // checkHost performs common request checking logic.
 // Returns (allowed bool, blockedBySSRF bool).
 func (s *Server) checkHost(host string) (allowed, blockedBySSRF bool) {
-	// Check if explicitly allowlisted first.
-	// Explicitly allowlisted hosts skip SSRF protection — if the user
-	// trusts the host, they trust where it points.
 	explicitlyAllowed := s.filter.IsAllowed(host)
 
-	// SSRF protection: block requests to private/loopback/link-local IPs
-	// Skip for explicitly allowlisted hosts.
-	if !explicitlyAllowed && filterbase.IsBlockedIP(host) {
+	// SSRF protection: block requests to dangerous target IPs
+	// (loopback/private/link-local/metadata) unless the operator permitted the
+	// range via allow_private_targets. This runs even for allowlisted hosts: the
+	// proxy dials from the HOST, so an allowlisted domain rebound/poisoned to a
+	// private or metadata IP would otherwise be an SSRF vector. When host is a
+	// hostname (not an IP literal) this is a no-op — the authoritative check runs
+	// post-resolution in dialControl.
+	if s.targetChecker.IsBlocked(host) {
 		return false, true
 	}
 
@@ -410,6 +427,57 @@ func (s *Server) SetMaxConns(n int) {
 		n = 0
 	}
 	s.maxConns = n
+}
+
+// SetAllowPrivateTargets configures the opt-in list of otherwise-blocked
+// destination CIDRs the proxy may connect to (config: http.allow_private_targets).
+// An empty list keeps the default deny-all-dangerous posture. Must be called
+// before Start. On an invalid CIDR it returns the error and leaves the previous
+// (fail-closed) checker in place.
+//
+// Note: when an upstream proxy (https_proxy) is configured, the target is
+// resolved by that proxy, not locally, so the resolved-IP gate cannot see it; a
+// private-IP upstream proxy itself must be listed here to be dialable.
+func (s *Server) SetAllowPrivateTargets(cidrs []string) error {
+	tc, err := filterbase.NewTargetChecker(cidrs)
+	if err != nil {
+		return err
+	}
+	s.targetChecker = tc
+	return nil
+}
+
+// dialControl is the net.Dialer.Control callback installed on every direct dial
+// (the transport path and the non-MITM tunnel path). It runs after DNS
+// resolution with address as the concrete "ip:port" the kernel is about to
+// connect to, so it is the authoritative SSRF gate: it defeats DNS rebinding
+// (the resolved IP is checked, not the requested hostname) for allowlisted and
+// non-allowlisted hosts alike. Returning an error aborts the connection.
+func (s *Server) dialControl(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = address
+	}
+	if s.targetChecker.IsBlocked(host) {
+		// Account and log the block so a dial-time SSRF/rebinding block shows up in
+		// `abox http status` and the traffic log, not just the audit sink — mirroring
+		// the DNS rebinding path. We do NOT decrement the earlier AllowedRequests
+		// increment: it is per-request while this callback fires per-dial (connection
+		// reuse and the upstream-proxy dialers break any 1:1 pairing), so a decrement
+		// could underflow the counter. The rare over-count of Allowed on a rebind is
+		// preferable. Note `host` here is the resolved IP (address is post-resolution
+		// ip:port), so the log records the IP rather than the original hostname.
+		atomic.AddUint64(&s.stats.BlockedRequests, 1)
+		if logger := s.TrafficLogger(); logger != nil {
+			logger.LogBlock(host, "ssrf_private_ip", "")
+		}
+		logging.Audit("http blocked private IP (post-resolution)",
+			"action", logging.ActionHTTPBlockSSRF,
+			"addr", address,
+		)
+		return fmt.Errorf("connection to %s blocked: private target not permitted", host)
+	}
+	return nil
 }
 
 // Start starts the HTTP proxy server.

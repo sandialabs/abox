@@ -42,6 +42,12 @@ func TestNormalizeDomain(t *testing.T) {
 		{"with-trailing-dot", "github.com.", "github.com."},
 		{"whitespace", "  github.com  ", "github.com."},
 		{"subdomain", "API.GITHUB.COM", "api.github.com."},
+		// IDN/Unicode entries are converted to their punycode (ASCII) form so they
+		// match the A-label form DNS delivers.
+		{"idn-unicode", "münchen.de", "xn--mnchen-3ya.de."},
+		{"idn-mixed-case-unicode", "MÜNCHEN.de", "xn--mnchen-3ya.de."},
+		{"idn-already-punycode", "xn--mnchen-3ya.de", "xn--mnchen-3ya.de."},
+		{"underscore-preserved", "_dmarc.example.com", "_dmarc.example.com."},
 	}
 
 	for _, tt := range tests {
@@ -52,6 +58,47 @@ func TestNormalizeDomain(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFilter_IsAllowed_IDN verifies the L6 fix: an allowlist entry and a query
+// match regardless of whether each is expressed in Unicode or punycode.
+func TestFilter_IsAllowed_IDN(t *testing.T) {
+	const puny = "xn--mnchen-3ya.de" // münchen.de
+
+	t.Run("unicode-entry-matches-punycode-query", func(t *testing.T) {
+		f := NewFilter()
+		if !f.Add("münchen.de") {
+			t.Fatal("Add(unicode) should succeed")
+		}
+		if !f.IsAllowed(puny) {
+			t.Error("punycode query should match Unicode allowlist entry")
+		}
+		if !f.IsAllowed("münchen.de") {
+			t.Error("Unicode query should match Unicode allowlist entry")
+		}
+		// Subdomain suffix matching still works across forms.
+		if !f.IsAllowed("www." + puny) {
+			t.Error("punycode subdomain should match")
+		}
+	})
+
+	t.Run("punycode-entry-matches-unicode-query", func(t *testing.T) {
+		f := NewFilter()
+		if !f.Add(puny) {
+			t.Fatal("Add(punycode) should succeed")
+		}
+		if !f.IsAllowed("münchen.de") {
+			t.Error("Unicode query should match punycode allowlist entry")
+		}
+	})
+
+	t.Run("unrelated-idn-not-allowed", func(t *testing.T) {
+		f := NewFilter()
+		f.Add("münchen.de")
+		if f.IsAllowed("evil.de") {
+			t.Error("unrelated domain must not match")
+		}
+	})
 }
 
 func TestFilter_Add_Remove(t *testing.T) {

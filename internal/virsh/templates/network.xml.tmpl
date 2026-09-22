@@ -1,0 +1,17 @@
+<network xmlns:dnsmasq='http://libvirt.org/schemas/network/dnsmasq/1.0'>
+  <name>{{.Bridge}}</name>
+  <bridge name='{{.Bridge}}' stp='on' delay='0'/>
+  <!--
+    Host-only network with a STATIC guest address (no DHCP). The guest's IP,
+    default route, and resolver are all configured via cloud-init (see
+    internal/cloudinit.GenerateNetworkConfig), so libvirt runs no DHCP server and
+    this network defines no DHCP range. dnsmasq still launches for this address,
+    but DNS is disabled (port=0) — guest DNS (:53) is transparently redirected to
+    the dnsfilter by the host iptables rules, and everything else is dropped by the
+    host-side forward default-deny.
+  -->
+  <ip address='{{.Gateway}}' netmask='255.255.255.0'/>
+  <dnsmasq:options>
+    <dnsmasq:option value='port=0'/>
+  </dnsmasq:options>
+</network>

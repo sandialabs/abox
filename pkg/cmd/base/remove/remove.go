@@ -2,19 +2,15 @@ package remove
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/images"
 	"github.com/sandialabs/abox/internal/logging"
-	"github.com/sandialabs/abox/internal/rpc"
-	"github.com/sandialabs/abox/internal/timeout"
+	"github.com/sandialabs/abox/internal/qemuimg"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 	"github.com/sandialabs/abox/pkg/cmdutil"
 
@@ -38,7 +34,7 @@ func NewCmdRemove(f *factory.Factory, runF func(*Options) error) *cobra.Command 
 		Use:     "remove <name>",
 		Aliases: []string{"rm"},
 		Short:   "Remove a base image",
-		Long:    `Remove a base image from both the user cache and the libvirt image store.`,
+		Long:    `Remove a base image from both the user download cache and the user-owned base-image store.`,
 		Example: `  abox base remove ubuntu-22.04            # Remove with confirmation
   abox base rm ubuntu-22.04 -f            # Skip confirmation`,
 		Args:              cobra.ExactArgs(1),
@@ -66,8 +62,8 @@ func runRemove(ctx context.Context, opts *Options) error {
 	}
 
 	name := opts.Name
-	userImage := filepath.Join(paths.UserBaseImages, name+".qcow2")
-	libvirtImage := filepath.Join(paths.BaseImages, name+".qcow2")
+	userImage := filepath.Join(paths.UserBaseImages, config.UserBaseImageName(name))
+	libvirtImage := filepath.Join(paths.BaseImages, config.UserBaseImageName(name))
 
 	// Check if image exists in either location
 	_, userErr := os.Stat(userImage)
@@ -82,7 +78,7 @@ func runRemove(ctx context.Context, opts *Options) error {
 
 	// Early in-use scan (unless --force): check if any instance disks reference this base image
 	if !opts.Force && hasLibvirtCopy {
-		inUse, err := instancesUsingBase(libvirtImage)
+		inUse, err := instancesUsingBase(ctx, libvirtImage)
 		if err != nil {
 			logging.Debug("failed to scan for instances using base image", "error", err)
 		} else if len(inUse) > 0 {
@@ -108,7 +104,8 @@ func runRemove(ctx context.Context, opts *Options) error {
 		fmt.Fprintf(out, "Removed %s\n", userImage)
 	}
 
-	// Delete libvirt copy (requires privilege helper + flock)
+	// Delete the stored base-image copy. Storage is user-owned, so this needs no
+	// privilege helper — only an flock to serialize against concurrent creates.
 	if hasLibvirtCopy {
 		if err := removeLibvirtCopy(ctx, opts, name, libvirtImage); err != nil {
 			return err
@@ -123,17 +120,19 @@ func runRemove(ctx context.Context, opts *Options) error {
 }
 
 // removeLibvirtCopy acquires an exclusive flock, re-scans for in-use instances,
-// and deletes the libvirt base image via the privilege helper.
+// and deletes the stored base image from the user-owned base-image store (the
+// path is still named libvirtImage for historical reasons). Storage is
+// user-owned, so this runs unprivileged (no privilege helper).
 func removeLibvirtCopy(ctx context.Context, opts *Options, name, libvirtImage string) error {
 	// Acquire exclusive flock — blocks until any in-progress creates finish
-	unlock, err := images.LockBaseImage(libvirtImage, syscall.LOCK_EX)
+	unlock, err := images.LockBaseImage(libvirtImage, images.LockExclusive)
 	if err != nil {
 		return fmt.Errorf("failed to lock base image: %w", err)
 	}
 
 	// Re-scan under lock (unless --force): authoritative check
 	if !opts.Force {
-		inUse, err := instancesUsingBase(libvirtImage)
+		inUse, err := instancesUsingBase(ctx, libvirtImage)
 		if err != nil {
 			unlock.Close()
 			return fmt.Errorf("failed to scan for instances using base image: %w", err)
@@ -144,68 +143,43 @@ func removeLibvirtCopy(ctx context.Context, opts *Options, name, libvirtImage st
 		}
 	}
 
-	// Delete via privilege helper
-	client, err := opts.Factory.PrivilegeClient()
-	if err != nil {
-		unlock.Close()
-		return fmt.Errorf("failed to get privilege client: %w", err)
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, timeout.Default)
-	defer cancel()
-
-	_, err = client.RemoveAll(ctx, &rpc.PathReq{Path: libvirtImage})
+	// Delete the stored base image. Storage is user-owned, so this runs
+	// unprivileged.
+	err = os.RemoveAll(libvirtImage)
 	unlock.Close()
 	if err != nil {
-		return fmt.Errorf("failed to remove libvirt base image: %w", err)
+		return fmt.Errorf("failed to remove base image: %w", err)
 	}
 	return nil
 }
 
-// qemuImgInfo is the JSON output of qemu-img info.
-type qemuImgInfo struct {
-	BackingFilename string `json:"backing-filename"`
-}
-
-// instancesUsingBase scans all instance disks to find those referencing the given base image.
-// TODO: when multiple backends are supported, iterate per-backend storage dir.
-func instancesUsingBase(baseImagePath string) ([]string, error) {
-	instancesDir := filepath.Join(config.LibvirtImagesDir, "instances")
-
-	entries, err := os.ReadDir(instancesDir)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
+// instancesUsingBase returns the names of all instances whose disk backs onto the
+// given base image. It enumerates every instance via config.Load, which resolves
+// each disk's real location — so it covers instances with a custom storage_dir or
+// legacy root-owned storage, not just the default storage directory.
+func instancesUsingBase(ctx context.Context, baseImagePath string) ([]string, error) {
+	names, err := config.List()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read instances directory: %w", err)
+		return nil, fmt.Errorf("failed to list instances: %w", err)
 	}
 
 	var inUse []string
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		diskPath := filepath.Join(instancesDir, entry.Name(), "disk.qcow2")
-		if _, err := os.Stat(diskPath); os.IsNotExist(err) {
-			continue
-		}
-
-		cmd := exec.Command("qemu-img", "info", "--output=json", diskPath)
-		output, err := cmd.Output()
+	for _, name := range names {
+		_, paths, err := config.Load(name)
 		if err != nil {
-			logging.Debug("failed to inspect disk", "path", diskPath, "error", err)
+			logging.Debug("skipping unreadable instance during base in-use scan", "instance", name, "error", err)
 			continue
 		}
-
-		var info qemuImgInfo
-		if err := json.Unmarshal(output, &info); err != nil {
-			logging.Debug("failed to parse qemu-img output", "path", diskPath, "error", err)
+		if _, err := os.Stat(paths.Disk); err != nil {
 			continue
 		}
-
-		if info.BackingFilename == baseImagePath {
-			inUse = append(inUse, entry.Name())
+		backing, err := qemuimg.BackingFile(ctx, paths.Disk)
+		if err != nil {
+			logging.Debug("failed to inspect disk", "path", paths.Disk, "error", err)
+			continue
+		}
+		if backing == baseImagePath {
+			inUse = append(inUse, name)
 		}
 	}
 
@@ -227,13 +201,14 @@ func completeBaseImages(cmd *cobra.Command, args []string, toComplete string) ([
 	var names []string
 
 	// Scan user cache
+	ext := config.UserBaseImageExt()
 	for _, dir := range []string{paths.UserBaseImages, paths.BaseImages} {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
 		for _, entry := range entries {
-			if before, ok := strings.CutSuffix(entry.Name(), ".qcow2"); ok {
+			if before, ok := strings.CutSuffix(entry.Name(), ext); ok {
 				name := before
 				if !seen[name] {
 					seen[name] = true

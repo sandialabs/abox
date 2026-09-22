@@ -72,9 +72,9 @@ func TestIsBlockedIP(t *testing.T) {
 		// Public addresses (should NOT be blocked)
 		{"public-8.8.8.8", "8.8.8.8", false},
 		{"public-1.1.1.1", "1.1.1.1", false},
-		{"public-140.82.121.4", "140.82.121.4", false},
-		{"public-93.184.216.34", "93.184.216.34", false},
-		{"public-ipv6", "2001:4860:4860::8888", false},
+		{"public-203.0.113.4", "203.0.113.4", false},
+		{"public-203.0.113.34", "203.0.113.34", false},
+		{"public-ipv6", "2001:db8::8888", false},
 
 		// Edge cases
 		{"non-ip-domain", "github.com", false},
@@ -196,38 +196,118 @@ func TestServer_CheckHost(t *testing.T) {
 	}
 }
 
+// TestServer_CheckHost_AllowlistedPrivateIP asserts the M1 fix: allowlisting a
+// host no longer exempts it from SSRF protection. Because the proxy dials from
+// the host, an allowlisted name/IP that points at a private/metadata address is
+// still blocked unless the operator opts the range in via allow_private_targets.
 func TestServer_CheckHost_AllowlistedPrivateIP(t *testing.T) {
 	filter := allowlist.NewFilter()
-	filter.Add("10.0.5.3")     // Explicitly allowlist a private IP
+	filter.Add("10.0.5.3")     // Explicitly allowlist a private IP literal
 	filter.Add("192.168.1.50") // Another private IP
 
 	server := NewServer(filter, false)
 
-	tests := []struct {
-		name            string
-		host            string
-		wantAllowed     bool
-		wantBlockedSSRF bool
-	}{
-		// Allowlisted private IPs should NOT be blocked by SSRF
-		{"allowlisted-10-net", "10.0.5.3", true, false},
-		{"allowlisted-192-net", "192.168.1.50", true, false},
-
-		// Non-allowlisted private IPs should still be blocked
-		{"non-allowlisted-private", "10.0.0.1", false, true},
-		{"non-allowlisted-loopback", "127.0.0.1", false, true},
+	// Without allow_private_targets, allowlisting alone does NOT bypass SSRF.
+	for _, host := range []string{"10.0.5.3", "192.168.1.50", "10.0.0.1", "127.0.0.1", "169.254.169.254"} {
+		allowed, blockedSSRF := server.checkHost(host)
+		if allowed || !blockedSSRF {
+			t.Errorf("checkHost(%q) = (allowed=%v, ssrf=%v), want (false, true) — allowlisting must not bypass SSRF", host, allowed, blockedSSRF)
+		}
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			allowed, blockedSSRF := server.checkHost(tt.host)
-			if allowed != tt.wantAllowed {
-				t.Errorf("checkHost(%q) allowed = %v, want %v", tt.host, allowed, tt.wantAllowed)
-			}
-			if blockedSSRF != tt.wantBlockedSSRF {
-				t.Errorf("checkHost(%q) blockedSSRF = %v, want %v", tt.host, blockedSSRF, tt.wantBlockedSSRF)
-			}
-		})
+	// Opting the range in via allow_private_targets permits exactly that range.
+	if err := server.SetAllowPrivateTargets([]string{"10.0.5.0/24"}); err != nil {
+		t.Fatalf("SetAllowPrivateTargets: %v", err)
+	}
+	if allowed, ssrf := server.checkHost("10.0.5.3"); !allowed || ssrf {
+		t.Errorf("checkHost(10.0.5.3) after opt-in = (allowed=%v, ssrf=%v), want (true, false)", allowed, ssrf)
+	}
+	// A different private range — and the metadata address — stay blocked.
+	for _, host := range []string{"192.168.1.50", "169.254.169.254", "127.0.0.1"} {
+		if allowed, ssrf := server.checkHost(host); allowed || !ssrf {
+			t.Errorf("checkHost(%q) after opt-in = (allowed=%v, ssrf=%v), want (false, true)", host, allowed, ssrf)
+		}
+	}
+}
+
+// TestServer_DialControl_BlocksResolvedPrivateIP covers the domain case the
+// Host-string check can't: an (allowlisted) hostname that resolves to a private
+// IP must be rejected at dial time. dialControl is the authoritative gate.
+func TestServer_DialControl_BlocksResolvedPrivateIP(t *testing.T) {
+	filter := allowlist.NewFilter()
+	filter.Add("internal.example.com")
+	server := NewServer(filter, false)
+
+	// Host header (a domain) passes checkHost — it's not an IP literal.
+	if _, blockedSSRF := server.checkHost("internal.example.com"); blockedSSRF {
+		t.Fatal("hostname should not be SSRF-blocked at the Host-string layer")
+	}
+
+	// But the resolved address is gated by dialControl.
+	if err := server.dialControl("tcp", "169.254.169.254:80", nil); err == nil {
+		t.Error("dialControl must block a resolved metadata IP")
+	}
+	if err := server.dialControl("tcp", "10.0.0.1:443", nil); err == nil {
+		t.Error("dialControl must block a resolved private IP")
+	}
+	if err := server.dialControl("tcp", "203.0.113.34:80", nil); err != nil {
+		t.Errorf("dialControl must allow a public IP, got %v", err)
+	}
+
+	// Opt-in permits the resolved private range.
+	if err := server.SetAllowPrivateTargets([]string{"10.0.0.0/8"}); err != nil {
+		t.Fatalf("SetAllowPrivateTargets: %v", err)
+	}
+	if err := server.dialControl("tcp", "10.0.0.1:443", nil); err != nil {
+		t.Errorf("dialControl should allow opted-in private IP, got %v", err)
+	}
+	if err := server.dialControl("tcp", "169.254.169.254:80", nil); err == nil {
+		t.Error("dialControl must still block metadata IP not in the opt-in range")
+	}
+}
+
+// TestServer_DialControl_BlockAccounting asserts the side effects of a dial-time
+// SSRF/rebinding block: BlockedRequests increments and the block is written to
+// the traffic log with the ssrf reason. Mirrors the DNS rebinding accounting test
+// so a regression that dropped either would be caught (the block being invisible
+// in `abox http status` and the traffic log).
+func TestServer_DialControl_BlockAccounting(t *testing.T) {
+	filter := allowlist.NewFilter()
+	filter.Add("internal.example.com")
+	server := NewServer(filter, false)
+
+	// A real file traffic logger so LogBlock's effect is observable.
+	logPath := filepath.Join(t.TempDir(), "http.log")
+	if err := server.InitTrafficLogger(logPath); err != nil {
+		t.Fatalf("InitTrafficLogger: %v", err)
+	}
+
+	before := server.GetStats().BlockedRequests
+
+	// A blocked dial (resolved private IP) must increment BlockedRequests.
+	if err := server.dialControl("tcp", "10.0.0.1:443", nil); err == nil {
+		t.Fatal("dialControl must block a resolved private IP")
+	}
+	if got := server.GetStats().BlockedRequests; got != before+1 {
+		t.Fatalf("BlockedRequests = %d, want %d after a blocked dial", got, before+1)
+	}
+
+	// An allowed (public) dial must NOT change the blocked counter.
+	if err := server.dialControl("tcp", "203.0.113.34:80", nil); err != nil {
+		t.Fatalf("dialControl must allow a public IP: %v", err)
+	}
+	if got := server.GetStats().BlockedRequests; got != before+1 {
+		t.Fatalf("BlockedRequests = %d, want unchanged (%d) after an allowed dial", got, before+1)
+	}
+
+	// The block was recorded to the traffic log with the SSRF reason.
+	server.CloseTrafficLogger() // flush + close before reading
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read traffic log: %v", err)
+	}
+	if !strings.Contains(string(data), "ssrf_private_ip") {
+		t.Errorf("traffic log missing ssrf_private_ip block entry:\n%s", data)
 	}
 }
 
@@ -959,7 +1039,7 @@ func TestServer_MITM_BlocksNonAllowlisted(t *testing.T) {
 func TestServer_DecideConnect(t *testing.T) {
 	filter := allowlist.NewFilter()
 	filter.Add("allowed.example.com")
-	filter.Add("127.0.0.1") // explicit allowlist bypasses SSRF
+	filter.Add("127.0.0.1") // allowlisting alone no longer bypasses SSRF (M1)
 	server := NewServer(filter, false)
 
 	// Without MITM (no CA loaded): allowed host → tunnel.
@@ -967,10 +1047,17 @@ func TestServer_DecideConnect(t *testing.T) {
 		t.Errorf("decideConnect(allowed, no MITM) = %v, want actionTunnel", got)
 	}
 
-	// Allowed host where IP would normally be blocked, but explicit allowlist
-	// skips the SSRF check.
+	// M1: an allowlisted private-IP CONNECT target is still rejected by SSRF —
+	// allowlisting does not exempt it, since the proxy dials from the host.
+	if got := server.decideConnect("127.0.0.1"); got != actionReject {
+		t.Errorf("decideConnect(allowlisted private IP, no opt-in) = %v, want actionReject", got)
+	}
+	// Opting the range in via allow_private_targets makes it tunnel.
+	if err := server.SetAllowPrivateTargets([]string{"127.0.0.0/8"}); err != nil {
+		t.Fatalf("SetAllowPrivateTargets: %v", err)
+	}
 	if got := server.decideConnect("127.0.0.1"); got != actionTunnel {
-		t.Errorf("decideConnect(allowlisted private IP) = %v, want actionTunnel", got)
+		t.Errorf("decideConnect(opted-in private IP) = %v, want actionTunnel", got)
 	}
 
 	// Disallowed host → reject.
@@ -978,7 +1065,7 @@ func TestServer_DecideConnect(t *testing.T) {
 		t.Errorf("decideConnect(blocked) = %v, want actionReject", got)
 	}
 
-	// Private IP (not allowlisted) → reject (SSRF).
+	// Private IP outside the opt-in range → reject (SSRF).
 	if got := server.decideConnect("10.0.0.1"); got != actionReject {
 		t.Errorf("decideConnect(private IP) = %v, want actionReject", got)
 	}

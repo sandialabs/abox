@@ -72,12 +72,12 @@ abox down --remove       # Stop and delete
 
 ## Installation
 
-**Requirements:** Linux with KVM/libvirt, Go 1.26+
+**Requirements:** Linux with KVM/libvirt, Go 1.26+. See
+[System Requirements](docs/requirements.md#installation-commands) for the full
+per-distro dependency list and install commands. (Installing the released
+`.deb`/`.rpm` pulls these in automatically.)
 
 ```bash
-# Debian/Ubuntu
-sudo apt install libvirt-daemon-system qemu-kvm qemu-utils sshfs fuse3 genisoimage
-
 # Build abox (static binary with embedded version info)
 make build
 
@@ -100,6 +100,9 @@ abox base pull ubuntu-24.04    # Or: abox base list  (to see all available image
 | [Security Design](docs/security.md) | Defense-in-depth architecture |
 | [Filtering](docs/filtering.md) | DNS and HTTP proxy filtering |
 | [System Requirements](docs/requirements.md) | Dependencies and compatibility |
+| [macOS Support](docs/macos.md) | Running abox on macOS with the vfkit backend |
+| [Support Matrix](docs/support-matrix.md) | OS × backend × capability table |
+| [VMware Backend](docs/vmware.md) | Experimental VMware Workstation/Fusion backend |
 | [Shell Completion](docs/shell-completion.md) | Tab completion for bash, zsh, fish |
 | [Hardening](docs/hardening.md) | Host and guest security hardening |
 | [Privilege Helper](docs/privilege-helper.md) | Setuid helper for passwordless operation |

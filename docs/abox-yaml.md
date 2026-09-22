@@ -99,21 +99,28 @@ monitor:
 |-------|------|---------|-------------|
 | `version` | int | (required) | Configuration version. Must be `1`. |
 | `name` | string | (required) | Instance identifier. Must start with a letter, contain only letters/numbers/underscores/hyphens, max 63 chars. |
-| `backend` | string | (auto) | VM backend to use. Currently only "libvirt" is supported. If not specified, auto-detected. |
+| `backend` | string | (auto) | VM backend for the instance. Auto-detects `libvirt` on Linux and `vfkit` on macOS. The `vmware` backend is not auto-detected; select it with `ABOX_BACKEND=vmware` (see `abox help environment`). |
 | `cpus` | int | 2 | Number of virtual CPU cores |
 | `memory` | int | 4096 | RAM in megabytes |
 | `disk` | string | "20G" | Disk size (e.g., "20G", "50G", "100G") |
-| `base` | string | "ubuntu-24.04" | Base image to use. Run `abox base list` for available images |
+| `base` | string | "ubuntu-24.04" | Base image to use. Run `abox base list` for available images; see [Base Images](base-images.md) to create a custom base |
 | `user` | string | (auto-detected from base image) | SSH username for connecting to the VM |
 | `subnet` | string | (auto) | Custom /24 subnet (e.g., "10.10.20.0/24"). If not specified, automatically allocated from 10.10.x.0/24 |
 | `provision` | []string | [] | List of shell script paths to run during initial setup |
 | `overlay` | string | "" | Directory to copy into the VM at /tmp/abox/overlay during provisioning |
 | `allowlist` | []string | [] | Domain allowlist entries (shared by DNS and HTTP filters) |
 | `dns` | object | {} | DNS configuration (see below) |
-| `dns.upstream` | string | host system resolver | Upstream DNS server for allowed queries. When unset, abox uses the host's system resolver from `/etc/resolv.conf` (falling back to `8.8.8.8:53` if it can't be determined). Port defaults to 53 if not specified (e.g., "8.8.8.8" is valid). |
+| `dns.upstream` | string | host system resolver | Upstream DNS server for allowed queries. When unset, abox uses the host's system resolver (from `/etc/resolv.conf`, or SystemConfiguration on macOS), falling back to a public resolver (`8.8.8.8:53`) only if it can't be determined. Port defaults to 53 if not specified (e.g., "8.8.8.8" is valid). |
 | `http` | object | {} | HTTP proxy configuration (see below) |
 | `http.mitm` | bool | true | Enable TLS MITM for HTTPS inspection and domain fronting protection |
 | `http.max_connections` | int | 512 | Cap on concurrent client connections to the HTTP proxy, bounding host fd/goroutine use against a runaway or hostile VM. Raise for heavy parallel workloads; keep below the host's `ulimit -n`. Existing instances without this key use the default automatically. |
+| `http.allow_private_targets` | []string | [] | Opt-in list of CIDRs the DNS/HTTP filters may connect to despite the default SSRF deny of private/loopback/link-local/metadata ranges. Shared by both filters. See [Reaching internal hosts](#reaching-internal-hosts). |
+| `http.secret_injections` | []object | [] | Bind host-side secret values to outbound request headers so the guest never holds the raw credential. See [Secret injection](#secret-injection) and [docs/secrets.md](secrets.md). |
+| `http.secret_injections[].key` | string | (required) | Name of the value in the per-instance secret store (`abox secrets set`). |
+| `http.secret_injections[].host` | string | (required) | Exact host to inject into (e.g. `api.anthropic.com`). |
+| `http.secret_injections[].header` | string | (required) | Header name to set (e.g. `x-api-key`, `Authorization`). |
+| `http.secret_injections[].path_prefix` | string | "" | Only inject when the request path is within this prefix (e.g. `/v1/`). Empty = all paths. Narrows the reflection risk (see [docs/secrets.md](secrets.md)). |
+| `http.secret_injections[].value_prefix` | string | "" | Prepended to the stored value (e.g. `"Bearer "` for `Authorization`). |
 | `monitor` | object | {} | Agent monitoring configuration (see below) |
 | `monitor.enabled` | bool | false | Enable Tetragon monitoring via virtio-serial |
 | `monitor.version` | string | "" | Tetragon version to use (empty = latest, e.g., "v1.3.0") |
@@ -260,6 +267,69 @@ http:
 
 **Warning:** Setting `http.mitm: false` disables domain fronting protection. HTTPS connections will be proxied without inspection, so attackers could potentially bypass the allowlist by using domain fronting techniques.
 
+### Reaching internal hosts
+
+The DNS and HTTP filters run on the host and make outbound connections *on behalf of* the guest. To prevent server-side request forgery (SSRF), they deny any connection whose resolved target is a private, loopback, link-local, or cloud-metadata address (e.g. `169.254.169.254`) — **even for allowlisted domains**. This is checked against the address the connection actually resolves to, so a public domain that is DNS-rebound or poisoned to a private IP is blocked, not just literal-IP requests.
+
+If your agent legitimately needs to reach an internal host, allowlist the domain **and** opt its address range into `http.allow_private_targets`:
+
+```yaml
+version: 1
+name: dev
+allowlist:
+  - internal.corp.example.com   # domain allow (unchanged)
+http:
+  allow_private_targets:        # empty by default => all private targets denied
+    - 10.0.5.0/24
+    - 192.168.1.10/32           # a single host is /32
+```
+
+With the above, `internal.corp.example.com` resolving into `10.0.5.0/24` is permitted, while an allowlisted public domain rebound to `169.254.169.254` (not in the list) is still blocked. Entries must be CIDR notation. The list is shared by the DNS rebinding check and the HTTP proxy.
+
+> Note: when an upstream proxy (`https_proxy`) is configured, the target is resolved by that proxy rather than locally, so a private-IP upstream proxy itself must be listed here to be dialable.
+
+### Secret injection
+
+Keep API keys out of the guest: store the value on the host and have the HTTP
+proxy inject it into outbound requests. The agent can *use* the credential but
+never *holds* it at rest.
+
+```yaml
+version: 1
+name: dev
+allowlist:
+  - api.anthropic.com
+http:
+  secret_injections:
+    - key: anthropic          # value stored via: abox secrets set dev anthropic --from-file ./key.txt
+      host: api.anthropic.com
+      header: x-api-key
+      path_prefix: /v1/       # only inject on API paths
+```
+
+Store and manage the value with the `abox secrets` commands:
+
+```bash
+abox secrets set dev anthropic --from-file ./key.txt
+abox secrets set dev anthropic --from-env ANTHROPIC_API_KEY
+abox secrets list dev
+abox secrets remove dev anthropic
+```
+
+Requirements and caveats:
+
+- Requires `http.mitm: true` (the default) — the proxy must intercept the request
+  to modify it. Injection is refused at startup if MITM is disabled or the filter
+  runs in passive mode.
+- Changing a **binding** (the `secret_injections` block) after `abox create`
+  requires re-creating the instance or hand-editing its `config.yaml` — there is no
+  `abox update`. Changing a **value** requires `abox stop` then `abox start` so the
+  HTTP filter reloads it.
+- There is an important trust boundary: if the bound host reflects request headers
+  on a reachable path, the agent can read the key back. See
+  [docs/secrets.md](secrets.md) for the full threat model and how `path_prefix`
+  mitigates it.
+
 ### Multiple Provision Scripts
 
 ```yaml
@@ -306,6 +376,8 @@ overrides:
 The template uses Go `text/template` syntax. Available variables are listed in `abox overrides dump --help`.
 
 **Warning:** Custom templates bypass abox's default VM hardening (QEMU sandbox, disabled nested virt, disabled USB/balloon/video, `nosharepages`). You are responsible for maintaining appropriate isolation in your template. See [Hardening](hardening.md) for what the defaults provide.
+
+**Constraint:** A custom template **must** keep the network interface as `<model type='virtio'/>` with `<driver name='vhost'/>` (as the default template does). abox applies and removes the egress `nwfilter` at runtime via `virsh update-device`, which must match the running interface's model and driver — a template that changes them will cause egress apply/remove to fail (fail-closed: the VM will not start unfiltered).
 
 ## See Also
 

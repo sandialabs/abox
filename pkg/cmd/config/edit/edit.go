@@ -1,9 +1,7 @@
 package edit
 
 import (
-	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/sandialabs/abox/internal/config"
@@ -139,14 +137,16 @@ func runEdit(cmd *cobra.Command, opts *Options, name string) error {
 	return nil
 }
 
-// validateDiskSize checks that the new disk size is valid and not smaller than current.
+// validateDiskSize checks that the new disk size is valid and not smaller than
+// current. The new size is already format-validated by validation.ValidateDiskSize
+// before this runs; here we only compare byte counts via the shared parser.
 func validateDiskSize(newSize, currentSize string) error {
-	newBytes, err := parseDiskSize(newSize)
+	newBytes, err := validation.ParseDiskSize(newSize)
 	if err != nil {
 		return fmt.Errorf("invalid disk size %q: %w", newSize, err)
 	}
 
-	currentBytes, err := parseDiskSize(currentSize)
+	currentBytes, err := validation.ParseDiskSize(currentSize)
 	if err != nil {
 		return nil //nolint:nilerr // unparseable current size; skip validation and allow the change
 	}
@@ -156,37 +156,4 @@ func validateDiskSize(newSize, currentSize string) error {
 	}
 
 	return nil
-}
-
-// parseDiskSize parses a size string like "20G" into bytes.
-func parseDiskSize(size string) (int64, error) {
-	size = strings.TrimSpace(size)
-	if size == "" {
-		return 0, errors.New("empty size")
-	}
-
-	multiplier := int64(1)
-	suffix := size[len(size)-1]
-
-	switch suffix {
-	case 'G', 'g':
-		multiplier = 1024 * 1024 * 1024
-		size = size[:len(size)-1]
-	case 'M', 'm':
-		multiplier = 1024 * 1024
-		size = size[:len(size)-1]
-	case 'K', 'k':
-		multiplier = 1024
-		size = size[:len(size)-1]
-	case 'T', 't':
-		multiplier = 1024 * 1024 * 1024 * 1024
-		size = size[:len(size)-1]
-	}
-
-	value, err := strconv.ParseInt(size, 10, 64)
-	if err != nil {
-		return 0, err
-	}
-
-	return value * multiplier, nil
 }

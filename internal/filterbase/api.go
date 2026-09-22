@@ -22,14 +22,18 @@ type BaseAPIServer struct {
 	grpcServer                    *grpc.Server
 }
 
-// NewBaseAPIServer creates a new base API server.
-func NewBaseAPIServer(socketPath string, filter *allowlist.Filter, server allowlist.ModeServer, loader *allowlist.Loader) *BaseAPIServer {
+// NewBaseAPIServer creates a new base API server. instance is the instance name
+// and label ("dns"/"http") identifies the daemon; both attribute service-layer
+// audit records.
+func NewBaseAPIServer(socketPath string, filter *allowlist.Filter, server allowlist.ModeServer, loader *allowlist.Loader, instance, label string) *BaseAPIServer {
 	return &BaseAPIServer{
 		socketPath: socketPath,
 		AllowlistAPIHandler: allowlist.AllowlistAPIHandler{
-			Filter: filter,
-			Loader: loader,
-			Server: server,
+			Filter:   filter,
+			Loader:   loader,
+			Server:   server,
+			Instance: instance,
+			Label:    label,
 		},
 	}
 }

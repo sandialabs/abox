@@ -49,7 +49,10 @@ func (s *Server) dialUpstreamTunnel(ctx context.Context, target string) (net.Con
 	if err != nil {
 		return nil, err
 	}
-	dialer := &net.Dialer{Timeout: 30 * time.Second}
+	// Control gates the direct dial on the resolved target IP (SSRF protection).
+	// Only the direct path can enforce it: when chaining through an upstream
+	// proxy the target is resolved by that proxy, not here.
+	dialer := &net.Dialer{Timeout: 30 * time.Second, Control: s.dialControl}
 	if proxyURL == nil {
 		return dialer.DialContext(ctx, "tcp", target)
 	}

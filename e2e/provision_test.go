@@ -12,7 +12,7 @@ import (
 
 // TestProvision tests the provision command.
 func TestProvision(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -25,7 +25,6 @@ func TestProvision(t *testing.T) {
 		t.Fatal("Instance did not start")
 	}
 	if !inst.waitForSSH(120 * time.Second) {
-		inst.dumpDiagnostics()
 		t.Fatal("SSH did not become available")
 	}
 
@@ -37,6 +36,7 @@ func TestProvision(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	t.Run("basic", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		// Create a simple provision script that creates a marker file
 		scriptPath := filepath.Join(tempDir, "basic.sh")
 		script := `#!/bin/bash
@@ -60,6 +60,7 @@ echo "Provision script executed"
 	})
 
 	t.Run("env-vars", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		// Create a script that outputs environment variables
 		scriptPath := filepath.Join(tempDir, "env-vars.sh")
 		script := `#!/bin/bash
@@ -95,6 +96,7 @@ echo "ABOX_SUBNET=$ABOX_SUBNET"
 	})
 
 	t.Run("overlay", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		// Create an overlay directory with a test file
 		overlayDir := filepath.Join(tempDir, "overlay")
 		if err := os.MkdirAll(overlayDir, 0o755); err != nil {
@@ -125,6 +127,7 @@ fi
 	})
 
 	t.Run("requires-running", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		// Stop the instance
 		inst.forceStop()
 

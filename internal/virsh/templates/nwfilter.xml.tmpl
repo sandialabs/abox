@@ -1,0 +1,75 @@
+<filter name='abox-{{.Name}}-traffic' chain='root' priority='-500'>
+{{if .UUID}}  <uuid>{{.UUID}}</uuid>
+{{end}}  <!-- Stateful policy, made explicit rather than relying on libvirt's per-rule
+       reverse-direction derivation: inbound is SSH-only, outbound is a
+       default-deny allowlist. Each initiator rule sets state='NEW'; return
+       traffic is admitted by the ESTABLISHED,RELATED accepts below; and the
+       terminal drops make it fail-closed in both directions. -->
+
+  <!-- Return traffic for established connections, both directions. This is the
+       standard stateful-firewall return path — it admits packets belonging to
+       already-tracked connections but no NEW inbound connection. Covers replies
+       to guest-initiated DNS/HTTP (inbound) and the guest's replies to
+       host-initiated SSH (outbound). -->
+  <rule action='accept' direction='in' priority='100'>
+    <all state='ESTABLISHED,RELATED'/>
+  </rule>
+  <rule action='accept' direction='out' priority='100'>
+    <all state='ESTABLISHED,RELATED'/>
+  </rule>
+
+  <!-- Allow host->guest SSH (new inbound connections only). This is the only
+       new connection permitted into the guest; the bridge is host-only, so the
+       host is the sole possible initiator. -->
+  <rule action='accept' direction='in' priority='150'>
+    <tcp dstportstart='22' dstportend='22' state='NEW'/>
+  </rule>
+
+  <!-- No DHCP rules: guests are statically addressed via cloud-init and the
+       network runs no DHCP server (see internal/cloudinit.GenerateNetworkConfig
+       and the libvirt network template, which has no <dhcp> block). -->
+
+  <!-- Allow DNS to gateway guest-facing DNS port (UDP).
+       The VM sends queries to this port, which nwfilter sees first. -->
+  <rule action='accept' direction='out' priority='200'>
+    <udp dstipaddr='{{.Gateway}}' dstportstart='{{.GuestDNSPort}}' dstportend='{{.GuestDNSPort}}' state='NEW'/>
+  </rule>
+
+  <!-- Allow DNS to gateway guest-facing DNS port (TCP) -->
+  <rule action='accept' direction='out' priority='200'>
+    <tcp dstipaddr='{{.Gateway}}' dstportstart='{{.GuestDNSPort}}' dstportend='{{.GuestDNSPort}}' state='NEW'/>
+  </rule>
+
+  <!-- Allow DNS to dnsfilter port (UDP).
+       After iptables NAT PREROUTING redirects port 53 to the dnsfilter port,
+       libvirt's iptables rules (generated from nwfilter) need to allow it. -->
+  <rule action='accept' direction='out' priority='200'>
+    <udp dstipaddr='{{.Gateway}}' dstportstart='{{.DNSPort}}' dstportend='{{.DNSPort}}' state='NEW'/>
+  </rule>
+
+  <!-- Allow DNS to dnsfilter port (TCP) -->
+  <rule action='accept' direction='out' priority='200'>
+    <tcp dstipaddr='{{.Gateway}}' dstportstart='{{.DNSPort}}' dstportend='{{.DNSPort}}' state='NEW'/>
+  </rule>
+
+  <!-- Allow HTTP proxy on gateway (all HTTP/HTTPS must go through filtering proxy). -->
+  <rule action='accept' direction='out' priority='200'>
+    <tcp dstipaddr='{{.Gateway}}' dstportstart='{{.HTTPPort}}' dstportend='{{.HTTPPort}}' state='NEW'/>
+  </rule>
+
+  <!-- Allow ICMP to gateway (conntrack tracks echo; the reply rides the inbound
+       ESTABLISHED,RELATED rule above). -->
+  <rule action='accept' direction='out' priority='250'>
+    <icmp dstipaddr='{{.Gateway}}' state='NEW'/>
+  </rule>
+
+  <!-- Default deny, both directions. These are load-bearing: the root chain's
+       implicit default is to fall through (accept), so without them the filter
+       is fail-open. They must remain the highest priority number. -->
+  <rule action='drop' direction='in' priority='999'>
+    <all/>
+  </rule>
+  <rule action='drop' direction='out' priority='999'>
+    <all/>
+  </rule>
+</filter>

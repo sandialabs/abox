@@ -20,8 +20,8 @@ type testBoxfileConfig struct {
 	Base      string
 	Provision []string
 	Allowlist []string
-	Monitor bool     // Enable Tetragon monitoring
-	Kprobes []string // Optional: specific kprobes (nil = defaults)
+	Monitor   bool     // Enable Tetragon monitoring
+	Kprobes   []string // Optional: specific kprobes (nil = defaults)
 }
 
 // writeTestBoxfile creates an abox.yaml in the given directory.
@@ -262,7 +262,7 @@ func TestInit(t *testing.T) {
 
 // TestDeclarativeWorkflow tests abox up and abox down commands.
 func TestDeclarativeWorkflow(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 
 	env := newTestEnv(t)
@@ -283,7 +283,13 @@ func TestDeclarativeWorkflow(t *testing.T) {
 		env.runWithTimeout(longTimeout, "down", "--remove", "--force", "-d", dir)
 	})
 
+	// Dump diagnostics on failure. Registered AFTER the teardown cleanup above so LIFO
+	// runs it first, before `down --remove` deletes the instance. This boxfile-driven
+	// test creates its instance via `up`, not newTestInstance, so it needs the hook here.
+	diagnoseOnFailure(t, env, name)
+
 	t.Run("up-creates-instance", func(t *testing.T) {
+		env := env.sub(t)
 		// abox up -d dir
 		result := env.runWithTimeout(longTimeout, "up", "-d", dir)
 		if !result.Success() {
@@ -304,7 +310,6 @@ func TestDeclarativeWorkflow(t *testing.T) {
 
 		// Wait for SSH to be available
 		if !ti.waitForSSH(120 * time.Second) {
-			ti.dumpDiagnostics()
 			t.Error("SSH did not become available")
 		}
 
@@ -338,6 +343,7 @@ func TestDeclarativeWorkflow(t *testing.T) {
 	})
 
 	t.Run("down-stops", func(t *testing.T) {
+		env := env.sub(t)
 		// abox down -d dir
 		result := env.runWithTimeout(longTimeout, "down", "-d", dir)
 		if !result.Success() {
@@ -396,7 +402,7 @@ func TestDeclarativeWorkflow(t *testing.T) {
 
 // TestDeclarativeProvisioning tests provisioning with abox up.
 func TestDeclarativeProvisioning(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -428,6 +434,9 @@ sudo -u %s sh -c 'echo "provisioned" > /home/%s/abox-provision-marker'
 		env.runWithTimeout(longTimeout, "down", "--remove", "--force", "-d", dir)
 	})
 
+	// Dump diagnostics on failure (registered after teardown so LIFO runs it first).
+	diagnoseOnFailure(t, env, name)
+
 	t.Run("provision-runs-on-first-up", func(t *testing.T) {
 		// abox up -d dir
 		result := env.runWithTimeout(longTimeout, "up", "-d", dir)
@@ -438,7 +447,6 @@ sudo -u %s sh -c 'echo "provisioned" > /home/%s/abox-provision-marker'
 		// Wait for SSH
 		ti := &testInstance{env: env, name: name, t: t}
 		if !ti.waitForSSH(120 * time.Second) {
-			ti.dumpDiagnostics()
 			t.Fatal("SSH did not become available")
 		}
 
@@ -453,6 +461,7 @@ sudo -u %s sh -c 'echo "provisioned" > /home/%s/abox-provision-marker'
 	})
 
 	t.Run("provision-not-rerun-on-second-up", func(t *testing.T) {
+		env := env.sub(t)
 		// Remove the marker file
 		env.mustRun("ssh", name, "--", "rm", fmt.Sprintf("/home/%s/abox-provision-marker", user))
 
@@ -481,7 +490,7 @@ sudo -u %s sh -c 'echo "provisioned" > /home/%s/abox-provision-marker'
 
 // TestDeclarativeAllowlist tests allowlist sync with abox up.
 func TestDeclarativeAllowlist(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -502,7 +511,11 @@ func TestDeclarativeAllowlist(t *testing.T) {
 		env.runWithTimeout(longTimeout, "down", "--remove", "--force", "-d", dir)
 	})
 
+	// Dump diagnostics on failure (registered after teardown so LIFO runs it first).
+	diagnoseOnFailure(t, env, name)
+
 	t.Run("initial-allowlist", func(t *testing.T) {
+		env := env.sub(t)
 		// abox up -d dir
 		result := env.runWithTimeout(longTimeout, "up", "-d", dir)
 		if !result.Success() {
@@ -523,6 +536,7 @@ func TestDeclarativeAllowlist(t *testing.T) {
 	})
 
 	t.Run("allowlist-sync-on-rerun", func(t *testing.T) {
+		env := env.sub(t)
 		// Update abox.yaml with new domain
 		writeTestBoxfile(t, dir, testBoxfileConfig{
 			Name:      name,

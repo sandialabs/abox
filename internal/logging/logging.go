@@ -1,5 +1,6 @@
 // Package logging provides structured logging for abox using slog.
-// It supports dual output: stderr for users and syslog for audit trails.
+// It supports dual output: stderr for users and a platform audit sink for audit
+// trails (syslog on Linux, the unified log on macOS, discard elsewhere).
 package logging
 
 import (
@@ -7,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"log/syslog"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -26,10 +26,11 @@ var logFileHandle *os.File
 // logLevel is the package-level LevelVar for runtime log level changes.
 var logLevel = new(slog.LevelVar)
 
-// auditLogger is a syslog-only logger used by Audit(). Audit events go to
-// syslog (journalctl -t abox) and never appear on stderr. Initialized with a
-// discard handler so Audit() is safe to call before Init(); Init() replaces
-// this with the real syslog handler.
+// auditLogger is the audit-only logger used by Audit(). Audit events go to the
+// platform audit sink (syslog on Linux, the unified log on macOS — see
+// AuditLogHint) and never appear on stderr. Initialized with a discard handler so
+// Audit() is safe to call before Init(); Init() replaces this with the real
+// audit handler.
 var auditLogger = slog.New(discardHandler{})
 
 // stderrWriter is a swappable writer used by the slog stderr handler.
@@ -60,7 +61,7 @@ var DefaultOptions = Options{
 
 // InitWithOptions initializes the global logger with the specified options.
 // If LogFile is set, logs are written to the file in addition to stderr.
-// Audit logging to syslog is always enabled at INFO level.
+// Audit logging to the platform audit sink is always enabled at INFO level.
 func InitWithOptions(opts Options) error {
 	// Close any existing log file
 	CloseLogFile()
@@ -85,11 +86,20 @@ func InitWithOptions(opts Options) error {
 		handlers = append(handlers, fileHandler)
 	}
 
-	// Create syslog handler for audit logging (always INFO level, never disabled)
-	syslogHandler := newSyslogHandler()
-	if syslogHandler != nil {
-		handlers = append(handlers, syslogHandler)
-		auditLogger = slog.New(syslogHandler)
+	// Create the platform's audit handler (always INFO level, never disabled):
+	// syslog on Linux, the unified log (via /usr/bin/logger) on macOS, discard
+	// elsewhere. Audit events always route through auditLogger; only platforms that
+	// historically also sent the default logger's INFO+ output through the audit
+	// sink (Linux/syslog) add it to the general handler set
+	// (auditHandlerInDefaultLogger). initAuditSink prepares any platform sink
+	// (e.g. the macOS logger child); it is a no-op on Linux/other.
+	initAuditSink()
+	auditHandler := newAuditHandler()
+	if auditHandler != nil {
+		if auditHandlerInDefaultLogger {
+			handlers = append(handlers, auditHandler)
+		}
+		auditLogger = slog.New(auditHandler)
 	} else {
 		auditLogger = slog.New(discardHandler{})
 	}
@@ -146,7 +156,9 @@ func newLogHandler(w io.Writer, opts *slog.HandlerOptions, format string) slog.H
 	return slog.NewTextHandler(w, opts)
 }
 
-// CloseLogFile closes the log file if one is open.
+// CloseLogFile closes the log file if one is open, and the platform audit sink
+// (a no-op where the sink is syslog/discard; drains and stops the logger child on
+// macOS).
 func CloseLogFile() {
 	if logFileHandle != nil {
 		if err := logFileHandle.Close(); err != nil {
@@ -154,6 +166,7 @@ func CloseLogFile() {
 		}
 		logFileHandle = nil
 	}
+	closeAuditSink()
 }
 
 const (
@@ -237,13 +250,21 @@ func Warn(msg string, args ...any) {
 	slog.Warn(msg, args...)
 }
 
-// Audit logs an audit message to syslog only (not stderr).
-// The current user is automatically included. Use this for
-// security-relevant operations that should be tracked.
-// View with: journalctl -t abox
+// Audit logs an audit message to the platform audit sink only (not stderr).
+// The current user is automatically included. Use this for security-relevant
+// operations that should be tracked. See AuditLogHint for how to read the log.
 func Audit(msg string, args ...any) {
 	args = append(args, "user", currentUser)
 	auditLogger.Info(msg, args...)
+}
+
+// SetAuditOutputForTest redirects audit output to w for the duration of a test
+// and returns a restore function. It is intended for tests only and is not safe
+// for concurrent use (it swaps a package-level logger).
+func SetAuditOutputForTest(w io.Writer) func() {
+	prev := auditLogger
+	auditLogger = slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	return func() { auditLogger = prev }
 }
 
 // discardHandler is a no-op slog.Handler used when syslog is unavailable.
@@ -294,111 +315,4 @@ func (h *multiHandler) WithGroup(name string) slog.Handler {
 		newHandlers[i] = handler.WithGroup(name)
 	}
 	return &multiHandler{handlers: newHandlers}
-}
-
-// syslogHandler implements slog.Handler and writes to syslog.
-type syslogHandler struct {
-	writer *syslog.Writer
-	attrs  []slog.Attr
-	group  string
-}
-
-// newSyslogHandler creates a syslog handler for audit logging.
-// Returns nil if syslog is unavailable (e.g., on non-Unix systems).
-func newSyslogHandler() *syslogHandler {
-	w, err := syslog.New(syslog.LOG_INFO|syslog.LOG_USER, "abox")
-	if err != nil {
-		return nil
-	}
-	return &syslogHandler{writer: w}
-}
-
-func (h *syslogHandler) Enabled(_ context.Context, level slog.Level) bool {
-	// Syslog handler only logs INFO and above (no debug spam)
-	return level >= slog.LevelInfo
-}
-
-func (h *syslogHandler) Handle(_ context.Context, r slog.Record) error {
-	// Format message as key=value pairs
-	var sb strings.Builder
-	sb.WriteString(r.Message)
-
-	// Add group prefix if set
-	prefix := ""
-	if h.group != "" {
-		prefix = h.group + "."
-	}
-
-	// Add handler-level attrs
-	for _, attr := range h.attrs {
-		sb.WriteString(" ")
-		sb.WriteString(prefix)
-		sb.WriteString(attr.Key)
-		sb.WriteString("=")
-		sb.WriteString(formatValue(attr.Value))
-	}
-
-	// Add record attrs
-	r.Attrs(func(a slog.Attr) bool {
-		sb.WriteString(" ")
-		sb.WriteString(prefix)
-		sb.WriteString(a.Key)
-		sb.WriteString("=")
-		sb.WriteString(formatValue(a.Value))
-		return true
-	})
-
-	msg := sb.String()
-
-	// Write to appropriate syslog level
-	switch r.Level {
-	case slog.LevelDebug:
-		return h.writer.Debug(msg)
-	case slog.LevelInfo:
-		return h.writer.Info(msg)
-	case slog.LevelWarn:
-		return h.writer.Warning(msg)
-	case slog.LevelError:
-		return h.writer.Err(msg)
-	default:
-		return h.writer.Info(msg)
-	}
-}
-
-func (h *syslogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	newAttrs := make([]slog.Attr, len(h.attrs)+len(attrs))
-	copy(newAttrs, h.attrs)
-	copy(newAttrs[len(h.attrs):], attrs)
-	return &syslogHandler{
-		writer: h.writer,
-		attrs:  newAttrs,
-		group:  h.group,
-	}
-}
-
-func (h *syslogHandler) WithGroup(name string) slog.Handler {
-	newGroup := name
-	if h.group != "" {
-		newGroup = h.group + "." + name
-	}
-	return &syslogHandler{
-		writer: h.writer,
-		attrs:  h.attrs,
-		group:  newGroup,
-	}
-}
-
-// formatValue formats a slog.Value for output.
-func formatValue(v slog.Value) string {
-	switch v.Kind() { //nolint:exhaustive // default handles all non-string kinds via v.Any()
-	case slog.KindString:
-		s := v.String()
-		// Quote strings containing spaces
-		if strings.ContainsAny(s, " \t\n") {
-			return fmt.Sprintf("%q", s)
-		}
-		return s
-	default:
-		return fmt.Sprintf("%v", v.Any())
-	}
 }

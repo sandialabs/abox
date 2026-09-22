@@ -20,6 +20,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sandialabs/abox/internal/backend"
+	// The backends self-register via blank imports in the OS-gated
+	// backends_*.go files (mirroring pkg/cmd/root); the matrix needs the registry
+	// populated to enumerate backends and probe IsAvailable() per host. Keeping
+	// the libvirt (linux-only) import out of this file lets the matrix cross-compile.
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/images"
 	"github.com/sandialabs/abox/internal/natsort"
@@ -27,10 +32,20 @@ import (
 )
 
 type result struct {
+	Backend  string
 	Base     string
 	Passed   bool
 	Duration time.Duration
 	LogFile  string
+}
+
+// backendOutcome records the per-backend result: either it was skipped
+// (unavailable on this host) or it ran the base loop and produced base results.
+type backendOutcome struct {
+	Backend     string
+	Skipped     bool
+	SkipReason  string
+	BaseResults []result
 }
 
 func main() {
@@ -39,18 +54,26 @@ func main() {
 	var timeout string
 	var timeoutSet bool
 	var runFilter string
+	var backendsFlag []string
 
 	rootCmd := &cobra.Command{
 		Use:   "matrix [bases...]",
-		Short: "Run e2e tests across multiple base images",
-		Long: `Run e2e tests across multiple base images with a single privilege helper.
+		Short: "Run e2e tests across multiple backends and base images",
+		Long: `Run e2e tests across a 2-D matrix of backends × base images with a single
+privilege helper, then print a compatibility report.
 
-Without arguments, tests all locally downloaded base images.
-With arguments, tests only the specified bases.
+The suite iterates each selected backend and, for the backends available on this
+host, runs the base-image loop underneath. Backends that report IsAvailable()==false
+are reported as SKIP rather than failing the run.
+
+Without --backends, all registered backends are considered (each SKIPPED when
+unavailable). Without base arguments, all locally downloaded base images are tested.
 
 Examples:
-  go run ./e2e/matrix/                            # test all downloaded bases
-  go run ./e2e/matrix/ ubuntu-24.04 debian-12     # test specific bases
+  go run ./e2e/matrix/                            # all backends × all downloaded bases
+  go run ./e2e/matrix/ ubuntu-24.04 debian-12     # all backends × specific bases
+  go run ./e2e/matrix/ --backends libvirt          # only the libvirt backend
+  go run ./e2e/matrix/ --backends libvirt,vmware   # both backends
   go run ./e2e/matrix/ --auto-pull                 # pull all known bases, then test all
   go run ./e2e/matrix/ --auto-pull almalinux-9     # pull if needed, then test
   go run ./e2e/matrix/ --timeout 45m               # custom per-base timeout
@@ -59,13 +82,14 @@ Examples:
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			timeoutSet = cmd.Flags().Changed("timeout")
-			return run(args, autoPull, short, timeout, timeoutSet, runFilter)
+			return run(args, backendsFlag, autoPull, short, timeout, timeoutSet, runFilter)
 		},
 	}
 
+	rootCmd.Flags().StringSliceVar(&backendsFlag, "backends", nil, "Backends to test (comma-separated). Default: all registered backends (unavailable ones are SKIPPED). Overrides ABOX_BACKEND.")
 	rootCmd.Flags().BoolVar(&autoPull, "auto-pull", false, "Pull missing base images before testing")
 	rootCmd.Flags().BoolVar(&short, "short", false, "Smoke tests only (lifecycle + up/down)")
-	rootCmd.Flags().StringVar(&timeout, "timeout", "30m", "Per-base test timeout (passed to go test -timeout)")
+	rootCmd.Flags().StringVar(&timeout, "timeout", "45m", "Per-base test timeout (passed to go test -timeout)")
 	rootCmd.Flags().StringVar(&runFilter, "run", "", "Test filter regexp (passed to go test -run)")
 
 	if err := rootCmd.Execute(); err != nil {
@@ -73,8 +97,40 @@ Examples:
 	}
 }
 
-func run(filterBases []string, autoPull, short bool, timeout string, timeoutSet bool, runFilter string) error {
+// resolveBackends returns the ordered list of backend names to iterate.
+// Precedence: explicit --backends flag, then ABOX_BACKEND, then all registered
+// backends. Unknown names (not registered) are rejected up front so a typo fails
+// fast rather than silently SKIPping.
+func resolveBackends(backendsFlag []string) ([]string, error) {
+	var names []string
+	switch {
+	case len(backendsFlag) > 0:
+		names = backendsFlag
+	case os.Getenv(factory.EnvBackend) != "":
+		names = []string{os.Getenv(factory.EnvBackend)}
+	default:
+		names = backend.RegisteredNames()
+	}
+
+	for _, n := range names {
+		if !backend.IsRegistered(n) {
+			return nil, fmt.Errorf("unknown backend: %s", n)
+		}
+	}
+	return names, nil
+}
+
+func run(filterBases, backendsFlag []string, autoPull, short bool, timeout string, timeoutSet bool, runFilter string) error {
 	startTime := time.Now()
+
+	// Determine the backend dimension up front so a typo fails fast.
+	backends, err := resolveBackends(backendsFlag)
+	if err != nil {
+		return err
+	}
+	if len(backends) == 0 {
+		return errors.New("no backends registered")
+	}
 
 	// Build abox binary.
 	fmt.Println("Building abox...")
@@ -114,11 +170,12 @@ func run(filterBases []string, autoPull, short bool, timeout string, timeoutSet 
 		timeout = "7m"
 	}
 
+	mode := ""
 	if short {
-		fmt.Printf("Testing %d base(s) (smoke): %s\n\n", len(bases), strings.Join(bases, ", "))
-	} else {
-		fmt.Printf("Testing %d base(s): %s\n\n", len(bases), strings.Join(bases, ", "))
+		mode = " (smoke)"
 	}
+	fmt.Printf("Testing %d backend(s): %s\n", len(backends), strings.Join(backends, ", "))
+	fmt.Printf("Testing %d base(s)%s: %s\n\n", len(bases), mode, strings.Join(bases, ", "))
 
 	// Create results directory.
 	logDir := filepath.Join("e2e-results", time.Now().Format("2006-01-02_150405"))
@@ -133,34 +190,68 @@ func run(filterBases []string, autoPull, short bool, timeout string, timeoutSet 
 	}
 	defer helperCleanup()
 
-	// Run tests per base.
-	var results []result
-	for i, base := range bases {
-		fmt.Printf("[%d/%d] Testing %s ...\n", i+1, len(bases), base)
+	// Iterate backends (outer) × bases (inner). Backends unavailable on this host
+	// are SKIPPED rather than failed, so a libvirt-only host still passes when the
+	// vmware backend is in the matrix but not installed.
+	var outcomes []backendOutcome
+	for bi, backendName := range backends {
+		fmt.Printf("=== backend [%d/%d] %s ===\n", bi+1, len(backends), backendName)
 
-		r := runTests(base, logDir, timeout, short, runFilter, env)
-		results = append(results, r)
-
-		if r.Passed {
-			fmt.Printf("  PASS (%s)\n\n", formatDuration(r.Duration))
-		} else {
-			fmt.Printf("  FAIL (%s)\n", formatDuration(r.Duration))
-			printTail(r.LogFile, 20)
-			fmt.Println()
+		if reason := backendUnavailableReason(backendName); reason != "" {
+			fmt.Printf("  SKIP: %s\n\n", reason)
+			outcomes = append(outcomes, backendOutcome{
+				Backend:    backendName,
+				Skipped:    true,
+				SkipReason: reason,
+			})
+			continue
 		}
+
+		var baseResults []result
+		for i, base := range bases {
+			fmt.Printf("[%s %d/%d] Testing %s ...\n", backendName, i+1, len(bases), base)
+
+			r := runTests(backendName, base, logDir, timeout, short, runFilter, env)
+			baseResults = append(baseResults, r)
+
+			if r.Passed {
+				fmt.Printf("  PASS (%s)\n\n", formatDuration(r.Duration))
+			} else {
+				fmt.Printf("  FAIL (%s)\n", formatDuration(r.Duration))
+				printTail(r.LogFile, 20)
+				fmt.Println()
+			}
+		}
+		outcomes = append(outcomes, backendOutcome{
+			Backend:     backendName,
+			BaseResults: baseResults,
+		})
 	}
 
 	// Print report.
 	totalDuration := time.Since(startTime)
-	printReport(results, logDir, totalDuration)
+	printReport(outcomes, logDir, totalDuration)
 
-	// Exit non-zero if any base failed.
-	for _, r := range results {
-		if !r.Passed {
-			return errors.New("some bases failed")
+	// Exit non-zero if any (backend, base) cell failed. Skipped backends do not
+	// fail the run.
+	for _, o := range outcomes {
+		for _, r := range o.BaseResults {
+			if !r.Passed {
+				return errors.New("some cells failed")
+			}
 		}
 	}
 	return nil
+}
+
+// backendUnavailableReason returns a human-readable reason the backend cannot be
+// tested on this host, or "" when it is available. It defers to the backend's own
+// IsAvailable() (via backend.Get), mirroring the e2e harness's capability skip.
+func backendUnavailableReason(name string) string {
+	if _, err := backend.Get(name); err != nil {
+		return err.Error()
+	}
+	return ""
 }
 
 // resolveAutoPull fetches all known images, pulls any that are missing, and
@@ -240,35 +331,73 @@ func resolveDownloaded(filterBases []string) ([]string, error) {
 	return result, nil
 }
 
-// discoverDownloadedBases scans both base image directories for *.qcow2 files.
+// baseSearchDirs returns the directories to search for downloaded base images,
+// backend-aware and consistent with the e2e helper side (baseImageDirs). It
+// includes every registered backend's StorageDir()/base (so both libvirt and
+// vmware bases are found regardless of which backend a run selects), the
+// backend-neutral user download cache (where `abox base pull` writes), and the
+// legacy root-owned LibvirtImagesDir for backward compatibility.
+func baseSearchDirs() []string {
+	seen := make(map[string]bool)
+	var dirs []string
+	add := func(d string) {
+		if d == "" || seen[d] {
+			return
+		}
+		seen[d] = true
+		dirs = append(dirs, d)
+	}
+
+	// Backend-managed storage for every registered backend.
+	for _, name := range backend.RegisteredNames() {
+		if b, err := backend.Get(name); err == nil {
+			add(filepath.Join(b.StorageDir(), "base"))
+		}
+	}
+
+	// Backend-neutral user download cache.
+	if home, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(home, ".local", "share", "abox", "base"))
+	}
+
+	// Legacy root-owned libvirt image location (may still hold bases).
+	add(filepath.Join(config.LibvirtImagesDir, "base"))
+
+	return dirs
+}
+
+// matrixBaseImageExts lists on-disk base-image extensions to probe, in priority
+// order. Most backends keep the downloaded qcow2; the vfkit (macOS) backend uses
+// raw (Apple Virtualization.framework cannot read qcow2). Mirrors baseImageExts
+// in e2e/helpers_test.go so matrix discovery stays symmetric with the helper side.
+var matrixBaseImageExts = []string{".qcow2", ".raw"}
+
+// discoverDownloadedBases scans all base image directories for base image files
+// (any extension in matrixBaseImageExts).
 func discoverDownloadedBases() []string {
 	seen := make(map[string]bool)
 	var bases []string
 
-	dirs := []string{
-		filepath.Join(config.LibvirtImagesDir, "base"),
-	}
-
-	// Add user base images directory.
-	home, err := os.UserHomeDir()
-	if err == nil {
-		dirs = append(dirs, filepath.Join(home, ".local", "share", "abox", "base"))
-	}
-
-	for _, dir := range dirs {
+	for _, dir := range baseSearchDirs() {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue // directory may not exist
 		}
 		for _, entry := range entries {
-			name := entry.Name()
-			if !strings.HasSuffix(name, ".qcow2") || entry.IsDir() {
+			if entry.IsDir() {
 				continue
 			}
-			base := strings.TrimSuffix(name, ".qcow2")
-			if !seen[base] {
-				seen[base] = true
-				bases = append(bases, base)
+			name := entry.Name()
+			for _, ext := range matrixBaseImageExts {
+				if !strings.HasSuffix(name, ext) {
+					continue
+				}
+				base := strings.TrimSuffix(name, ext)
+				if !seen[base] {
+					seen[base] = true
+					bases = append(bases, base)
+				}
+				break
 			}
 		}
 	}
@@ -276,20 +405,15 @@ func discoverDownloadedBases() []string {
 	return bases
 }
 
-// isBaseDownloaded checks if a base image exists locally.
+// isBaseDownloaded checks if a base image exists locally in any backend-aware or
+// backend-neutral base directory (see baseSearchDirs), for any extension in
+// matrixBaseImageExts.
 func isBaseDownloaded(name string) bool {
-	paths := []string{
-		filepath.Join(config.LibvirtImagesDir, "base", name+".qcow2"),
-	}
-
-	home, err := os.UserHomeDir()
-	if err == nil {
-		paths = append(paths, filepath.Join(home, ".local", "share", "abox", "base", name+".qcow2"))
-	}
-
-	for _, p := range paths {
-		if _, err := os.Stat(p); err == nil {
-			return true
+	for _, dir := range baseSearchDirs() {
+		for _, ext := range matrixBaseImageExts {
+			if _, err := os.Stat(filepath.Join(dir, name+ext)); err == nil {
+				return true
+			}
 		}
 	}
 	return false
@@ -388,20 +512,25 @@ func waitForSocket(path string, timeout time.Duration) error {
 	return fmt.Errorf("timeout waiting for socket %s", path)
 }
 
-// runTests executes go test for a single base image and returns the result.
-// Output streams to the log file only; the caller prints progress lines.
-func runTests(base, logDir, timeout string, short bool, runFilter string, env []string) result {
-	logFile := filepath.Join(logDir, base+".log")
+// runTests executes go test for a single (backend, base) cell and returns the
+// result. The selected backend is passed to the subprocess via ABOX_BACKEND so
+// the e2e harness (backendUnderTest) exercises that backend. Output streams to a
+// per-cell log file only; the caller prints progress lines.
+func runTests(backendName, base, logDir, timeout string, short bool, runFilter string, env []string) result {
+	logFile := filepath.Join(logDir, backendName+"_"+base+".log")
 
 	f, err := os.Create(logFile)
 	if err != nil {
-		return result{Base: base, LogFile: logFile}
+		return result{Backend: backendName, Base: base, LogFile: logFile}
 	}
 	defer f.Close()
 
 	start := time.Now()
 
-	args := []string{"test", "-tags=e2e", "-v", "-timeout", timeout}
+	// -count=1 disables go's test result cache: e2e outcomes depend on external
+	// state (installed tools, a running backend, base images, network) that the
+	// build cache cannot observe, so a cached result could hide real changes.
+	args := []string{"test", "-tags=e2e", "-v", "-count=1", "-timeout", timeout}
 	if short {
 		args = append(args, "-short", "-failfast")
 	}
@@ -410,7 +539,7 @@ func runTests(base, logDir, timeout string, short bool, runFilter string, env []
 	}
 	args = append(args, "./e2e")
 	cmd := exec.Command("go", args...)
-	cmd.Env = append(env, "ABOX_E2E_BASE="+base)
+	cmd.Env = append(env, "ABOX_E2E_BASE="+base, factory.EnvBackend+"="+backendName)
 	cmd.Stdout = f
 	cmd.Stderr = f
 
@@ -418,6 +547,7 @@ func runTests(base, logDir, timeout string, short bool, runFilter string, env []
 	duration := time.Since(start)
 
 	return result{
+		Backend:  backendName,
 		Base:     base,
 		Passed:   err == nil,
 		Duration: duration,
@@ -477,45 +607,67 @@ func printTail(path string, n int) {
 	}
 }
 
-// printReport prints a summary table and writes it to report.txt.
-func printReport(results []result, logDir string, totalDuration time.Duration) {
+// printReport prints a 2-D backend × base summary and writes it to report.txt.
+// Each available backend lists its per-base PASS/FAIL cells; unavailable backends
+// are shown as a single SKIP line with the reason.
+func printReport(outcomes []backendOutcome, logDir string, totalDuration time.Duration) {
 	now := time.Now().Format("2006-01-02 15:04:05")
 
-	passed := 0
-	for _, r := range results {
-		if r.Passed {
-			passed++
+	var passed, failed, cells, skippedBackends int
+	for _, o := range outcomes {
+		if o.Skipped {
+			skippedBackends++
+			continue
+		}
+		for _, r := range o.BaseResults {
+			cells++
+			if r.Passed {
+				passed++
+			} else {
+				failed++
+			}
 		}
 	}
-	failed := len(results) - passed
 
-	// Find longest base name for column width.
+	// Column width for base names across all backends.
 	maxBase := len("BASE")
-	for _, r := range results {
-		if len(r.Base) > maxBase {
-			maxBase = len(r.Base)
+	for _, o := range outcomes {
+		for _, r := range o.BaseResults {
+			if len(r.Base) > maxBase {
+				maxBase = len(r.Base)
+			}
 		}
 	}
 
 	var b strings.Builder
-	sep := strings.Repeat("═", 42+maxBase)
+	sep := strings.Repeat("═", 44+maxBase)
 
 	fmt.Fprintf(&b, "%s\n", sep)
-	fmt.Fprintf(&b, "  abox e2e compatibility report\n")
+	fmt.Fprintf(&b, "  abox e2e compatibility report (backend × base)\n")
 	fmt.Fprintf(&b, "  %s (%s total)\n", now, formatDuration(totalDuration))
-	fmt.Fprintf(&b, "%s\n\n", sep)
+	fmt.Fprintf(&b, "%s\n", sep)
 
-	fmt.Fprintf(&b, "%-*s  %-6s  %s\n", maxBase, "BASE", "STATUS", "DURATION")
-	for _, r := range results {
-		status := "PASS"
-		if !r.Passed {
-			status = "FAIL"
+	for _, o := range outcomes {
+		fmt.Fprintf(&b, "\nBACKEND: %s\n", o.Backend)
+		if o.Skipped {
+			fmt.Fprintf(&b, "  SKIP (unavailable): %s\n", o.SkipReason)
+			continue
 		}
-		fmt.Fprintf(&b, "%-*s  %-6s  %s\n", maxBase, r.Base, status, formatDuration(r.Duration))
+		fmt.Fprintf(&b, "  %-*s  %-6s  %s\n", maxBase, "BASE", "STATUS", "DURATION")
+		for _, r := range o.BaseResults {
+			status := "PASS"
+			if !r.Passed {
+				status = "FAIL"
+			}
+			fmt.Fprintf(&b, "  %-*s  %-6s  %s\n", maxBase, r.Base, status, formatDuration(r.Duration))
+		}
 	}
 
-	fmt.Fprintf(&b, "\n%d/%d passed, %d/%d failed\n", passed, len(results), failed, len(results))
-	fmt.Fprintf(&b, "Results: %s/\n", logDir)
+	fmt.Fprintf(&b, "\n%d/%d cells passed, %d/%d failed", passed, cells, failed, cells)
+	if skippedBackends > 0 {
+		fmt.Fprintf(&b, "; %d backend(s) skipped (unavailable)", skippedBackends)
+	}
+	fmt.Fprintf(&b, "\nResults: %s/\n", logDir)
 
 	report := b.String()
 	fmt.Print("\n" + report)

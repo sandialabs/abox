@@ -6,6 +6,7 @@ import (
 )
 
 func TestLoad_CorruptedYAML(t *testing.T) {
+	skipOnWindows(t)
 	mock := NewMockFileSystem()
 	mock.HomeDir = "/home/testuser"
 

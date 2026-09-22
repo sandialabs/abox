@@ -1,22 +1,56 @@
 syntax = "proto3";
 package abox;
-option go_package = "github.com/jcrussell/abox/internal/rpc";
+option go_package = "github.com/sandialabs/abox/internal/rpc";
 
-// Privilege Helper Service - runs as root for privileged operations
-service Privilege {
+// Egress Helper Service - runs privileged (CAP_NET_ADMIN) for network egress
+// enforcement. Per-instance disk operations run unprivileged; the one privileged
+// storage step (provisioning the per-user disk root) is exposed via
+// EnsureStorageRoot.
+service Egress {
   rpc Ping(Empty) returns (StringMsg);
   rpc Shutdown(Empty) returns (Empty);
-  rpc QemuImgCreate(QemuImgReq) returns (Empty);
-  rpc Chmod(ChmodReq) returns (Empty);
-  rpc MkdirAll(MkdirReq) returns (Empty);
-  rpc RemoveAll(PathReq) returns (Empty);
-  rpc CopyFile(CopyReq) returns (Empty);
-  rpc UfwAdd(UfwReq) returns (Empty);
-  rpc UfwRemove(UfwReq) returns (Empty);
-  rpc UfwStatus(Empty) returns (UfwStatusResp);
-  rpc IptablesAdd(IptablesReq) returns (Empty);
-  rpc IptablesRemove(IptablesReq) returns (Empty);
-  rpc IptablesFlush(IptablesFlushReq) returns (Empty);
+  // EnsureStorageRoot idempotently provisions the caller's per-user disk storage
+  // root under /var/lib/libvirt/images/abox: it creates the shared parent (once,
+  // root-owned) and the per-user subdir owned by the caller and setgid to the
+  // QEMU runtime group, so images created there inherit that group and are
+  // readable by the VM process without ACLs or any $HOME traversal. The helper
+  // derives the caller from the socket peer credentials and creates only
+  // <parent>/<caller-uid>, so a client can never provision another user's dir.
+  rpc EnsureStorageRoot(EnsureStorageRootReq) returns (Empty);
+  // Apply installs the host-side egress enforcement for a bridge: a NAT
+  // PREROUTING REDIRECT of guest DNS (the guest-facing DNS port) to the
+  // dnsfilter port, plus INPUT ACCEPT rules for the dnsfilter and httpfilter
+  // ports (and optionally DHCP/ICMP). Idempotent (stale rules for the bridge
+  // are flushed first). The permitted set is driven entirely by the request.
+  rpc Apply(EgressReq) returns (Empty);
+  // Remove flushes the host-side egress rules for a bridge (idempotent). The
+  // request's ports scope the flush to abox's own rules.
+  rpc Remove(EgressReq) returns (Empty);
+  // Verify reports whether the complete host-side egress rule set described by
+  // the request is currently in force (drift detection for status/doctor).
+  rpc Verify(EgressReq) returns (BoolMsg);
+}
+
+// Pf Service - runs privileged (root via sudo) for macOS pfctl egress
+// enforcement. Per-instance rules live in the abox/<instance> anchor and key on
+// the instance's deterministic /24 subnet (known at Define time, before the VM's
+// DHCP IP is assigned). Disk/storage operations run unprivileged and are not
+// exposed here.
+service Pf {
+  rpc Ping(Empty) returns (StringMsg);
+  rpc Shutdown(Empty) returns (Empty);
+  // Enable turns on pf (if needed) and wires the abox/* anchor references into
+  // /etc/pf.conf so the kernel descends into the per-instance sub-anchors.
+  // Idempotent.
+  rpc Enable(Empty) returns (Empty);
+  // LoadAnchor validates the request (anchor-safe instance name, /24 subnet, and
+  // rules bound token-for-token to that subnet) and loads the rules into the
+  // abox/<instance> anchor.
+  rpc LoadAnchor(PfAnchorReq) returns (Empty);
+  // FlushAnchor removes the per-instance rules from abox/<instance> (idempotent).
+  rpc FlushAnchor(PfInstanceReq) returns (Empty);
+  // TeardownConfig removes the abox/* anchor references from /etc/pf.conf.
+  rpc TeardownConfig(Empty) returns (Empty);
 }
 
 // DNS Filter Service - manages DNS filtering
@@ -53,49 +87,47 @@ service HTTPFilter {
 // Shared messages
 message Empty {}
 message StringMsg { string message = 1; }
-message PathReq { string path = 1; }
+message BoolMsg { bool ok = 1; }
 message DomainReq { string domain = 1; }
 message DomainList { repeated string domains = 1; }
 
-// Privilege-specific messages
-message QemuImgReq {
-  string backing_file = 1;
-  string output = 2;
-  string size = 3;
-}
-
-message ChmodReq {
-  string path = 1;
-  string mode = 2;
-}
-
-message MkdirReq {
-  string path = 1;
-  string mode = 2;
-}
-
-message CopyReq {
-  string src = 1;
-  string dst = 2;
-}
-
-message UfwReq {
+// Egress-specific messages. These fields are the single source of truth for the
+// permitted guest egress; the helper enforces exactly what is described here
+// (after bounding/validating each field). See backend.EgressPolicy.
+message EgressReq {
+  reserved 5, 6;             // removed allow_dhcp / allow_icmp (DHCP + gateway ICMP always permitted)
+  reserved "allow_dhcp", "allow_icmp";
   string bridge = 1;
+  int32 dns_port = 2;        // dnsfilter listen port (REDIRECT target + INPUT accept)
+  int32 http_port = 3;       // httpfilter listen port (INPUT accept)
+  int32 guest_dns_port = 4;  // guest-facing DNS port REDIRECTed to dns_port (normally 53)
 }
 
-message UfwStatusResp {
-  bool installed = 1;
-  bool active = 2;
+// Pf-specific messages. The subnet is the single source of truth for what the
+// instance's rules may match: the helper requires every source in the rules to
+// be exactly this subnet (and every gateway to be its .1 host), which closes the
+// cross-instance rule-injection hole.
+message PfAnchorReq {
+  string instance = 1;  // anchor-safe instance name (abox/<instance>)
+  string subnet = 2;    // deterministic per-instance /24 CIDR (e.g. 10.20.30.0/24)
+  string rules = 3;     // pf rules, each line bound token-for-token to subnet
 }
+message PfInstanceReq { string instance = 1; }
 
-message IptablesReq {
-  string bridge = 1;
-  int32 dns_port = 2;
-  string protocol = 3;
-}
-
-message IptablesFlushReq {
-  string bridge = 1;
+// EnsureStorageRootReq describes the per-user disk storage root to provision.
+// The helper validates path equals <LibvirtImagesDir>/<peer-uid> (deriving the
+// uid from the socket peer credentials, not from this field's contents), so it
+// can only ever create the caller's own directory — never an arbitrary path.
+message EnsureStorageRootReq {
+  string path = 1;  // expected /var/lib/libvirt/images/abox/<uid>
+  // regroup, when set, additionally walks the caller's OWN <uid> subtree after
+  // provisioning the root and chgrps every entry to the resolved QEMU group and
+  // fixes modes (dirs setgid, files group-readable). Used by `abox migrate`
+  // after relocating files chowned them to the caller's primary group (which
+  // loses the QEMU group). The walk root is ALWAYS the peer-uid's own subtree
+  // (derived from the socket credentials, never from this field), never follows
+  // symlinks out of it, and is otherwise a no-op.
+  bool regroup = 2;
 }
 
 // DNS-specific messages

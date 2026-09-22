@@ -21,7 +21,7 @@ flowchart TB
     subgraph Host["Host System"]
         subgraph libvirt["libvirt Network (abox-<name>)"]
             bridge["abox-<name> bridge<br/>10.10.x.1"]
-            dnsmasq["dnsmasq<br/>(DHCP only, port=0)"]
+            dnsmasq["dnsmasq<br/>(inert: DNS off port=0, no DHCP)"]
         end
 
         iptables["iptables NAT<br/>PREROUTING: :53 → :535x"]
@@ -42,8 +42,10 @@ flowchart TB
     filter -->|Blocked| nxdomain[NXDOMAIN]
     upstream -->|Response| app
     nxdomain -->|Response| app
-    dnsmasq -.->|DHCP| VM
 ```
+
+> The guest is statically addressed via cloud-init (no DHCP); dnsmasq is launched
+> by libvirt for the network but is inert (DNS disabled with `port=0`, no DHCP range).
 
 ### DNS Request Flow
 
@@ -109,8 +111,17 @@ daemon's environment (inherited from the shell that ran `abox start`).
 Proxy URLs may use the `http://`, `https://`, `socks5://`, or `socks5h://`
 schemes. Forwarded and MITM'd requests are sent via the upstream proxy, and
 non-MITM CONNECT tunnels chain through it (HTTP CONNECT or a SOCKS5 handshake,
-per the scheme). Allowlist and SSRF policy still apply to the requested
-target — the proxy hop never relaxes filtering.
+per the scheme). Allowlist and domain-fronting checks still apply to the
+requested target, and IP-literal targets in dangerous ranges are still blocked
+before dialing.
+
+> **Security note:** the *resolved-IP* SSRF/DNS-rebinding gate cannot run when a
+> target is dialed through an upstream proxy, because the proxy — not httpfilter —
+> resolves the hostname. With `http_proxy`/`https_proxy` set, resolved-IP
+> rebinding protection is therefore delegated to that upstream proxy; abox's
+> guarantee assumes the configured upstream proxy is trusted. (A private-IP
+> upstream proxy itself must be listed in `http.allow_private_targets` to be
+> dialable — see [abox.yaml](abox-yaml.md#reaching-internal-hosts).)
 
 Note these are distinct from the proxy variables *inside* the VM, which point
 the guest at abox's own httpfilter.
@@ -157,11 +168,13 @@ sequenceDiagram
 ### libvirt Network (abox-<name>)
 
 Each instance gets its own isolated network:
-- NAT-based networking for the VM
-- dnsmasq for DHCP only (DNS disabled with `port=0`)
+- Host-only networking (isolated network, no NAT/uplink); the guest reaches the
+  internet only via the host's DNS filter and HTTP proxy
+- Static guest addressing via cloud-init — no DHCP server; the network defines no
+  DHCP range and dnsmasq (launched by libvirt) is inert (DNS disabled with `port=0`)
 - Bridge interface: `abox-<name>`
 - Unique subnet per instance (10.10.10.0/24, 10.10.11.0/24, etc.)
-- Gateway at .1 address
+- Gateway at .1 address; guest at .10 (baked into cloud-init)
 
 ### iptables NAT Rules
 
@@ -191,11 +204,15 @@ Each instance runs its own httpfilter process:
 
 ### nwfilter (abox-<name>-traffic)
 
-- Layer 2/3 packet filtering
-- Default-deny: drops all outbound except allowed services
-- In filtered mode: allows HTTP/HTTPS via proxy only
-- In closed mode: blocks ALL outbound traffic
-- Applied when instance is "filtered" or "closed"
+- Layer 2/3 packet filtering, **stateful and default-deny in both directions**
+- Outbound: drops all traffic except allowed services (DNS, HTTP proxy, gateway ICMP)
+- Inbound: only host→guest SSH (port 22) is a permitted new connection; replies to
+  established connections are admitted via connection state
+- A single always-applied nwfilter — there is no separate "filtered"/"closed"
+  toggle; the HTTP proxy accept is unconditional. Whether non-allowlisted domains
+  are actually reachable is controlled by the active/passive allowlist mode at
+  Layer 1, not by this filter.
+- The macOS backend enforces the equivalent policy with a per-instance pf anchor
 
 ## Default Allowlist
 
@@ -260,6 +277,11 @@ npmjs.org
 - `*.github.com` or `github.com` → allows `github.com`, `api.github.com`, `raw.github.com`
 - Sibling domains are NOT matched: `githubusercontent.com` requires its own entry
 - Use `*.domain.com` syntax to make wildcard intent explicit
+
+**Internationalized domains (IDN):** entries may be written in Unicode
+(`münchen.de`) or punycode (`xn--mnchen-3ya.de`); abox normalizes both to the
+punycode form DNS uses, so either form in the allowlist matches queries for the
+domain. Matching is case-insensitive.
 
 ## Operating Modes
 

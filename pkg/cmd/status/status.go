@@ -1,9 +1,14 @@
 package status
 
 import (
+	"context"
 	"fmt"
+	"io"
 
+	"github.com/sandialabs/abox/internal/backend"
+	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/dnsfilter"
+	"github.com/sandialabs/abox/internal/filterbase"
 	"github.com/sandialabs/abox/internal/httpfilter"
 	"github.com/sandialabs/abox/internal/instance"
 	"github.com/sandialabs/abox/internal/rpc"
@@ -23,6 +28,9 @@ type statusJSON struct {
 	DNS     filterJSON  `json:"dns_filter"`
 	HTTP    filterJSON  `json:"http_filter"`
 	Domains int32       `json:"allowlist_domains"`
+	// Warnings lists degraded-security states (passive mode, MITM disabled) so
+	// automation can detect a weakened posture. Empty when fully secure.
+	Warnings []string `json:"security_warnings,omitempty"`
 }
 
 type vmJSON struct {
@@ -47,6 +55,7 @@ type filterJSON struct {
 	Allowed uint64 `json:"allowed,omitempty"`
 	Blocked uint64 `json:"blocked,omitempty"`
 	Uptime  string `json:"uptime,omitempty"`
+	MITM    *bool  `json:"mitm,omitempty"` // HTTP only: TLS MITM interception enabled
 }
 
 // Options holds the options for the status command.
@@ -155,9 +164,11 @@ func collectStatus(opts *Options, name string) (*statusJSON, error) {
 		}
 	}
 
+	var dnsStatus *rpc.DNSStatus
 	if client, err := opts.Factory.DNSClient(name); err == nil {
 		ctx, cancel := dnsfilter.ClientContext()
 		if s, err := client.Status(ctx, &rpc.Empty{}); err == nil {
+			dnsStatus = s
 			result.DNS.Running = true
 			result.DNS.Mode = s.Mode
 			result.DNS.Total = s.TotalQueries
@@ -169,15 +180,19 @@ func collectStatus(opts *Options, name string) (*statusJSON, error) {
 		cancel()
 	}
 
+	var httpStatus *rpc.HTTPStatus
 	if client, err := opts.Factory.HTTPClient(name); err == nil {
 		ctx, cancel := httpfilter.ClientContext()
 		if s, err := client.Status(ctx, &rpc.Empty{}); err == nil {
+			httpStatus = s
 			result.HTTP.Running = true
 			result.HTTP.Mode = s.Mode
 			result.HTTP.Total = s.TotalRequests
 			result.HTTP.Allowed = s.AllowedRequests
 			result.HTTP.Blocked = s.BlockedRequests
 			result.HTTP.Uptime = s.Uptime
+			mitm := s.MitmEnabled
+			result.HTTP.MITM = &mitm
 			if result.Domains == 0 {
 				result.Domains = s.Domains
 			}
@@ -185,7 +200,27 @@ func collectStatus(opts *Options, name string) (*statusJSON, error) {
 		cancel()
 	}
 
+	// Aggregate degraded-security warnings for machine consumers via the same
+	// helper the human-readable text path uses, so the two never drift.
+	result.Warnings = securityWarnings(dnsStatus, httpStatus)
+
 	return result, nil
+}
+
+// securityWarnings aggregates degraded-security warnings across the DNS and HTTP
+// filters, reusing filterbase.StatusData.SecurityWarnings so the wording matches
+// `abox http status` / `abox dns status`.
+func securityWarnings(dnsStatus *rpc.DNSStatus, httpStatus *rpc.HTTPStatus) []string {
+	var warns []string
+	if dnsStatus != nil {
+		warns = append(warns,
+			filterbase.StatusData{FilterName: filterbase.FilterDNS, Mode: dnsStatus.Mode}.SecurityWarnings()...)
+	}
+	if httpStatus != nil {
+		warns = append(warns,
+			filterbase.StatusData{FilterName: filterbase.FilterHTTP, Mode: httpStatus.Mode, MITM: httpStatus.MitmEnabled}.SecurityWarnings()...)
+	}
+	return warns
 }
 
 func runStatus(opts *Options, name string) error {
@@ -202,96 +237,19 @@ func runStatus(opts *Options, name string) error {
 	}
 
 	w := opts.Factory.IO.Out
-	state := be.VM().State(name)
-
 	fmt.Fprintf(w, "=== Instance: %s ===\n\n", name)
 
-	// VM Status
-	fmt.Fprintln(w, "[VM]")
-	fmt.Fprintf(w, "  State:    %s\n", state)
-	fmt.Fprintf(w, "  CPUs:     %d\n", inst.CPUs)
-	fmt.Fprintf(w, "  Memory:   %d MB\n", inst.Memory)
+	printVMSection(w, be, inst, name)
+	printNetworkSection(w, be, inst)
 
-	if state == "running" {
-		if ip, err := be.VM().GetIP(name); err == nil {
-			fmt.Fprintf(w, "  IP:       %s\n", ip)
-		}
-	}
+	// Fetch filter statuses once for reuse across the filter/allowlist/security
+	// sections.
+	dnsStatus, httpStatus := fetchFilterStatuses(opts, name)
 
-	// Network Status
-	fmt.Fprintln(w, "\n[Network]")
-	fmt.Fprintf(w, "  Bridge:   %s\n", inst.Bridge)
-	fmt.Fprintf(w, "  Subnet:   %s\n", inst.Subnet)
-	fmt.Fprintf(w, "  Gateway:  %s\n", inst.Gateway)
-
-	networkStatus := "inactive"
-	if be.Network().IsActive(inst.Bridge) {
-		networkStatus = "active"
-	}
-	fmt.Fprintf(w, "  Status:   %s\n", networkStatus)
-
-	// Fetch filter statuses once for reuse
-	var dnsStatus *rpc.DNSStatus
-	var httpStatus *rpc.HTTPStatus
-
-	if client, err := opts.Factory.DNSClient(name); err == nil {
-		ctx, cancel := dnsfilter.ClientContext()
-		dnsStatus, _ = client.Status(ctx, &rpc.Empty{})
-		cancel()
-	}
-
-	if client, err := opts.Factory.HTTPClient(name); err == nil {
-		ctx, cancel := httpfilter.ClientContext()
-		httpStatus, _ = client.Status(ctx, &rpc.Empty{})
-		cancel()
-	}
-
-	// DNS Filter Status
-	fmt.Fprintln(w, "\n[DNS Filter]")
-	fmt.Fprintf(w, "  Port:     %d\n", inst.DNS.Port)
-	if inst.DNS.Upstream == "" {
-		fmt.Fprintf(w, "  Upstream: %s (host system resolver)\n", dnsfilter.ResolveUpstream("", "8.8.8.8:53"))
-	} else {
-		fmt.Fprintf(w, "  Upstream: %s\n", inst.DNS.Upstream)
-	}
-
-	if dnsStatus != nil {
-		fmt.Fprintf(w, "  Status:   running (%s mode)\n", dnsStatus.Mode)
-		fmt.Fprintf(w, "  Queries:  %d total, %d blocked\n", dnsStatus.TotalQueries, dnsStatus.BlockedQueries)
-	} else {
-		fmt.Fprintf(w, "  Status:   not running\n")
-	}
-
-	// HTTP Filter Status
-	fmt.Fprintln(w, "\n[HTTP Filter]")
-	fmt.Fprintf(w, "  Port:     %d\n", inst.HTTP.Port)
-
-	if httpStatus != nil {
-		fmt.Fprintf(w, "  Status:   running (%s mode)\n", httpStatus.Mode)
-		fmt.Fprintf(w, "  Requests: %d total, %d blocked\n", httpStatus.TotalRequests, httpStatus.BlockedRequests)
-	} else {
-		fmt.Fprintf(w, "  Status:   not running\n")
-	}
-
-	// Allowlist Status
-	fmt.Fprintln(w, "\n[Allowlist]")
-	fmt.Fprintf(w, "  File:     %s\n", paths.Allowlist)
-
-	if dnsStatus != nil {
-		fmt.Fprintf(w, "  Domains:  %d\n", dnsStatus.Domains)
-	} else if httpStatus != nil {
-		fmt.Fprintf(w, "  Domains:  %d\n", httpStatus.Domains)
-	}
-
-	// Security Status
-	fmt.Fprintln(w, "\n[Security]")
-
-	names := be.ResourceNames(name)
-	if ti := be.TrafficInterceptor(); ti != nil && ti.FilterExists(names.Filter) {
-		fmt.Fprintf(w, "  nwfilter: defined (%s)\n", names.Filter)
-	} else {
-		fmt.Fprintf(w, "  nwfilter: not defined\n")
-	}
+	printDNSFilterSection(w, inst, dnsStatus)
+	printHTTPFilterSection(w, inst, httpStatus)
+	printAllowlistSection(w, paths, dnsStatus, httpStatus)
+	printSecuritySection(w, be, inst, dnsStatus, httpStatus)
 
 	// Paths
 	fmt.Fprintln(w, "\n[Paths]")
@@ -302,4 +260,116 @@ func runStatus(opts *Options, name string) error {
 	fmt.Fprintf(w, "  HTTP Socket: %s\n", paths.HTTPSocket)
 
 	return nil
+}
+
+func printVMSection(w io.Writer, be backend.Backend, inst *config.Instance, name string) {
+	state := be.VM().State(name)
+	fmt.Fprintln(w, "[VM]")
+	fmt.Fprintf(w, "  State:    %s\n", state)
+	fmt.Fprintf(w, "  CPUs:     %d\n", inst.CPUs)
+	fmt.Fprintf(w, "  Memory:   %d MB\n", inst.Memory)
+	if state == "running" {
+		if ip, err := be.VM().GetIP(name); err == nil {
+			fmt.Fprintf(w, "  IP:       %s\n", ip)
+		}
+	}
+}
+
+func printNetworkSection(w io.Writer, be backend.Backend, inst *config.Instance) {
+	fmt.Fprintln(w, "\n[Network]")
+	fmt.Fprintf(w, "  Bridge:   %s\n", inst.Bridge)
+	fmt.Fprintf(w, "  Subnet:   %s\n", inst.Subnet)
+	fmt.Fprintf(w, "  Gateway:  %s\n", inst.Gateway)
+	networkStatus := "inactive"
+	if be.Network().IsActive(inst.Bridge) {
+		networkStatus = "active"
+	}
+	fmt.Fprintf(w, "  Status:   %s\n", networkStatus)
+}
+
+// fetchFilterStatuses queries the DNS and HTTP filter daemons once so the
+// filter/allowlist/security sections can share the results. A nil status means
+// the daemon is not running (or unreachable).
+func fetchFilterStatuses(opts *Options, name string) (*rpc.DNSStatus, *rpc.HTTPStatus) {
+	var dnsStatus *rpc.DNSStatus
+	if client, err := opts.Factory.DNSClient(name); err == nil {
+		ctx, cancel := dnsfilter.ClientContext()
+		dnsStatus, _ = client.Status(ctx, &rpc.Empty{})
+		cancel()
+	}
+	var httpStatus *rpc.HTTPStatus
+	if client, err := opts.Factory.HTTPClient(name); err == nil {
+		ctx, cancel := httpfilter.ClientContext()
+		httpStatus, _ = client.Status(ctx, &rpc.Empty{})
+		cancel()
+	}
+	return dnsStatus, httpStatus
+}
+
+func printDNSFilterSection(w io.Writer, inst *config.Instance, dnsStatus *rpc.DNSStatus) {
+	fmt.Fprintln(w, "\n[DNS Filter]")
+	fmt.Fprintf(w, "  Port:     %d\n", inst.DNS.Port)
+	if inst.DNS.Upstream == "" {
+		fmt.Fprintf(w, "  Upstream: %s (host system resolver)\n", dnsfilter.ResolveUpstream("", "8.8.8.8:53"))
+	} else {
+		fmt.Fprintf(w, "  Upstream: %s\n", inst.DNS.Upstream)
+	}
+	if dnsStatus != nil {
+		fmt.Fprintf(w, "  Status:   running (%s mode)\n", dnsStatus.Mode)
+		fmt.Fprintf(w, "  Queries:  %d total, %d blocked\n", dnsStatus.TotalQueries, dnsStatus.BlockedQueries)
+	} else {
+		fmt.Fprintf(w, "  Status:   not running\n")
+	}
+}
+
+func printHTTPFilterSection(w io.Writer, inst *config.Instance, httpStatus *rpc.HTTPStatus) {
+	fmt.Fprintln(w, "\n[HTTP Filter]")
+	fmt.Fprintf(w, "  Port:     %d\n", inst.HTTP.Port)
+	if httpStatus != nil {
+		fmt.Fprintf(w, "  Status:   running (%s mode)\n", httpStatus.Mode)
+		if httpStatus.MitmEnabled {
+			fmt.Fprintf(w, "  MITM:     enabled\n")
+		} else {
+			fmt.Fprintf(w, "  MITM:     disabled\n")
+		}
+		fmt.Fprintf(w, "  Requests: %d total, %d blocked\n", httpStatus.TotalRequests, httpStatus.BlockedRequests)
+	} else {
+		fmt.Fprintf(w, "  Status:   not running\n")
+	}
+}
+
+func printAllowlistSection(w io.Writer, paths *config.Paths, dnsStatus *rpc.DNSStatus, httpStatus *rpc.HTTPStatus) {
+	fmt.Fprintln(w, "\n[Allowlist]")
+	fmt.Fprintf(w, "  File:     %s\n", paths.Allowlist)
+	if dnsStatus != nil {
+		fmt.Fprintf(w, "  Domains:  %d\n", dnsStatus.Domains)
+	} else if httpStatus != nil {
+		fmt.Fprintf(w, "  Domains:  %d\n", httpStatus.Domains)
+	}
+}
+
+func printSecuritySection(w io.Writer, be backend.Backend, inst *config.Instance, dnsStatus *rpc.DNSStatus, httpStatus *rpc.HTTPStatus) {
+	fmt.Fprintln(w, "\n[Security]")
+
+	// Unprivileged check: reports only whether the backend's egress enforcement
+	// (libvirt nwfilter / macOS pf anchor) is defined, NOT whether the privileged
+	// host rules (DNS redirect) are in force. The two can drift; `abox doctor`
+	// verifies both. The "defined" label reflects this limited check (rather than
+	// overclaiming "enforced"); it is backend-neutral because the mechanism differs.
+	if ec := be.EgressController(); ec != nil {
+		if ok, _ := ec.Verify(context.Background(), inst); ok {
+			fmt.Fprintf(w, "  egress:   defined (run 'abox doctor' to verify host rules)\n")
+		} else {
+			fmt.Fprintf(w, "  egress:   not defined\n")
+		}
+	} else {
+		fmt.Fprintf(w, "  egress:   unsupported\n")
+	}
+
+	// Degraded-security warnings: passive mode disables filtering; MITM-off means
+	// HTTPS is not inspected. These silently weaken the core guarantee, so surface
+	// them prominently rather than only in the daemon's serve-time stderr.
+	for _, warn := range securityWarnings(dnsStatus, httpStatus) {
+		fmt.Fprintf(w, "  WARNING:  %s\n", warn)
+	}
 }

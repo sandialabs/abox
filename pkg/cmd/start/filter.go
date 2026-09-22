@@ -8,11 +8,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/sandialabs/abox/internal/daemon"
 	"github.com/sandialabs/abox/internal/logging"
+	"github.com/sandialabs/abox/internal/procutil"
+	"github.com/sandialabs/abox/internal/sysutil"
 	"github.com/sandialabs/abox/internal/validation"
 )
 
@@ -57,6 +58,11 @@ func startFilter(w io.Writer, name string, filterType FilterType, paths FilterPa
 		return nil
 	}
 
+	// The PID file says no daemon is alive, but on macOS a real daemon can still
+	// be running with a purged/stale PID file and holding its port. Reclaim any
+	// such orphan so the fresh spawn below can bind. No-op off darwin.
+	reclaimOrphanedFilterDaemon(w, name, string(filterType))
+
 	// Validate log level before using it in command args
 	if err := validation.ValidateLogLevel(logLevel); err != nil {
 		return fmt.Errorf("invalid %s log level: %w", filterType, err)
@@ -100,6 +106,10 @@ func startDaemon(w io.Writer, name string, daemonType string, paths DaemonPaths)
 		return nil
 	}
 
+	// Reclaim an orphaned daemon holding this instance's socket/port after a
+	// $TMPDIR purge left its PID file stale (macOS only; no-op elsewhere).
+	reclaimOrphanedFilterDaemon(w, name, daemonType)
+
 	args := []string{daemonType, "serve", name}
 
 	opts := daemonOptions{
@@ -125,25 +135,21 @@ func startDaemonProcess(opts daemonOptions) error {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	// Set restrictive umask before spawning to ensure socket created with proper permissions
-	// This prevents a race window where socket could be accessed before chmod
-	oldUmask := syscall.Umask(0o077)
-
 	// Spawn daemon as a background process
 	cmd := exec.Command(exe, opts.args...)
 	cmd.Stdout = opts.logFile
 	cmd.Stderr = opts.logFile
 	cmd.Dir = "/"
 
-	// Detach from parent process group
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
+	// Detach from parent process group so the daemon outlives this command.
+	procutil.Detach(cmd)
 
-	startErr := cmd.Start()
-
-	// Restore umask regardless of whether start succeeded
-	syscall.Umask(oldUmask)
+	// Set restrictive umask before spawning to ensure the socket is created with
+	// owner-only permissions, closing a race window before the explicit chmod.
+	var startErr error
+	sysutil.WithRestrictiveUmask(func() {
+		startErr = cmd.Start()
+	})
 
 	if startErr != nil {
 		if opts.logFile != nil {
@@ -153,6 +159,13 @@ func startDaemonProcess(opts daemonOptions) error {
 	}
 
 	pid := cmd.Process.Pid
+
+	// Reap the child in the background. Without this the daemon lingers as a
+	// zombie when it dies early, and kill(pid, 0) on a zombie still succeeds — so
+	// the liveness check below would miss the exit and every startup failure would
+	// surface as the generic "socket not ready" instead of the real cause.
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
 
 	// Write PID file for later cleanup with restrictive permissions
 	if err := os.WriteFile(opts.pidFile, fmt.Appendf(nil, "%d", pid), 0o600); err != nil {
@@ -170,8 +183,10 @@ func startDaemonProcess(opts daemonOptions) error {
 		time.Sleep(100 * time.Millisecond)
 
 		// Check if process is still running
-		if !isProcessRunning(pid) {
-			return fmt.Errorf("%s daemon exited immediately after starting", opts.daemonType)
+		select {
+		case waitErr := <-exited:
+			return fmt.Errorf("%s daemon exited immediately after starting: %w", opts.daemonType, waitErr)
+		default:
 		}
 
 		if info, err := os.Stat(opts.socketPath); err == nil {
@@ -183,16 +198,32 @@ func startDaemonProcess(opts daemonOptions) error {
 }
 
 // checkAlreadyRunning reports whether a daemon is already alive based on its
-// PID file. If the PID is dead but socket/PID files remain (an ungraceful
-// previous exit), it removes the stale files, prints a user-visible recovery
-// notice, and returns false so the caller can start a fresh daemon.
+// PID file AND socket. A live daemon must have both: the PID file names a live
+// abox process and the socket exists. If the PID is live but the socket is
+// missing (a half-started or defunct daemon for this instance, or a reused PID),
+// it kills that PID and clears the stale files so the caller respawns — this
+// avoids the trap where start skips the spawn on a live PID and the later
+// connect fails because no socket was ever created. If the PID is dead but
+// socket/PID files remain (an ungraceful previous exit), it likewise removes the
+// stale files. In both recovery cases it prints a user-visible notice and
+// returns false.
 func checkAlreadyRunning(w io.Writer, daemonType, pidFile, socketPath string) bool {
 	if w == nil {
 		w = io.Discard
 	}
 	if isDaemonAlive(pidFile) {
-		logging.Warn("daemon already running", "type", daemonType)
-		return true
+		if _, err := os.Stat(socketPath); err == nil {
+			logging.Warn("daemon already running", "type", daemonType)
+			return true
+		}
+		// PID alive but socket absent: the daemon never finished coming up (or the
+		// PID was reused). Kill it and clear the files so a fresh spawn can bind.
+		fmt.Fprintf(w, "  %s daemon PID is alive but its socket is missing, restarting...\n", daemonType)
+		logging.Warn("daemon pid alive but socket missing; killing stale daemon", "type", daemonType)
+		daemon.KillDaemonByPIDFile(pidFile)
+		_ = os.Remove(socketPath)
+		_ = os.Remove(pidFile)
+		return false
 	}
 	_, socketErr := os.Stat(socketPath)
 	_, pidErr := os.Stat(pidFile)
@@ -222,13 +253,7 @@ func isDaemonAlive(pidFile string) bool {
 
 // isProcessRunning checks if a process with the given PID is still running.
 func isProcessRunning(pid int) bool {
-	// On Unix, sending signal 0 checks if process exists without sending a signal
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = process.Signal(syscall.Signal(0))
-	return err == nil
+	return procutil.IsAlive(pid)
 }
 
 // verifySocketPermissions checks that the socket has restrictive permissions.

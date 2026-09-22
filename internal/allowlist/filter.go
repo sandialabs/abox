@@ -7,9 +7,31 @@ import (
 	"sync"
 
 	"github.com/armon/go-radix"
+	"golang.org/x/net/idna"
 
 	"github.com/sandialabs/abox/internal/validation"
 )
+
+// idnaProfile converts Unicode/IDN domains to their ASCII (punycode) form so an
+// allowlist entry typed in Unicode ("münchen.de") matches the punycode form DNS
+// queries always arrive in ("xn--mnchen-3ya.de") — and vice versa. STD3 ASCII
+// rules are relaxed so existing hostnames with underscores are unaffected, and
+// Transitional processing is disabled for correct ß/ς handling.
+var idnaProfile = idna.New(idna.MapForLookup(), idna.Transitional(false), idna.StrictDomainName(false))
+
+// toASCIIDomain lowercases a bare domain (no trailing dot) and converts any IDN
+// labels to punycode. On conversion error it returns the lowercased input
+// unchanged, leaving downstream validation to reject it — never a hard failure.
+func toASCIIDomain(domain string) string {
+	domain = strings.ToLower(domain)
+	if domain == "" {
+		return domain
+	}
+	if ascii, err := idnaProfile.ToASCII(domain); err == nil {
+		return ascii
+	}
+	return domain
+}
 
 // Filter provides thread-safe domain filtering using a radix tree.
 // Domains are stored in reversed form for efficient suffix matching.
@@ -49,13 +71,13 @@ func splitDomainName(name string) []string {
 	return strings.Split(name, ".")
 }
 
-// NormalizeDomain ensures consistent domain format (lowercase, trailing dot).
+// NormalizeDomain ensures consistent domain format (lowercase, punycode ASCII,
+// trailing dot) so allowlist entries and DNS/HTTP lookups compare identically
+// regardless of IDN vs. ASCII form.
 func NormalizeDomain(domain string) string {
-	domain = strings.ToLower(strings.TrimSpace(domain))
-	if !strings.HasSuffix(domain, ".") {
-		domain += "."
-	}
-	return domain
+	domain = strings.TrimSpace(domain)
+	domain = toASCIIDomain(strings.TrimSuffix(domain, "."))
+	return domain + "."
 }
 
 // Add adds a domain to the allowlist.

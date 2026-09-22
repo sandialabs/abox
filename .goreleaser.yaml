@@ -15,6 +15,7 @@ builds:
       - CGO_ENABLED=0
     goos:
       - linux
+      - darwin
     goarch:
       - amd64
       - arm64
@@ -23,7 +24,20 @@ builds:
       - -X github.com/sandialabs/abox/internal/version.Version={{.Version}}
       - -X github.com/sandialabs/abox/internal/version.Commit={{.Commit}}
       - -X github.com/sandialabs/abox/internal/version.Date={{.Date}}
+    hooks:
+      # Re-apply an ad-hoc signature to darwin binaries after link: stripping
+      # symbols via -s -w can invalidate the linker's automatic ad-hoc signature,
+      # yielding a "code signature invalid" kill at launch on Apple Silicon (see
+      # the equivalent step in the Makefile). This runs only for darwin targets;
+      # because `codesign` exists only on macOS, a release producing darwin
+      # artifacts must run on a macOS host/runner.
+      post:
+        - cmd: make codesign BINARY={{ .Path }}
+          output: true
 
+  # abox-helper is a setuid root binary and is //go:build linux only — there is
+  # no darwin/windows helper binary (macOS re-executes `abox` as
+  # `sudo abox privilege-helper`). Keep it linux-only.
   - id: abox-helper
     main: ./cmd/abox-helper
     binary: abox-helper
@@ -45,6 +59,11 @@ archives:
     ids:
       - abox
       - abox-helper
+    # abox builds for linux+darwin but abox-helper is linux-only, so a darwin
+    # archive contains one binary (abox) while a linux archive contains two
+    # (abox + abox-helper). Permit that per-platform difference rather than
+    # erroring on "different count of binaries for each platform".
+    allow_different_binary_count: true
     formats:
       - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
@@ -110,6 +129,44 @@ nfpms:
       lintian_overrides:
         - statically-linked-binary
         - changelog-file-missing-in-native-package
+    # Package names differ between deb and rpm, so dependencies are declared
+    # per-format rather than at the top level. Core runtime tools are hard
+    # dependencies; heavier or feature-specific tools are Recommends (apt and
+    # dnf install these by default, so a plain install "just works", but users
+    # can opt out with --no-install-recommends). `abox check-deps` remains the
+    # runtime safety net for opt-out / non-package installs.
+    overrides:
+      deb:
+        dependencies:
+          - libvirt-clients        # virsh
+          - qemu-utils             # qemu-img
+          - openssh-client         # ssh, scp, ssh-keygen
+          - iptables               # DNS redirect / firewall
+          - genisoimage | xorriso  # cloud-init ISO (at least one; both in main)
+          - fuse3                  # fusermount / unmount
+        recommends:
+          - libvirt-daemon-system  # libvirtd + QEMU driver (via its own transitive Recommends)
+          - sshfs                  # mount command
+          - pkexec                 # privilege escalation helper
+          - bash-completion        # wires up shipped completions
+        suggests:
+          - tcpdump                # tap (packet capture)
+      rpm:
+        dependencies:
+          - libvirt-client         # virsh
+          - qemu-img               # qemu-img
+          - openssh-clients        # ssh, scp, ssh-keygen
+          - iptables               # DNS redirect / firewall
+          - xorriso                # cloud-init ISO (base repo everywhere; EPEL-safe)
+          - fuse3                  # fusermount / unmount
+        recommends:
+          - libvirt-daemon-kvm     # libvirtd + QEMU/KVM driver (not the empty `libvirt` metapackage)
+          - qemu-kvm               # VM emulator (arch-correct single name)
+          - fuse-sshfs             # mount command (EPEL on RHEL; weak dep = won't block)
+          - polkit                 # privilege escalation
+          - bash-completion        # wires up shipped completions
+        suggests:
+          - tcpdump                # tap (packet capture)
 
 release:
   github:

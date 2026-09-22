@@ -2,8 +2,10 @@ package monitor
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
 	"os"
+	"path"
 	"sort"
 	"strings"
 
@@ -32,6 +34,7 @@ type CloudInitContributor struct {
 	Policies        []string // absolute paths to custom TracingPolicy YAML files
 	TetragonTarball string   // path to pre-downloaded Tetragon tarball (required when Enabled)
 	TetragonVersion string   // Tetragon version (e.g., "v1.3.0") - validated format required
+	GuestDevice     string   // in-guest device the agent writes events to (from the backend's MonitorTransport)
 }
 
 // Contribute returns cloud-init content for Tetragon monitoring.
@@ -46,13 +49,39 @@ func (c *CloudInitContributor) Contribute() (*cloudinit.Contribution, error) {
 		return nil, err
 	}
 
+	// The guest device is backend-specific and required: a backend that returns
+	// no MonitorTransport cannot carry monitoring, so an empty device here means
+	// monitoring was enabled on an unsupported backend.
+	if c.GuestDevice == "" {
+		return nil, errors.New("monitor guest device is empty: the backend provides no monitor transport")
+	}
+
+	// Render the agent script and service unit with the backend-specific monitor
+	// device. DeviceDir is the device's parent (e.g. /dev/virtio-ports or /dev),
+	// used to scope the service's ReadWritePaths hardening.
+	deviceData := struct {
+		Device    string
+		DeviceDir string
+	}{
+		Device:    c.GuestDevice,
+		DeviceDir: path.Dir(c.GuestDevice),
+	}
+	agentScript, err := cloudinit.RenderTemplate("monitor-agent-script", monitorAgentScript, deviceData)
+	if err != nil {
+		return nil, err
+	}
+	agentService, err := cloudinit.RenderTemplate("monitor-agent-service", monitorAgentService, deviceData)
+	if err != nil {
+		return nil, err
+	}
+
 	var writeFiles []string
 
-	// Add monitor agent script and service
+	// Wrap the rendered agent script and service into cloud-init write_files entries.
 	type writeFileData struct{ Content string }
 	for _, entry := range []struct{ name, tmpl, content string }{
-		{"write-file-monitor-agent", writeFileMonitorAgentTmpl, monitorAgentScript},
-		{"write-file-monitor-service", writeFileMonitorServiceTmpl, monitorAgentService},
+		{"write-file-monitor-agent", writeFileMonitorAgentTmpl, agentScript},
+		{"write-file-monitor-service", writeFileMonitorServiceTmpl, agentService},
 	} {
 		rendered, err := cloudinit.RenderTemplate(entry.name, entry.tmpl, writeFileData{
 			Content: cloudinit.IndentLines(entry.content),

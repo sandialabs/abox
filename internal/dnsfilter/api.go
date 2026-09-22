@@ -20,10 +20,11 @@ type APIServer struct {
 	server *Server
 }
 
-// NewAPIServer creates a new API server.
-func NewAPIServer(socketPath string, filter *allowlist.Filter, server *Server, loader *allowlist.Loader) *APIServer {
+// NewAPIServer creates a new API server. instance is the instance name, used to
+// attribute service-layer audit records.
+func NewAPIServer(socketPath string, filter *allowlist.Filter, server *Server, loader *allowlist.Loader, instance string) *APIServer {
 	return &APIServer{
-		BaseAPIServer: filterbase.NewBaseAPIServer(socketPath, filter, server, loader),
+		BaseAPIServer: filterbase.NewBaseAPIServer(socketPath, filter, server, loader, instance, "dns"),
 		server:        server,
 	}
 }

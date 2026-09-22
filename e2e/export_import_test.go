@@ -12,7 +12,7 @@ import (
 
 // TestExportImport tests the export and import cycle.
 func TestExportImport(t *testing.T) {
-	skipIfNoLibvirt(t)
+	skipIfBackendUnavailable(t)
 	skipIfNoConfiguredBaseImage(t)
 	skipInShortMode(t)
 
@@ -30,6 +30,7 @@ func TestExportImport(t *testing.T) {
 	archivePath := filepath.Join(tempDir, inst.name+".abox.tar.gz")
 
 	t.Run("export", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		// Instance must be stopped to export
 		result := env.mustRunWithTimeout(longTimeout, "export", inst.name, archivePath)
 		if !strings.Contains(result.Stdout, "Archive size:") {
@@ -46,6 +47,7 @@ func TestExportImport(t *testing.T) {
 	importedInst := env.newTestInstance()
 
 	t.Run("import", func(t *testing.T) {
+		env, importedInst := env.sub(t), importedInst.sub(t)
 		result := env.mustRunWithTimeout(longTimeout, "import", archivePath, importedInst.name)
 		if !strings.Contains(result.Stdout, "imported successfully") {
 			t.Errorf("Expected import success message, got: %s", result.Stdout)
@@ -63,7 +65,6 @@ func TestExportImport(t *testing.T) {
 			t.Fatal("Imported instance did not start")
 		}
 		if !importedInst.waitForSSH(120 * time.Second) {
-			importedInst.dumpDiagnostics()
 			t.Fatal("SSH did not become available on imported instance")
 		}
 
@@ -77,6 +78,7 @@ func TestExportImport(t *testing.T) {
 	})
 
 	t.Run("import-overrides", func(t *testing.T) {
+		env := env.sub(t)
 		overrideInst := env.newTestInstance()
 
 		result := env.mustRunWithTimeout(longTimeout, "import", archivePath, overrideInst.name, "--cpus", "2", "--memory", "1024")
@@ -95,6 +97,7 @@ func TestExportImport(t *testing.T) {
 	})
 
 	t.Run("requires-stopped", func(t *testing.T) {
+		env, inst := env.sub(t), inst.sub(t)
 		// Start the original instance
 		inst.start()
 		if !inst.waitForRunning(60 * time.Second) {

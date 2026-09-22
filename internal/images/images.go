@@ -201,8 +201,12 @@ const (
 	providerUbuntu    = "ubuntu"
 )
 
-// archAMD64 is the architecture identifier used by upstream image catalogs.
-const archAMD64 = "amd64"
+// Go-style architecture identifiers used by upstream image catalogs.
+// Ubuntu/Debian use these names directly; AlmaLinux maps them to x86_64/aarch64.
+const (
+	archAMD64 = "amd64"
+	archARM64 = "arm64"
+)
 
 // ProviderOrder returns the canonical display order for providers.
 func ProviderOrder() []string {

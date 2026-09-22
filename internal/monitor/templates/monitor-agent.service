@@ -2,7 +2,7 @@
 Description=abox Monitor Agent
 After=tetragon.service
 Requires=tetragon.service
-ConditionPathExists=/dev/virtio-ports/abox.monitor.0
+ConditionPathExists={{.Device}}
 
 [Service]
 Type=simple
@@ -18,8 +18,8 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=no
-DeviceAllow=/dev/virtio-ports/abox.monitor.0 rw
-ReadWritePaths=/dev/virtio-ports
+DeviceAllow={{.Device}} rw
+ReadWritePaths={{.DeviceDir}}
 MemoryMax=256M
 TasksMax=64
 LimitNOFILE=1024

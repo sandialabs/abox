@@ -11,7 +11,11 @@ permissions:
 jobs:
   release:
     name: Release
-    runs-on: ubuntu-latest
+    # Must run on macOS: the goreleaser darwin build re-applies an ad-hoc
+    # signature with `codesign` (see .goreleaser.yaml), which exists only on
+    # macOS. Linux binaries (CGO_ENABLED=0) and the pure-Go nfpm deb/rpm
+    # packages cross-compile fine from a macOS host.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
         with:

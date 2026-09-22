@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/logging"
+	"github.com/sandialabs/abox/internal/netroute"
+	"github.com/sandialabs/abox/internal/profiling"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 	"github.com/sandialabs/abox/pkg/cmd/root"
 	"github.com/sandialabs/abox/pkg/cmdutil"
@@ -16,9 +19,19 @@ func main() {
 }
 
 func run() int {
+	// Wire the host-route prober so subnet allocation skips /24s the host already
+	// routes elsewhere (e.g. a VPN). Done here (binary only) so unit tests, which
+	// never import main, keep the no-op default and don't shell out to ip/route.
+	config.SetRouteProbe(netroute.SubnetRouted)
+
 	f := factory.New()
 	defer f.Close()
 	defer logging.CloseLogFile()
+
+	// Opt-in, env-gated profiling (ABOX_CPUPROFILE / ABOX_TRACE); no-op otherwise.
+	// Deferred so it also captures runs that end in an error.
+	stopProfiling := profiling.Start()
+	defer stopProfiling()
 
 	rootCmd := root.NewCmdRoot(f)
 	cmd, err := rootCmd.ExecuteC()

@@ -8,13 +8,13 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
 
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/logging"
+	"github.com/sandialabs/abox/internal/procutil"
 	"github.com/sandialabs/abox/internal/rpc"
 )
 
@@ -55,20 +55,50 @@ func cleanupDaemonFiles(daemonName, pidFile, socketPath string) error {
 
 // IsAboxProcess verifies that a PID belongs to an abox process.
 // This prevents signaling unrelated processes if the PID was reused.
+//
+// It delegates to the per-OS isAboxProcess, which returns:
+//   - (true, nil)  — the PID is positively confirmed to be our executable.
+//   - (false, nil) — the PID is positively confirmed NOT to be our executable.
+//   - (false, err) — the PID could not be verified either way (e.g. it is gone,
+//     or is owned by another user we cannot introspect).
+//
+// Callers use this as a fail-safe gate before signaling: they must only act on
+// a positive confirmation. To honor that intent, an unverifiable result (error)
+// is mapped to false here — we never signal a process we cannot positively
+// confirm is abox. Only (true, nil) yields true.
 func IsAboxProcess(pid int) bool {
-	// Check /proc/{pid}/exe symlink to verify the process is running our executable.
-	// This is more secure than checking cmdline, which could match any process
-	// that happens to have "abox" in its arguments (e.g., "cat /home/abox/file").
-	exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	ok, err := isAboxProcess(pid)
 	if err != nil {
+		// Unverifiable: do not treat as ours. Callers must not signal it.
 		return false
 	}
-	currentExe, err := os.Executable()
-	if err != nil {
-		return false
-	}
-	return exePath == currentExe
+	return ok
 }
+
+// VerifyAboxProcess reports whether pid is our executable, preserving the
+// three-way result of the per-OS check: (true, nil) confirmed ours,
+// (false, nil) confirmed NOT ours, (false, err) unverifiable. Prefer
+// IsAboxProcess for a simple signal gate; use this when the caller wants to
+// distinguish "confirmed other" from "could not verify" (e.g. to log and leave a
+// candidate process alone rather than silently skip it).
+func VerifyAboxProcess(pid int) (bool, error) {
+	return isAboxProcess(pid)
+}
+
+// sameExe reports whether an observed executable path refers to our own
+// executable. The kernel appends a " (deleted)" suffix to /proc/<pid>/exe after
+// the binary has been replaced on disk (e.g. an in-place upgrade); that suffix
+// is stripped before comparison so an upgraded abox still recognizes daemons it
+// launched from the pre-upgrade binary.
+func sameExe(observed, self string) bool {
+	observed = strings.TrimSuffix(observed, " (deleted)")
+	return observed == self
+}
+
+// verifyAboxProcess is the identity gate signalFallback uses before signalling.
+// It is a var (defaulting to IsAboxProcess) so tests can drive the SIGKILL
+// escalation decision deterministically.
+var verifyAboxProcess = IsAboxProcess
 
 // signalFallback reads a PID file and sends SIGTERM, then SIGKILL if needed.
 // Used when RPC shutdown fails or is unavailable.
@@ -82,24 +112,37 @@ func signalFallback(pidFile string) {
 	if err != nil || pid <= 0 {
 		return
 	}
-	if !IsAboxProcess(pid) {
+	if !verifyAboxProcess(pid) {
 		logging.Warn("PID is not an abox process, skipping signal", "pid", pid)
 		return
 	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		logging.Warn("failed to find daemon process", "pid", pid, "error", err)
-		return
-	}
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
+	if err := procutil.TerminatePID(pid); err != nil {
 		logging.Warn("failed to send SIGTERM to daemon", "pid", pid, "error", err)
 		return
 	}
 	time.Sleep(500 * time.Millisecond)
-	if err := proc.Signal(syscall.Signal(0)); err == nil {
+	if procutil.IsAlive(pid) {
+		// Re-verify identity before escalating: during the grace window the daemon
+		// may have exited and the OS reused its PID for an unrelated process. Only
+		// SIGKILL a PID still confirmed to be ours, mirroring supervisor.Stop.
+		if !verifyAboxProcess(pid) {
+			logging.Warn("PID no longer an abox process after SIGTERM (likely exited and PID reused); not sending SIGKILL", "pid", pid)
+			return
+		}
 		logging.Warn("daemon did not stop gracefully, sending SIGKILL", "pid", pid)
-		_ = proc.Kill()
+		if err := procutil.KillPID(pid); err != nil {
+			logging.Warn("failed to send SIGKILL to daemon", "pid", pid, "error", err)
+		}
 	}
+}
+
+// KillDaemonByPIDFile terminates the daemon named by pidFile (SIGTERM, then
+// SIGKILL if needed), re-verifying the PID is an abox process before signalling.
+// It is a no-op if the file is missing/unparseable or the PID is not ours.
+// Used to reclaim a half-started daemon whose PID is alive but whose socket
+// never appeared, so a fresh spawn can proceed.
+func KillDaemonByPIDFile(pidFile string) {
+	signalFallback(pidFile)
 }
 
 // StopDNSFilter stops the DNS filter process for an instance.

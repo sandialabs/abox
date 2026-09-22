@@ -44,6 +44,12 @@ Other Linux distributions with libvirt 8.0+ and QEMU 6.0+ should work.
 *At least one of pkexec or sudo is required.
 **At least one of genisoimage or xorriso is required.
 
+> This table covers the Linux (libvirt) backend. On macOS the runtime tools
+> differ — see [macOS Support](macos.md). Notably, `abox mount` there uses
+> **sshfs** over the kext-less **fuse-t** (recommended, optional;
+> `brew tap macos-fuse-t/homebrew-cask && brew install fuse-t fuse-t-sshfs`) and
+> unmount uses `umount`/`diskutil`, so `fusermount` is not needed.
+
 ### Check Dependencies
 
 Use the built-in dependency checker:
@@ -71,13 +77,20 @@ Checking dependencies...
   tcpdump      ok
 
   libvirt group: member
-  libvirt-qemu/kvm group: member
+  qemu disk access group: member
   libvirt images access: ok
 
 All required dependencies are installed.
 ```
 
 ## Installation Commands
+
+> **Installing the released `.deb`/`.rpm`?** The package already declares these
+> tools as dependencies, so `apt install ./abox_*.deb` / `dnf install
+> ./abox_*.rpm` pulls the required ones automatically. apt and dnf also install
+> the recommended tools (libvirtd and its QEMU driver, sshfs, etc.) by default — pass
+> `--no-install-recommends` (apt) or `--setopt=install_weak_deps=0` (dnf) to skip
+> them. The manual lists below are for building from source or the tarball.
 
 ### Debian/Ubuntu
 
@@ -149,7 +162,7 @@ sudo systemctl enable --now libvirtd
 ```
 
 If `firewalld` is active, see [Firewall Configuration](#firewall-configuration)
-below — abox's iptables NAT rules can conflict with it.
+below — abox's iptables rules can conflict with it.
 
 ### Arch Linux
 
@@ -203,7 +216,8 @@ sudo usermod -aG kvm $USER
 
 `abox start` reports the exact group to join if you're not a member. See
 [troubleshooting](troubleshooting.md#monitor-captures-no-events) if monitoring shows
-no events.
+no events. (This applies to the libvirt backend; the macOS/vfkit backend does not
+support monitoring.)
 
 ### Polkit Configuration (Optional)
 
@@ -287,14 +301,15 @@ If Secure Boot is enabled and KVM modules aren't signed:
 
 ### Debian 11/12 Cloud Images
 
-Debian 11 (Bullseye) and Debian 12 (Bookworm) cloud images have broken network initialization under libvirt/QEMU. The guest VM never sends any network traffic — no DHCP requests, no ARP — resulting in "No route to host" errors. Diagnostics confirmed empty DHCP leases, `FAILED` ARP entries, and no nwfilter interference during the boot window. The root cause is suspected to be pre-baked network configuration in the Debian cloud images that conflicts with cloud-init's NoCloud network-config. Debian 13 (Trixie) and newer work correctly. Abox only offers Debian 13+ as base images.
+Debian 11 (Bullseye) and Debian 12 (Bookworm) cloud images have broken network initialization under libvirt/QEMU: the guest VM never brings its interface up, resulting in "No route to host" errors. The root cause is pre-baked network configuration in these Debian cloud images that conflicts with cloud-init's NoCloud network-config (abox relies on the NoCloud network-config to statically address the guest). Debian 13 (Trixie) and newer work correctly. Abox only offers Debian 13+ as base images.
 
 ## Network Requirements
 
 ### Host Networking
 
-Abox creates isolated bridge networks for each instance. This requires:
-- iptables for NAT and DNS redirection
+Abox creates isolated (host-only) bridge networks for each instance. This requires:
+- iptables for the DNS redirect (`nat` table) and the host firewall
+  (FORWARD/INPUT default-deny); the networks themselves use no NAT/uplink
 - Bridge networking support in the kernel (usually built-in)
 
 ### Firewall Configuration
@@ -339,4 +354,6 @@ uname -r
 ## See Also
 
 - [Quickstart Guide](quickstart.md) - Get started with abox
+- [Support Matrix](support-matrix.md) - OS × backend × capability table
+- [macOS Support](macos.md) - The vfkit backend for macOS
 - [Troubleshooting](troubleshooting.md) - Common issues and solutions

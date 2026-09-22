@@ -13,14 +13,15 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
 
+	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/privilege"
 	"github.com/sandialabs/abox/internal/rpc"
+	"github.com/sandialabs/abox/internal/sysutil"
 )
 
 // helperState represents the lifecycle state of a PrivilegeHelper.
@@ -37,7 +38,7 @@ type PrivilegeHelper struct {
 	mu         sync.Mutex
 	cmd        *exec.Cmd // nil if using external helper
 	conn       *grpc.ClientConn
-	client     rpc.PrivilegeClient
+	client     rpc.EgressClient
 	token      string
 	socketPath string
 	logPath    string   // instance-specific log path
@@ -46,7 +47,17 @@ type PrivilegeHelper struct {
 	waitDone   chan error // result of cmd.Wait(), shared between waitForSocket and Shutdown
 	state      helperState
 	external   bool // true if using external helper via env vars
+
+	// noInteractive disables launching an interactive sudo/pkexec prompt: if the
+	// only available escalation path is sudo/pkexec, start() fails instead of
+	// prompting. The setuid helper and running-as-root paths remain available.
+	noInteractive bool
 }
+
+// ErrInteractivePrivilegeRequired is returned by start() when privilege would
+// require an interactive sudo/pkexec prompt but the caller disabled that (e.g.
+// best-effort teardown in stop, or doctor on a non-TTY).
+var ErrInteractivePrivilegeRequired = errors.New("privilege escalation requires an interactive prompt, which is disabled for this operation")
 
 // connectExternalHelper connects to an existing privilege helper via env vars.
 func connectExternalHelper(socketPath, token string) (*PrivilegeHelper, error) {
@@ -60,13 +71,15 @@ func connectExternalHelper(socketPath, token string) (*PrivilegeHelper, error) {
 		return nil, fmt.Errorf("failed to connect to external helper at %s: %w", socketPath, err)
 	}
 
-	client := rpc.NewPrivilegeClientWithToken(conn, token)
+	client := rpc.NewEgressClientWithToken(conn, token)
 
-	// Verify the connection works
+	// Verify the connection works. Ping via the OS-appropriate lifecycle client
+	// (Egress on Linux, Pf on macOS) — the darwin helper registers only Pf, so an
+	// Egress ping would fail Unimplemented.
 	ctx, cancel := context.WithTimeout(context.Background(), HelperPingTimeout)
 	defer cancel()
 
-	if _, err := client.Ping(ctx, &rpc.Empty{}); err != nil {
+	if _, err := newHelperControl(conn, token).Ping(ctx, &rpc.Empty{}); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("external helper ping failed: %w", err)
 	}
@@ -101,31 +114,30 @@ func validateExternalSocketPath(socketPath string) error {
 		return fmt.Errorf("path is not a socket: %s", socketPath)
 	}
 
-	// Verify socket is owned by the current user
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Uid != uint32(os.Getuid()) { //nolint:gosec // UID is always non-negative
+	// Verify socket is owned by the current user. FileOwner reports ok=false on
+	// platforms that cannot determine ownership; treat that as a failure (fail
+	// closed) rather than trusting an unowned socket for the privileged transport.
+	uidOwner, _, ok := sysutil.FileOwner(info)
+	if !ok {
+		return fmt.Errorf("cannot determine owner of socket (ownership checks unsupported on this platform): %s", socketPath)
+	}
+	if uidOwner != os.Getuid() {
 		return fmt.Errorf("socket not owned by current user (uid %d): %s", os.Getuid(), socketPath)
 	}
 
-	// Verify socket is in a secure directory (XDG_RUNTIME_DIR or /run/user/<uid>)
-	// This prevents using sockets in world-writable directories like /tmp
-	uid := os.Getuid()
-	allowedPrefixes := []string{
-		filepath.Clean(fmt.Sprintf("/run/user/%d", uid)) + "/",
-	}
-	if xdgRuntime := os.Getenv("XDG_RUNTIME_DIR"); xdgRuntime != "" {
-		allowedPrefixes = append(allowedPrefixes, filepath.Clean(xdgRuntime)+"/")
+	// Verify the socket lives in the platform's secure runtime directory
+	// (linux: XDG_RUNTIME_DIR or /run/user/<uid>; darwin: $TMPDIR). The seam
+	// also asserts the directory is owned by us and not world-writable, so a
+	// socket in a world-writable directory like /tmp is refused.
+	secureDir, err := config.SecureRuntimeDir()
+	if err != nil {
+		return fmt.Errorf("no secure runtime directory for external helper socket: %w", err)
 	}
 
+	prefix := filepath.Clean(secureDir) + string(filepath.Separator)
 	cleanPath := filepath.Clean(socketPath)
-	allowed := false
-	for _, prefix := range allowedPrefixes {
-		if strings.HasPrefix(cleanPath, prefix) {
-			allowed = true
-			break
-		}
-	}
-	if !allowed {
-		return fmt.Errorf("socket must be in XDG_RUNTIME_DIR or /run/user/%d: %s", uid, socketPath)
+	if !strings.HasPrefix(cleanPath, prefix) {
+		return fmt.Errorf("socket must be in the secure runtime directory %s: %s", secureDir, socketPath)
 	}
 
 	return nil
@@ -158,14 +170,17 @@ func findSetuidHelper() string {
 			continue
 		}
 
-		stat, ok := info.Sys().(*syscall.Stat_t)
+		uidOwner, gidOwner, ok := sysutil.FileOwner(info)
 		if !ok {
+			// Ownership unknown (unsupported platform): fail closed — never treat
+			// an unverifiable binary as a trusted root-owned setuid helper.
+			logging.Debug("cannot determine setuid helper ownership on this platform", "path", path)
 			continue
 		}
 
 		// Must be owned by root
-		if stat.Uid != 0 {
-			logging.Debug("setuid helper not owned by root", "path", path, "uid", stat.Uid)
+		if uidOwner != 0 {
+			logging.Debug("setuid helper not owned by root", "path", path, "uid", uidOwner)
 			continue
 		}
 
@@ -176,13 +191,13 @@ func findSetuidHelper() string {
 		}
 
 		// Must have group "abox"
-		if !isGroupAbox(stat.Gid) {
-			logging.Debug("setuid helper not in abox group", "path", path, "gid", stat.Gid)
+		if !isGroupAbox(uint32(gidOwner)) { //nolint:gosec // gid from FileOwner is non-negative
+			logging.Debug("setuid helper not in abox group", "path", path, "gid", gidOwner)
 			continue
 		}
 
 		// Calling user must be in "abox" group
-		if !privilege.InGroup("abox") {
+		if !privilege.UserInGroup("abox") {
 			logging.Debug("current user not in abox group")
 			continue
 		}
@@ -286,6 +301,10 @@ func (h *PrivilegeHelper) start() error {
 		logging.Debug("using setuid helper", "path", setuidPath)
 		cmd = exec.Command(setuidPath, socketArgs...)
 	} else {
+		// Only an interactive sudo/pkexec escalation is available.
+		if h.noInteractive {
+			return ErrInteractivePrivilegeRequired
+		}
 		cmd = buildSudoPkexecCmd(h, helperSubcmdArgs)
 		if cmd == nil {
 			return errors.New("no privilege escalation method available")
@@ -339,14 +358,15 @@ func (h *PrivilegeHelper) start() error {
 	}
 
 	h.conn = conn
-	h.client = rpc.NewPrivilegeClientWithToken(conn, h.token)
+	h.client = rpc.NewEgressClientWithToken(conn, h.token)
 
-	// Verify the helper is working
+	// Verify the helper is working. Ping via the OS-appropriate lifecycle client
+	// (Egress on Linux, Pf on macOS); the darwin helper registers only Pf.
 	logging.Debug("pinging privilege helper")
 	ctx, cancel := context.WithTimeout(context.Background(), HelperPingTimeout)
 	defer cancel()
 
-	_, err = h.client.Ping(ctx, &rpc.Empty{})
+	_, err = newHelperControl(conn, h.token).Ping(ctx, &rpc.Empty{})
 	if err != nil {
 		h.cleanup()
 		return fmt.Errorf("helper ping failed: %w", err)
@@ -386,6 +406,11 @@ func (h *PrivilegeHelper) closeLogFile() {
 func (h *PrivilegeHelper) startFallback(helperSubcmdArgs []string, startErr error) (*exec.Cmd, io.WriteCloser, error) {
 	if findSetuidHelper() == "" || os.Geteuid() == 0 {
 		return nil, nil, fmt.Errorf("failed to start helper: %w", startErr)
+	}
+	// The setuid path failed and the only fallback is interactive sudo/pkexec,
+	// which this operation disallows.
+	if h.noInteractive {
+		return nil, nil, fmt.Errorf("%w (setuid helper failed: %w)", ErrInteractivePrivilegeRequired, startErr)
 	}
 
 	logging.Debug("setuid helper exec failed, falling back to sudo/pkexec", "error", startErr)
@@ -471,10 +496,11 @@ func (h *PrivilegeHelper) Shutdown() {
 		return
 	}
 
-	// Ask the helper to shut itself down via RPC
-	if h.client != nil {
+	// Ask the helper to shut itself down via RPC, using the OS-appropriate
+	// lifecycle client (Egress on Linux, Pf on macOS).
+	if h.conn != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), HelperShutdownTimeout)
-		_, _ = h.client.Shutdown(ctx, &rpc.Empty{})
+		_, _ = newHelperControl(h.conn, h.token).Shutdown(ctx, &rpc.Empty{})
 		cancel()
 	}
 

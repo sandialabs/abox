@@ -221,6 +221,40 @@ func ValidateDiskSize(size string) error {
 	return nil
 }
 
+// ParseDiskSize parses a disk size string like "20G" into a byte count. The
+// K/M/G/T suffix (case-insensitive) is REQUIRED; a bare number is rejected so a
+// caller can never silently misinterpret "20" as 20 bytes. This is the single
+// shared parser used by the vfkit disk provisioner and `config edit`; use
+// ValidateDiskSize for policy checks (positive, minimum 1G, maximum 10T) — this
+// only converts an already-well-formed size to bytes.
+func ParseDiskSize(size string) (int64, error) {
+	size = strings.TrimSpace(size)
+	if len(size) < 2 {
+		return 0, fmt.Errorf("invalid disk size: %s", size)
+	}
+
+	var multiplier int64
+	switch size[len(size)-1] {
+	case 'K', 'k':
+		multiplier = 1 << 10
+	case 'M', 'm':
+		multiplier = 1 << 20
+	case 'G', 'g':
+		multiplier = 1 << 30
+	case 'T', 't':
+		multiplier = 1 << 40
+	default:
+		return 0, fmt.Errorf("disk size must end with K, M, G, or T: %s", size)
+	}
+
+	value, err := strconv.ParseInt(size[:len(size)-1], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid disk size number: %s", size)
+	}
+
+	return value * multiplier, nil
+}
+
 // SSH public key validation:
 // - Must match standard OpenSSH public key format
 // - Type must be a known algorithm (ssh-rsa, ssh-ed25519, ecdsa-sha2-*, ssh-dss)
@@ -372,22 +406,45 @@ func ValidateLogFormat(format string) error {
 	return nil
 }
 
-// validBackends contains the set of valid VM backend values.
-// Currently only libvirt is implemented; other backends are planned for future.
-var validBackends = map[string]bool{
-	"libvirt": true,
+// Secret key names are env-var-like so they are unambiguous in the on-disk store
+// format and safe to render in logs/audit.
+var validSecretKeyRegex = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// HTTP header field-name token per RFC 7230 (tchar+). Excludes separators,
+// whitespace, and control chars so an injected header can't smuggle CR/LF or
+// extra fields into the outbound request.
+var validHeaderNameRegex = regexp.MustCompile(`^[!#$%&'*+\-.^_` + "`" + `|~0-9A-Za-z]+$`)
+
+// ValidateSecretKey validates a secret store key name.
+// Returns nil if valid, or an error describing the problem.
+func ValidateSecretKey(name string) error {
+	if !validSecretKeyRegex.MatchString(name) {
+		return fmt.Errorf("invalid secret key %q: must match [A-Za-z_][A-Za-z0-9_]*", name)
+	}
+	return nil
 }
 
-// ValidateBackend validates a VM backend name.
-// Currently only "libvirt" is supported.
-// An empty string is valid and means "auto-detect".
+// ValidateHTTPHeaderName validates an HTTP header field name.
 // Returns nil if valid, or an error describing the problem.
-func ValidateBackend(backend string) error {
-	if backend == "" {
-		return nil // empty is valid (auto-detect)
+func ValidateHTTPHeaderName(name string) error {
+	if !validHeaderNameRegex.MatchString(name) {
+		return fmt.Errorf("invalid HTTP header name %q", name)
 	}
-	if !validBackends[strings.ToLower(backend)] {
-		return fmt.Errorf("invalid backend %q: must be libvirt", backend)
+	return nil
+}
+
+// ValidateHTTPHeaderValue rejects control characters (notably CR/LF) in an HTTP
+// header value. A value with an embedded newline would be rejected by the Go
+// transport at write time (breaking every request) and, worse, is the classic
+// header/request-smuggling vector. Tab is permitted; all other bytes below 0x20
+// and DEL are rejected.
+func ValidateHTTPHeaderValue(value string) error {
+	// Report only the offset, never the byte itself: this validates secret-derived
+	// values, and the error is logged.
+	for i := range len(value) {
+		if c := value[i]; (c < 0x20 && c != '\t') || c == 0x7f {
+			return fmt.Errorf("invalid HTTP header value: control character at offset %d", i)
+		}
 	}
 	return nil
 }
