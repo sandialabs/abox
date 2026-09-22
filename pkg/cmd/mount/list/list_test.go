@@ -1,4 +1,4 @@
-package mount
+package list
 
 import (
 	"testing"
@@ -8,16 +8,16 @@ import (
 	"github.com/sandialabs/abox/pkg/cmdutil"
 )
 
-func TestNewCmdMount_FlagParsing(t *testing.T) {
+func TestNewCmdList_ParsesInstance(t *testing.T) {
 	ios, _, _, _ := iostreams.Test()
 	f := &factory.Factory{IO: ios, ColorScheme: cmdutil.NewColorScheme(false)}
 
 	var gotOpts *Options
-	cmd := NewCmdMount(f, func(o *Options) error {
+	cmd := NewCmdList(f, func(o *Options) error {
 		gotOpts = o
 		return nil
 	})
-	cmd.SetArgs([]string{"--read-only", "--allow-other", "dev", "/mnt/dev"})
+	cmd.SetArgs([]string{"dev"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -25,31 +25,38 @@ func TestNewCmdMount_FlagParsing(t *testing.T) {
 	if gotOpts == nil {
 		t.Fatal("runF was not called")
 	}
-	if !gotOpts.ReadOnly {
-		t.Error("expected ReadOnly to be true")
-	}
-	if !gotOpts.AllowOther {
-		t.Error("expected AllowOther to be true")
-	}
 	if gotOpts.Name != "dev" {
 		t.Errorf("Name = %q, want %q", gotOpts.Name, "dev")
 	}
-	if gotOpts.MountPoint != "/mnt/dev" {
-		t.Errorf("MountPoint = %q, want %q", gotOpts.MountPoint, "/mnt/dev")
-	}
 }
 
-func TestNewCmdMount_RequiresArgs(t *testing.T) {
+func TestNewCmdList_HasLsAlias(t *testing.T) {
 	ios, _, _, _ := iostreams.Test()
 	f := &factory.Factory{IO: ios, ColorScheme: cmdutil.NewColorScheme(false)}
 
-	cmd := NewCmdMount(f, func(o *Options) error {
+	cmd := NewCmdList(f, nil)
+	found := false
+	for _, a := range cmd.Aliases {
+		if a == "ls" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'ls' alias, got %v", cmd.Aliases)
+	}
+}
+
+func TestNewCmdList_RequiresInstance(t *testing.T) {
+	ios, _, _, _ := iostreams.Test()
+	f := &factory.Factory{IO: ios, ColorScheme: cmdutil.NewColorScheme(false)}
+
+	cmd := NewCmdList(f, func(o *Options) error {
 		t.Fatal("runF should not be called")
 		return nil
 	})
 	cmd.SetArgs([]string{})
 
 	if err := cmd.Execute(); err == nil {
-		t.Fatal("expected error when no args provided")
+		t.Fatal("expected error when no instance provided")
 	}
 }

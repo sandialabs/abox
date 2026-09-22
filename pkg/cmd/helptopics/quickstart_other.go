@@ -57,7 +57,7 @@ COMMON TASKS
   abox list              # List all instances
   abox status dev        # Show instance status
   abox scp dev:file .    # Copy file from instance
-  abox mount dev ~/mnt   # Mount instance via SSHFS
+  abox mount add dev ~/mnt   # Mount instance via SSHFS
 
 SEE ALSO
   abox help yaml             abox.yaml configuration reference

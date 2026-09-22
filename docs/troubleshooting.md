@@ -289,7 +289,7 @@ or its network didn't come up.
 ### Mount Command Fails
 
 **Symptoms:**
-- `abox mount dev ~/mnt` fails
+- `abox mount add dev ~/mnt` fails
 - SSHFS errors
 
 **Resolution:**

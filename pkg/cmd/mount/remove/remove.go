@@ -1,4 +1,4 @@
-package unmount
+package remove
 
 import (
 	"errors"
@@ -11,13 +11,13 @@ import (
 	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/mountutil"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
-	"github.com/sandialabs/abox/pkg/cmd/mount"
+	"github.com/sandialabs/abox/pkg/cmd/mount/shared"
 	"github.com/sandialabs/abox/pkg/cmdutil"
 
 	"github.com/spf13/cobra"
 )
 
-// Options holds the options for the unmount command.
+// Options holds the options for the mount remove command.
 type Options struct {
 	Factory *factory.Factory
 	Force   bool
@@ -25,23 +25,51 @@ type Options struct {
 	Path    string // Target path or instance name (positional arg)
 }
 
-// NewCmdUnmount creates a new unmount command.
+// NewCmdRemove creates the `abox mount remove` subcommand.
+func NewCmdRemove(f *factory.Factory, runF func(*Options) error) *cobra.Command {
+	return newCmd(f, runF,
+		"remove [flags] <local-mount-point|instance>",
+		[]string{"rm"},
+		"Remove (unmount) an abox SSHFS mount",
+		`  abox mount remove ~/mnt/dev      # unmount specific path
+  abox mount remove dev            # unmount all mounts for instance
+  abox mount rm -f ~/mnt/dev       # force unmount (lazy)
+  abox mount remove --all          # unmount all abox mounts`,
+	)
+}
+
+// NewCmdUnmount creates the top-level `abox unmount` command, a backward-compat
+// alias for `abox mount remove` (also reachable as `abox umount`). It shares
+// Options and run logic with NewCmdRemove via newCmd so the two cannot drift.
 func NewCmdUnmount(f *factory.Factory, runF func(*Options) error) *cobra.Command {
+	return newCmd(f, runF,
+		"unmount [flags] <local-mount-point|instance>",
+		[]string{"umount"},
+		"Unmount an abox SSHFS mount (alias for 'mount remove')",
+		`  abox unmount ~/mnt/dev           # unmount specific path
+  abox unmount dev                 # unmount all mounts for instance
+  abox unmount -f ~/mnt/dev        # force unmount (lazy)
+  abox umount --all                # unmount all abox mounts`,
+	)
+}
+
+// newCmd builds a mount-teardown command from shared Options and run logic. Both
+// the `mount remove` subcommand and the top-level `unmount` alias are produced
+// here so their args, flags, and behavior stay identical.
+func newCmd(f *factory.Factory, runF func(*Options) error, use string, aliases []string, short, example string) *cobra.Command {
 	opts := &Options{
 		Factory: f,
 	}
 
 	cmd := &cobra.Command{
-		Use:   "unmount [flags] <local-mount-point|instance>",
-		Short: "Unmount an abox SSHFS mount",
+		Use:     use,
+		Aliases: aliases,
+		Short:   short,
 		Long: `Unmount a previously mounted SSHFS filesystem.
 
 You can specify either a local mount point path or an instance name.
 When specifying an instance name, all mounts for that instance are unmounted.`,
-		Example: `  abox unmount ~/mnt/dev           # unmount specific path
-  abox unmount dev                 # unmount all mounts for instance
-  abox unmount -f ~/mnt/dev        # force unmount (lazy)
-  abox unmount --all               # unmount all abox mounts`,
+		Example: example,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if opts.All {
 				if len(args) > 0 {
@@ -142,7 +170,7 @@ func (o *Options) unmountPath(localPath string) error {
 // `diskutil unmount force` (macOS) tolerate an already-gone mount — this gate
 // mirrors unmountPath's. It returns the number unmounted and any per-path errors;
 // suffix is appended to each success line (the --all view labels the instance).
-func (o *Options) unmountMounts(instanceName, instanceDir string, mounts []mount.MountEntry, suffix string) (int, []string) {
+func (o *Options) unmountMounts(instanceName, instanceDir string, mounts []shared.MountEntry, suffix string) (int, []string) {
 	w := o.Factory.IO.Out
 	var errs []string
 	unmounted := 0
@@ -150,7 +178,7 @@ func (o *Options) unmountMounts(instanceName, instanceDir string, mounts []mount
 	for _, m := range mounts {
 		if !o.Force && !mountutil.IsMounted(m.LocalPath) {
 			// Not mounted, just remove the record.
-			_ = mount.RemoveMountRecord(instanceDir, m.LocalPath)
+			_ = shared.RemoveMountRecord(instanceDir, m.LocalPath)
 			continue
 		}
 
@@ -159,7 +187,7 @@ func (o *Options) unmountMounts(instanceName, instanceDir string, mounts []mount
 			continue
 		}
 
-		if err := mount.RemoveMountRecord(instanceDir, m.LocalPath); err != nil {
+		if err := shared.RemoveMountRecord(instanceDir, m.LocalPath); err != nil {
 			logging.Warn("failed to remove mount record", "error", err, "path", m.LocalPath)
 		}
 
@@ -179,7 +207,7 @@ func (o *Options) unmountInstance(instanceName string) error {
 		return err
 	}
 
-	mounts, err := mount.GetMounts(paths.Instance)
+	mounts, err := shared.GetMounts(paths.Instance)
 	if err != nil {
 		return fmt.Errorf("failed to load mounts: %w", err)
 	}
@@ -228,7 +256,7 @@ func (o *Options) UnmountAll() error {
 			continue
 		}
 
-		mounts, err := mount.GetMounts(paths.Instance)
+		mounts, err := shared.GetMounts(paths.Instance)
 		if err != nil {
 			continue
 		}
@@ -264,6 +292,6 @@ func (o *Options) removeMountFromAllInstances(localPath string) {
 		if err != nil {
 			continue
 		}
-		_ = mount.RemoveMountRecord(paths.Instance, localPath)
+		_ = shared.RemoveMountRecord(paths.Instance, localPath)
 	}
 }

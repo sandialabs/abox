@@ -23,6 +23,7 @@ func NewCmdList(f *factory.Factory, runF func(*Options) error) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:               "list <instance>",
+		Aliases:           []string{"ls"},
 		Short:             "List stored secret keys (names only)",
 		Long:              "List the secret key names stored for an instance. Values are never printed.",
 		Args:              cobra.ExactArgs(1),
