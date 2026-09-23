@@ -97,8 +97,10 @@ func run() error {
 		return err
 	}
 
-	// Step 7: Parse flags.
-	socketPath, err := parseFlags()
+	// Step 7: Parse flags. The socket path is validated against the caller's real
+	// UID so the root chown/chmod/unlink the helper performs on it cannot be
+	// redirected via a parent-directory or symlink swap.
+	socketPath, err := parseFlags(ruid)
 	if err != nil {
 		return err
 	}
@@ -219,8 +221,10 @@ func verifyAboxGroup(ruid int) error {
 
 // parseFlags parses --socket from os.Args using the flag stdlib.
 // The setuid binary does not accept --allowed-uid; it uses the kernel-provided
-// real UID (os.Getuid()) which is unforgeable.
-func parseFlags() (string, error) {
+// real UID (os.Getuid()) which is unforgeable. The socket path is validated with
+// the strict setuid rules (parent-directory ownership/permission checks) so a
+// caller-controlled path cannot become a root chown/chmod/unlink primitive.
+func parseFlags(ruid int) (string, error) {
 	fs := flag.NewFlagSet("abox-helper", flag.ContinueOnError)
 	socketPath := fs.String("socket", "", "Unix socket path")
 	_ = fs.Bool("token-stdin", false, "Compatibility flag (token is always read from stdin)")
@@ -229,7 +233,7 @@ func parseFlags() (string, error) {
 		return "", err
 	}
 
-	if err := privilege.ValidateSocketPath(*socketPath); err != nil {
+	if err := privilege.ValidateSetuidSocketPath(*socketPath, ruid); err != nil {
 		return "", fmt.Errorf("--socket: %w", err)
 	}
 

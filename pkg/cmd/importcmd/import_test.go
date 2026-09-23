@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -154,5 +155,96 @@ func TestImportRejectsInvalidNewNameArg(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "instance name") {
 		t.Errorf("error = %q, want an instance-name validation error", err)
+	}
+}
+
+// writeTarGz builds a .tar.gz at a temp path from the given regular-file entries
+// (name -> size), writing `size` zero bytes for each, and returns its path.
+func writeTarGz(t *testing.T, entries []struct {
+	name string
+	size int64
+}) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	gw := gzip.NewWriter(f)
+	tw := tar.NewWriter(gw)
+	for _, e := range entries {
+		if err := tw.WriteHeader(&tar.Header{Name: e.name, Mode: 0o600, Size: e.size, Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if e.size > 0 {
+			if _, err := tw.Write(make([]byte, e.size)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestExtractTarGz_Legitimate confirms a normal small archive still extracts.
+func TestExtractTarGz_Legitimate(t *testing.T) {
+	archive := writeTarGz(t, []struct {
+		name string
+		size int64
+	}{{"config.yaml", 1024}, {"disk.qcow2", 4096}})
+
+	dest := t.TempDir()
+	if err := extractTarGz(archive, dest); err != nil {
+		t.Fatalf("legitimate archive should extract, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "disk.qcow2")); err != nil {
+		t.Errorf("expected extracted file: %v", err)
+	}
+}
+
+// TestExtractTarGz_RejectsExcessiveEntryCount verifies the entry-count cap.
+func TestExtractTarGz_RejectsExcessiveEntryCount(t *testing.T) {
+	entries := make([]struct {
+		name string
+		size int64
+	}, maxImportEntries+1)
+	for i := range entries {
+		entries[i] = struct {
+			name string
+			size int64
+		}{name: filepath.Join("d", "f"+strconv.Itoa(i)), size: 0}
+	}
+	archive := writeTarGz(t, entries)
+	err := extractTarGz(archive, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "entry count") {
+		t.Fatalf("expected entry-count cap error, got %v", err)
+	}
+}
+
+// TestExtractTarFile_RejectsNegativeSize verifies a malformed negative header
+// size is rejected rather than mishandled.
+func TestExtractTarFile_RejectsNegativeSize(t *testing.T) {
+	var total int64
+	h := &tar.Header{Name: "x", Mode: 0o600, Size: -1, Typeflag: tar.TypeReg}
+	err := extractTarFile(tar.NewReader(bytes.NewReader(nil)), h, filepath.Join(t.TempDir(), "x"), &total)
+	if err == nil || !strings.Contains(err.Error(), "negative size") {
+		t.Fatalf("expected negative-size rejection, got %v", err)
+	}
+}
+
+// TestExtractTarFile_RejectsOversizedHeader verifies the per-file cap rejects a
+// header claiming more than maxImportFileBytes without attempting the copy.
+func TestExtractTarFile_RejectsOversizedHeader(t *testing.T) {
+	var total int64
+	h := &tar.Header{Name: "big", Mode: 0o600, Size: maxImportFileBytes + 1, Typeflag: tar.TypeReg}
+	err := extractTarFile(tar.NewReader(bytes.NewReader(nil)), h, filepath.Join(t.TempDir(), "big"), &total)
+	if err == nil || !strings.Contains(err.Error(), "per-file cap") {
+		t.Fatalf("expected per-file cap rejection, got %v", err)
 	}
 }

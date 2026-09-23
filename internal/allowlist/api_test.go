@@ -130,6 +130,54 @@ func TestAllowlistAPIHandler_Remove(t *testing.T) {
 	})
 }
 
+// TestAllowlistAPIHandler_Remove_PersistsToFile verifies that Remove writes
+// through to the on-disk allowlist file (via Loader) so the removal survives a
+// reload — the bug where a removed domain reappeared after a restart/reload.
+func TestAllowlistAPIHandler_Remove_PersistsToFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "allowlist.conf")
+	if err := os.WriteFile(path, []byte("example.com\nexample.org\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	filter := NewFilter()
+	loader := NewLoader(path, filter)
+	if err := loader.Load(); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	handler := &AllowlistAPIHandler{Filter: filter, Loader: loader}
+
+	resp, err := handler.Remove("example.com")
+	if err != nil {
+		t.Fatalf("Remove failed: %v", err)
+	}
+	// The old message admitted the removal wasn't persisted; it must not anymore.
+	if strings.Contains(resp.Message, "edit the allowlist file") {
+		t.Errorf("message should no longer tell the user to edit the file, got %q", resp.Message)
+	}
+
+	// The file on disk must no longer contain the domain.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	if strings.Contains(string(data), "example.com") {
+		t.Errorf("example.com should be removed from the file, got:\n%s", string(data))
+	}
+
+	// A fresh reload must not resurrect it.
+	if err := loader.Load(); err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	if filter.IsAllowed("example.com") {
+		t.Error("example.com reappeared after reload — removal was not persisted")
+	}
+	if !filter.IsAllowed("example.org") {
+		t.Error("example.org should still be allowed")
+	}
+}
+
 func TestAllowlistAPIHandler_List(t *testing.T) {
 	filter := NewFilter()
 	handler := &AllowlistAPIHandler{

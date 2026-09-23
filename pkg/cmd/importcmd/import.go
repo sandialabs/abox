@@ -534,7 +534,26 @@ func (c *cleanupState) run() {
 	}
 }
 
-// extractTarGz extracts a gzipped tar archive to a directory.
+// Decompression-bomb bounds for `abox import`. A hostile archive can declare a
+// tiny compressed size that inflates without limit, or claim a huge per-file
+// header size, or pack an enormous number of entries. These caps bound each
+// axis so a crafted bundle cannot exhaust disk or inodes.
+const (
+	// maxImportFileBytes bounds a single extracted file. Aligned with the
+	// ValidateDiskSize ceiling (10T) since the disk image is the largest
+	// legitimate member of an export bundle.
+	maxImportFileBytes = 10 * 1024 * 1024 * 1024 * 1024 // 10 TiB
+	// maxImportUncompressedBytes bounds the total extracted size across all
+	// entries: the disk ceiling plus generous headroom for config/keys/logs.
+	maxImportUncompressedBytes = 11 * 1024 * 1024 * 1024 * 1024 // 11 TiB
+	// maxImportEntries bounds the number of archive members (a flood of tiny
+	// entries can exhaust inodes/time even under the byte caps).
+	maxImportEntries = 100_000
+)
+
+// extractTarGz extracts a gzipped tar archive to a directory, enforcing
+// cumulative size, per-file size, and entry-count caps (see the maxImport*
+// constants) so a decompression bomb cannot exhaust disk or inodes.
 func extractTarGz(archivePath, destDir string) error {
 	file, err := os.Open(archivePath)
 	if err != nil {
@@ -550,6 +569,10 @@ func extractTarGz(archivePath, destDir string) error {
 
 	tr := tar.NewReader(gr)
 
+	var (
+		totalBytes int64
+		entries    int
+	)
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
@@ -559,7 +582,12 @@ func extractTarGz(archivePath, destDir string) error {
 			return err
 		}
 
-		if err := extractTarEntry(tr, header, destDir); err != nil {
+		entries++
+		if entries > maxImportEntries {
+			return fmt.Errorf("archive exceeds maximum entry count (%d)", maxImportEntries)
+		}
+
+		if err := extractTarEntry(tr, header, destDir, &totalBytes); err != nil {
 			return err
 		}
 	}
@@ -568,7 +596,8 @@ func extractTarGz(archivePath, destDir string) error {
 }
 
 // extractTarEntry extracts a single tar entry to the destination directory.
-func extractTarEntry(tr *tar.Reader, header *tar.Header, destDir string) error {
+// totalBytes accumulates the actual bytes written across the whole archive.
+func extractTarEntry(tr *tar.Reader, header *tar.Header, destDir string, totalBytes *int64) error {
 	targetPath := filepath.Join(destDir, header.Name) //nolint:gosec // G305: path traversal checked below
 
 	// Security check: ensure path doesn't escape destDir
@@ -582,13 +611,29 @@ func extractTarEntry(tr *tar.Reader, header *tar.Header, destDir string) error {
 	case tar.TypeDir:
 		return os.MkdirAll(targetPath, os.FileMode(header.Mode)&0o777) //nolint:gosec // mode is masked to 0o777
 	case tar.TypeReg:
-		return extractTarFile(tr, header, targetPath)
+		return extractTarFile(tr, header, targetPath, totalBytes)
 	}
 	return nil
 }
 
-// extractTarFile extracts a regular file from a tar entry.
-func extractTarFile(tr *tar.Reader, header *tar.Header, targetPath string) error {
+// extractTarFile extracts a regular file from a tar entry, enforcing the
+// per-file and cumulative byte caps DURING the copy (via a bounded reader) so a
+// single oversized entry cannot blow past the budget before the check fires.
+// A negative or over-cap header size is rejected up front; the actual bytes
+// written (not the attacker-declared header.Size) drive the running total.
+func extractTarFile(tr *tar.Reader, header *tar.Header, targetPath string, totalBytes *int64) error {
+	if header.Size < 0 {
+		return fmt.Errorf("invalid tar entry %q: negative size %d", header.Name, header.Size)
+	}
+	if header.Size > maxImportFileBytes {
+		return fmt.Errorf("tar entry %q exceeds per-file cap (%d bytes)", header.Name, int64(maxImportFileBytes))
+	}
+
+	remaining := int64(maxImportUncompressedBytes) - *totalBytes
+	if remaining <= 0 {
+		return fmt.Errorf("archive exceeds cumulative size cap (%d bytes)", int64(maxImportUncompressedBytes))
+	}
+
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil { //nolint:gosec // directory for extracted file
 		return err
 	}
@@ -598,9 +643,25 @@ func extractTarFile(tr *tar.Reader, header *tar.Header, targetPath string) error
 		return err
 	}
 
-	if _, err := io.Copy(f, io.LimitReader(tr, header.Size)); err != nil {
+	// Bound the copy to whichever is smaller: the entry's declared size or the
+	// remaining cumulative budget (+1 so we can detect an entry that overruns
+	// the budget rather than silently truncating).
+	limit := header.Size
+	if remaining < limit {
+		limit = remaining + 1
+	}
+	n, err := io.Copy(f, io.LimitReader(tr, limit))
+	if err != nil {
 		f.Close()
 		return err
 	}
-	return f.Close()
+	if closeErr := f.Close(); closeErr != nil {
+		return closeErr
+	}
+
+	*totalBytes += n
+	if *totalBytes > maxImportUncompressedBytes {
+		return fmt.Errorf("archive exceeds cumulative size cap (%d bytes)", int64(maxImportUncompressedBytes))
+	}
+	return nil
 }

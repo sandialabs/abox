@@ -542,11 +542,13 @@ func TestDeclarativeAllowlist(t *testing.T) {
 			Name:      name,
 			CPUs:      1,
 			Memory:    512,
-			Allowlist: []string{"example.com", "newdomain.com"},
+			Allowlist: []string{"example.com", "example.net"},
 		})
 
-		// abox up -d dir
-		result := env.runWithTimeout(longTimeout, "up", "-d", dir)
+		// abox up -d dir. The rerun runs non-interactively (no TTY), where the
+		// reconcile default is KEEP; pass --conf-policy=replace to sync the
+		// declared allowlist onto the existing instance.
+		result := env.runWithTimeout(longTimeout, "up", "--conf-policy", "replace", "-d", dir)
 		if !result.Success() {
 			t.Fatalf("second up failed: %s\nstderr: %s", result.Stdout, result.Stderr)
 		}
@@ -561,8 +563,60 @@ func TestDeclarativeAllowlist(t *testing.T) {
 		if !strings.Contains(allowlistResult.Stdout, "example.com") {
 			t.Errorf("Expected allowlist to contain example.com, got: %s", allowlistResult.Stdout)
 		}
-		if !strings.Contains(allowlistResult.Stdout, "newdomain.com") {
-			t.Errorf("Expected allowlist to contain newdomain.com, got: %s", allowlistResult.Stdout)
+		if !strings.Contains(allowlistResult.Stdout, "example.net") {
+			t.Errorf("Expected allowlist to contain example.net, got: %s", allowlistResult.Stdout)
+		}
+	})
+
+	// conf-policy=keep must NOT clobber a domain the operator removed at runtime,
+	// even though abox.yaml still lists it. This is the reconcile fix: a manual
+	// `abox allowlist remove` survives a subsequent `abox up`.
+	t.Run("conf-policy-keep-preserves-runtime-removal", func(t *testing.T) {
+		env := env.sub(t)
+		ti := &testInstance{env: env, name: name, t: t}
+
+		// The instance's abox.yaml declares example.com + example.net (from the
+		// previous subtest, which replaced onto disk). Remove example.net at
+		// runtime, simulating an operator paring the allowlist back.
+		ti.allowlistRemove("example.net")
+
+		// Rerun with keep: the declared example.net must NOT be restored.
+		result := env.runWithTimeout(longTimeout, "up", "--conf-policy", "keep", "-d", dir)
+		if !result.Success() {
+			t.Fatalf("up --conf-policy=keep failed: %s\nstderr: %s", result.Stdout, result.Stderr)
+		}
+
+		allowlistResult := env.mustRun("allowlist", "list", name)
+		if strings.Contains(allowlistResult.Stdout, "example.net") {
+			t.Errorf("conf-policy=keep should not restore the removed example.net, got: %s", allowlistResult.Stdout)
+		}
+		if !strings.Contains(allowlistResult.Stdout, "example.com") {
+			t.Errorf("example.com should still be present, got: %s", allowlistResult.Stdout)
+		}
+	})
+
+	// Editing a non-allowlist field in abox.yaml and rerunning must WARN about the
+	// drift rather than silently ignore it (abox up does not re-apply these to an
+	// existing instance).
+	t.Run("config-drift-warns", func(t *testing.T) {
+		env := env.sub(t)
+		// Bump cpus; the instance was created with 1.
+		writeTestBoxfile(t, dir, testBoxfileConfig{
+			Name:      name,
+			CPUs:      2,
+			Memory:    512,
+			Allowlist: []string{"example.com", "example.net"},
+		})
+
+		result := env.runWithTimeout(longTimeout, "up", "--conf-policy", "keep", "-d", dir)
+		if !result.Success() {
+			t.Fatalf("up failed: %s\nstderr: %s", result.Stdout, result.Stderr)
+		}
+
+		// The drift warning goes to stderr and names the changed field.
+		combined := result.Stdout + result.Stderr
+		if !strings.Contains(combined, "cpus") || !strings.Contains(strings.ToLower(combined), "differs") {
+			t.Errorf("expected a cpus drift warning, got stdout+stderr:\n%s", combined)
 		}
 	})
 }

@@ -38,6 +38,21 @@ ABOX_BACKEND
   Example:
     ABOX_BACKEND=vmware abox create dev
 
+ABOX_CONF_POLICY
+  How 'abox up' reconciles a diverged allowlist against abox.yaml on an
+  existing instance: 'keep', 'replace', or 'prompt'. Equivalent to the
+  --conf-policy flag. Default: prompt on a TTY, keep non-interactively.
+
+  Example:
+    ABOX_CONF_POLICY=replace abox up
+
+DIFFPROG
+  Program used to show the allowlist diff in 'abox up's interactive
+  "show diff" option. Falls back to 'diff -u' when unset.
+
+  Example:
+    DIFFPROG="git diff --no-index" abox up
+
 ABOX_PRIVILEGE_METHOD
   Privilege escalation method: 'pkexec' or 'sudo'.
   Default: auto-detect (prefers sudo on headless, pkexec with display).

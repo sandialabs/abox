@@ -240,6 +240,29 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		)
 	}
 
+	// Restrict query types to A/AAAA in active (enforcing) mode. The guest only
+	// needs address records to reach allowlisted hosts through the proxy; every
+	// other type (TXT, MX, NS, SRV, ANY, HTTPS/SVCB, ...) is answered with an
+	// empty NOERROR (NODATA) rather than forwarded upstream. NODATA is gentler
+	// than NXDOMAIN/REFUSED — it asserts "no records of this type" without
+	// denying the name's existence or triggering resolver retries. This shrinks
+	// the exfiltration/tunneling surface (e.g. TXT-record data channels) and
+	// means the A/AAAA-only rebinding check below now covers every record type
+	// that can carry an IP. Passive mode still forwards all types so allowlist
+	// profiling stays faithful.
+	if s.IsActive() && q.Qtype != dns.TypeA && q.Qtype != dns.TypeAAAA {
+		atomic.AddUint64(&s.stats.BlockedQueries, 1)
+		resp := &dns.Msg{}
+		resp.SetReply(r)
+		resp.Authoritative = true
+		sendResponse(w, resp, "domain", q.Name)
+		if logger := s.TrafficLogger(); logger != nil {
+			logger.LogBlock(q.Name, "qtype_not_allowed", source,
+				logging.WithType(dns.TypeToString[q.Qtype]))
+		}
+		return
+	}
+
 	// Track explicit allowlist match separately from passive-mode "allow everything".
 	explicitlyAllowed := s.filter.IsAllowed(q.Name)
 	allowed := explicitlyAllowed || !s.IsActive()

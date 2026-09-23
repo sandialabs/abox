@@ -72,7 +72,10 @@ func RunHelper(socketPath string, allowedUID int) error {
 		return fmt.Errorf("failed to listen on socket: %w", err)
 	}
 	defer func() { _ = listener.Close() }()
-	defer os.Remove(socketPath)
+	// Remove the socket on shutdown via a directory-fd-relative unlink (Linux) so
+	// this root-privileged cleanup cannot be redirected by a parent-directory swap.
+	// Non-Linux falls back to a path-based remove.
+	defer func() { _ = removeSocket(socketPath) }()
 
 	// Record helper startup with the caller UID. This is emitted here (not only in
 	// the Linux setuid main.go) so the darwin path — where the helper is launched

@@ -15,20 +15,22 @@ import (
 	"github.com/sandialabs/abox/internal/logging"
 )
 
-// UnixListen creates a net.Listener on a Unix socket with restrictive permissions.
-// Returns an error if the socket path already exists - callers should use unique
-// paths (e.g., with random suffixes) to avoid conflicts with stale sockets.
-// For fixed paths that may have stale sockets from crashes, use UnixListenWithStaleCheck.
-func UnixListen(path string) (net.Listener, error) {
-	// Create the socket with a restrictive umask (0o600) where the platform
-	// honors it (Unix); see listenUnixRestrictive.
+// unixListen creates a net.Listener on a Unix socket with restrictive
+// permissions (0o600 where the platform honors umask; see listenUnixRestrictive).
+// It returns an error if the socket path already exists. It performs NO peer
+// authentication, so it is unexported: daemons must use UnixListenSecure (which
+// adds a peer-UID check) and the privilege helper uses UnixListenWithUIDCheck
+// (cross-UID, root-owned socket). Only those two wrappers may build on it.
+func unixListen(path string) (net.Listener, error) {
 	return listenUnixRestrictive(path)
 }
 
-// UnixListenWithStaleCheck creates a net.Listener, handling stale sockets from crashes.
-// If a socket exists, it tries to connect - if connection fails, the socket is stale
-// and safe to remove. If connection succeeds, another process owns it and we error.
-func UnixListenWithStaleCheck(path string) (net.Listener, error) {
+// unixListenWithStaleCheck creates a net.Listener, handling stale sockets from
+// crashes. If a socket exists, it tries to connect — if the connection fails the
+// socket is stale and safe to remove; if it succeeds another process owns it and
+// we error. It performs NO peer authentication and is unexported for the same
+// reason as unixListen: UnixListenSecure wraps it with a peer-UID check.
+func unixListenWithStaleCheck(path string) (net.Listener, error) {
 	// First try to listen directly
 	listener, err := listenUnixRestrictive(path)
 	if err == nil {
@@ -130,26 +132,27 @@ func (l *uidCheckListener) Accept() (net.Conn, error) {
 	}
 }
 
-// UnixListenWithStaleAndUIDCheck creates a net.Listener that handles stale sockets
-// and verifies peer UID on all connections. This combines the stale socket handling
-// of UnixListenWithStaleCheck with UID verification for defense-in-depth.
-//
-// Unlike UnixListenWithUIDCheck (designed for root-owned sockets), this function:
+// UnixListenSecure is the default listener for abox daemons that run as the
+// invoking user (DNS/HTTP filters, monitor). It is secure by construction:
 //  1. Creates the socket with restrictive permissions (0o600 via umask 0o077)
-//  2. Handles stale sockets from previous crashes
-//  3. Verifies peer UID on every connection as defense-in-depth
+//  2. Handles stale sockets left by a previous crash
+//  3. Verifies the peer UID against the current process UID on EVERY connection,
+//     so only the same user can connect even if the socket mode were modified.
 //
-// This is suitable for daemons that run as the user (not root) and want to ensure
-// only the same user can connect, even if socket permissions were somehow modified.
-func UnixListenWithStaleAndUIDCheck(path string, allowedUID int) (net.Listener, error) {
-	listener, err := UnixListenWithStaleCheck(path)
+// The allowed UID is fixed to os.Getuid() internally — there is no UID parameter
+// to pass incorrectly. Cross-UID sockets (the root-owned privilege helper, where
+// the client UID differs from the listener UID) must use UnixListenWithUIDCheck
+// instead; that is the only other exported listener, and the only one that skips
+// the self-UID default.
+func UnixListenSecure(path string) (net.Listener, error) {
+	listener, err := unixListenWithStaleCheck(path)
 	if err != nil {
 		return nil, err
 	}
 
 	return &uidCheckListener{
 		Listener:   listener,
-		allowedUID: allowedUID,
+		allowedUID: os.Getuid(),
 	}, nil
 }
 
@@ -178,26 +181,20 @@ func UnixListenWithStaleAndUIDCheck(path string, allowedUID int) (net.Listener, 
 // permissions, only the specific process that spawned the helper can make
 // authenticated RPC calls.
 func UnixListenWithUIDCheck(path string, allowedUID int) (net.Listener, error) {
-	listener, err := UnixListen(path)
+	listener, err := unixListen(path)
 	if err != nil {
 		return nil, err
 	}
 
-	// Socket mode is platform-split (socketPeerCheckMode; see socket_mode_*.go).
-	// On Linux it is 0o666 (see security model documentation above: socket owned
-	// by root, client runs as non-root, security via SO_PEERCRED UID + token). On
-	// darwin the spawn path knows the allowed UID and the socket is chowned to it
-	// below, so the mode is tightened to 0o600.
-	if err := os.Chmod(path, socketPeerCheckMode); err != nil {
+	// Apply the socket mode (platform-split socketPeerCheckMode) and owner. The
+	// implementation is platform-specific: on Linux it operates on the listener's
+	// file descriptor (fchmod/fchown) with an fstat verification, closing the
+	// path-based TOCTOU window that a caller-controlled --socket could exploit
+	// against the root-privileged helper; darwin keeps the path-based form. See
+	// applySocketPermissions in socket_perm_{linux,other}.go.
+	if err := applySocketPermissions(listener, path, socketPeerCheckMode, allowedUID); err != nil {
 		_ = listener.Close()
-		return nil, fmt.Errorf("failed to chmod socket: %w", err)
-	}
-
-	// Set socket ownership to the client user so that external helper socket
-	// validation (which checks socket owner matches the current user) passes.
-	if err := os.Chown(path, allowedUID, -1); err != nil {
-		_ = listener.Close()
-		return nil, fmt.Errorf("failed to chown socket: %w", err)
+		return nil, err
 	}
 
 	return &uidCheckListener{

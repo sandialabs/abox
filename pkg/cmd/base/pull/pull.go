@@ -30,6 +30,9 @@ import (
 type Options struct {
 	Factory *factory.Factory
 	Names   []string
+	// AllowUnverified permits pulling an image whose catalog entry carries no
+	// checksum. Off by default: a hashless entry fails closed (see verifyChecksum).
+	AllowUnverified bool
 }
 
 // NewCmdPull creates a new base pull command.
@@ -55,17 +58,20 @@ the libvirt images directory when creating an instance.`,
 			}
 			ctx := cmd.Context()
 			if len(args) == 0 {
-				return runPullInteractive(ctx, f)
+				return runPullInteractive(ctx, f, opts.AllowUnverified)
 			}
 			var errs []error
 			for _, name := range args {
-				if err := runPull(ctx, f, name); err != nil {
+				if err := runPull(ctx, f, name, opts.AllowUnverified); err != nil {
 					errs = append(errs, fmt.Errorf("%s: %w", name, err))
 				}
 			}
 			return errors.Join(errs...)
 		},
 	}
+
+	cmd.Flags().BoolVar(&opts.AllowUnverified, "allow-unverified", false,
+		"Allow pulling an image that has no published checksum (accepts the integrity risk)")
 
 	return cmd
 }
@@ -146,17 +152,17 @@ func showAvailable(ctx context.Context, w io.Writer) {
 }
 
 // runPullInteractive shows an interactive picker, then pulls the image.
-func runPullInteractive(ctx context.Context, f *factory.Factory) error {
+func runPullInteractive(ctx context.Context, f *factory.Factory, allowUnverified bool) error {
 	w := f.IO.Out
 	img, err := pickImage(ctx, w, f.Prompter)
 	if err != nil {
 		return err
 	}
-	return runPullImage(ctx, f, img)
+	return runPullImage(ctx, f, img, allowUnverified)
 }
 
 // runPull looks up an image by name, then pulls it.
-func runPull(ctx context.Context, f *factory.Factory, name string) error {
+func runPull(ctx context.Context, f *factory.Factory, name string, allowUnverified bool) error {
 	w := f.IO.Out
 	img, err := images.FindByName(ctx, name)
 	if err != nil {
@@ -164,11 +170,11 @@ func runPull(ctx context.Context, f *factory.Factory, name string) error {
 		showAvailable(ctx, w)
 		return err
 	}
-	return runPullImage(ctx, f, img)
+	return runPullImage(ctx, f, img, allowUnverified)
 }
 
 // runPullImage checks existence, then dispatches to TUI or plain path.
-func runPullImage(ctx context.Context, f *factory.Factory, img *images.ImageInfo) error {
+func runPullImage(ctx context.Context, f *factory.Factory, img *images.ImageInfo, allowUnverified bool) error {
 	w := f.IO.Out
 
 	paths, err := config.GetPaths("")
@@ -191,9 +197,9 @@ func runPullImage(ctx context.Context, f *factory.Factory, img *images.ImageInfo
 	}
 
 	if f.IO.IsTerminal() {
-		return runPullImageTUI(ctx, f, img, destPath)
+		return runPullImageTUI(ctx, f, img, destPath, allowUnverified)
 	}
-	return runPullImagePlain(ctx, f, img, destPath)
+	return runPullImagePlain(ctx, f, img, destPath, allowUnverified)
 }
 
 // ---------------------------------------------------------------------------
@@ -211,7 +217,7 @@ func (n *plainProgressNotifier) PhaseProgress(_ int, pct float64, detail string)
 	fmt.Fprintf(n.w, "\r  %.1f%% %s", pct*100, detail)
 }
 
-func runPullImagePlain(ctx context.Context, f *factory.Factory, img *images.ImageInfo, destPath string) error {
+func runPullImagePlain(ctx context.Context, f *factory.Factory, img *images.ImageInfo, destPath string, allowUnverified bool) error {
 	w := f.IO.Out
 	notify := &plainProgressNotifier{w: w}
 
@@ -225,7 +231,7 @@ func runPullImagePlain(ctx context.Context, f *factory.Factory, img *images.Imag
 	defer os.Remove(destPath + ".tmp")
 	fmt.Fprintln(w) // newline after \r progress
 
-	if err := verifyChecksum(w, img, computedHash); err != nil {
+	if err := verifyChecksum(w, img, computedHash, allowUnverified); err != nil {
 		os.Remove(destPath + ".tmp")
 		return err
 	}
@@ -245,7 +251,7 @@ func runPullImagePlain(ctx context.Context, f *factory.Factory, img *images.Imag
 // TUI path
 // ---------------------------------------------------------------------------
 
-func runPullImageTUI(ctx context.Context, f *factory.Factory, img *images.ImageInfo, destPath string) error {
+func runPullImageTUI(ctx context.Context, f *factory.Factory, img *images.ImageInfo, destPath string, allowUnverified bool) error {
 	steps := []tui.Step{
 		{Name: "Download image"},
 		{Name: "Verify checksum"},
@@ -275,7 +281,7 @@ func runPullImageTUI(ctx context.Context, f *factory.Factory, img *images.ImageI
 
 		// Phase 1: Verify checksum
 		notify.PhaseStart(1)
-		if err := verifyChecksum(out, img, computedHash); err != nil {
+		if err := verifyChecksum(out, img, computedHash, allowUnverified); err != nil {
 			notify.PhaseDone(1, err)
 			os.Remove(destPath + ".tmp")
 			return err
@@ -388,9 +394,19 @@ func formatProgress(downloaded, total int64) string {
 }
 
 // verifyChecksum checks the computed hash against the image's expected hash.
-func verifyChecksum(w io.Writer, img *images.ImageInfo, computedHash string) error {
+// A catalog entry with no published checksum fails closed unless the caller
+// explicitly opted in with --allow-unverified: an unverified image over a
+// TLS-only channel is a supply-chain risk the operator must consciously accept.
+func verifyChecksum(w io.Writer, img *images.ImageInfo, computedHash string, allowUnverified bool) error {
 	if img.Hash == "" {
-		fmt.Fprintln(w, "Warning: No checksum available for verification")
+		if !allowUnverified {
+			return &cmdutil.ErrHint{
+				Err:  fmt.Errorf("image %q has no published checksum", img.Name),
+				Hint: "re-run with --allow-unverified to accept this integrity risk, or choose an image that publishes a checksum",
+			}
+		}
+		fmt.Fprintln(w, "Warning: No checksum available for verification (--allow-unverified)")
+		logging.Audit(logging.ActionBasePull, "action", logging.ActionBasePull, "image", img.Name, "warning", "pulled without checksum verification")
 		return nil
 	}
 

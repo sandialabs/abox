@@ -300,9 +300,10 @@ type SnapshotInfo struct {
 // policy knob today, so the enforcers add it unconditionally. There is no DHCP
 // allowance: guests are statically addressed via cloud-init (no DHCP handshake).
 type EgressPolicy struct {
-	DNSPort      int // dnsfilter listen port (guest DNS is redirected here)
-	HTTPPort     int // httpfilter proxy port
-	GuestDNSPort int // guest-facing DNS port that is redirected to DNSPort (normally 53)
+	DNSPort      int    // dnsfilter listen port (guest DNS is redirected here)
+	HTTPPort     int    // httpfilter proxy port
+	GuestDNSPort int    // guest-facing DNS port that is redirected to DNSPort (normally 53)
+	Gateway      string // bridge gateway IPv4; host-side accepts are pinned to this dest
 }
 
 // standardDNSPort is the guest-facing DNS port (what the guest sends to) that is
@@ -316,6 +317,7 @@ func BuildEgressPolicy(inst *config.Instance) EgressPolicy {
 		DNSPort:      inst.DNS.Port,
 		HTTPPort:     inst.HTTP.Port,
 		GuestDNSPort: standardDNSPort,
+		Gateway:      inst.Gateway,
 	}
 }
 

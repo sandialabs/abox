@@ -118,7 +118,10 @@ func saveCache(cache *Cache) error {
 		return err
 	}
 
-	return os.WriteFile(cachePath, data, 0o644) //nolint:gosec // cache file, not sensitive
+	// 0o600: the cache holds only the invoking user's copy of public catalog
+	// metadata, but least-privilege-by-default matches the rest of the codebase
+	// and there is no reason for it to be world-readable.
+	return os.WriteFile(cachePath, data, 0o600)
 }
 
 // FetchAll fetches available images from all providers.

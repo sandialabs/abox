@@ -167,6 +167,10 @@ type HTTPConfig struct {
 	// reach despite the default SSRF deny of loopback/private/link-local/metadata
 	// ranges. Empty = deny all such targets. Shared by both filters.
 	AllowPrivateTargets []string `yaml:"allow_private_targets,omitempty"`
+	// AllowedPorts restricts the destination ports the proxy may reach. Empty =
+	// built-in defaults (443 for CONNECT/tunnel, 80+443 for absolute-URI forward
+	// requests). Widening it lets an allowlisted host be reached on other ports.
+	AllowedPorts []int `yaml:"allowed_ports,omitempty"`
 	// SecretInjections maps host-side secret values into outbound request headers
 	// so the guest never holds the raw credential. Each binding references a key in
 	// the per-instance secret store; only the non-sensitive mapping lives here.
@@ -819,6 +823,13 @@ func (i *Instance) Validate() error {
 	for _, cidr := range i.HTTP.AllowPrivateTargets {
 		if _, _, err := net.ParseCIDR(cidr); err != nil {
 			return fmt.Errorf("http: invalid allow_private_targets CIDR %q: %w", cidr, err)
+		}
+	}
+
+	// Validate allowed_ports range (1-65535); empty = built-in defaults.
+	for _, p := range i.HTTP.AllowedPorts {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("http: allowed_ports entries must be 1-65535 (got %d)", p)
 		}
 	}
 

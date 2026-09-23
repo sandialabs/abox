@@ -184,6 +184,9 @@ func assertBuildEgressPolicy(t *testing.T) {
 	if p.GuestDNSPort != 53 {
 		t.Errorf("BuildEgressPolicy().GuestDNSPort = %d, want 53 (standard guest DNS port)", p.GuestDNSPort)
 	}
+	if p.Gateway != inst.Gateway {
+		t.Errorf("BuildEgressPolicy().Gateway = %q, want %q", p.Gateway, inst.Gateway)
+	}
 }
 
 // assertOptionalInterfaces asserts the optional-interface discovery is

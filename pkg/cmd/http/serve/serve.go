@@ -84,6 +84,10 @@ func runServe(opts *Options, name string) error {
 	// config Load (config.ValidateMITMExceptions); Replace skips any that slip past.
 	server.SetMITMExceptions(setup.Inst.HTTP.MITMExceptions)
 
+	// Apply the destination-port allow-list. Empty/unset keeps the built-in
+	// defaults (443 for CONNECT, 80+443 for forward).
+	server.SetAllowedPorts(setup.Inst.HTTP.AllowedPorts)
+
 	// Load CA certificate for TLS MITM if enabled
 	if setup.Inst.HTTP.MITM {
 		if err := server.LoadCA(setup.Paths.CACert, setup.Paths.CAKey); err != nil {

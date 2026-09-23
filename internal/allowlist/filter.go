@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/armon/go-radix"
+	"github.com/miekg/dns"
 	"golang.org/x/net/idna"
 
 	"github.com/sandialabs/abox/internal/validation"
@@ -54,21 +55,16 @@ func ReverseDomain(name string) string {
 	if !strings.HasSuffix(name, ".") {
 		name += "."
 	}
-	labels := splitDomainName(name)
+	// Split on DNS presentation-format label boundaries (miekg/dns) rather than
+	// literal ".", so an escaped dot inside a label ("evil\.github.com.") stays a
+	// single label. A naive dot-split creates a matcher differential against how
+	// resolvers parse the same name, which could let a crafted label be reversed
+	// into a radix key that matches an allowlisted suffix it is not a subdomain of.
+	labels := dns.SplitDomainName(name)
 	for i, j := 0, len(labels)-1; i < j; i, j = i+1, j-1 {
 		labels[i], labels[j] = labels[j], labels[i]
 	}
 	return strings.Join(labels, ".") + "."
-}
-
-// splitDomainName splits a domain name into labels.
-// This is a simplified version that doesn't depend on miekg/dns.
-func splitDomainName(name string) []string {
-	name = strings.TrimSuffix(name, ".")
-	if name == "" {
-		return nil
-	}
-	return strings.Split(name, ".")
 }
 
 // NormalizeDomain ensures consistent domain format (lowercase, punycode ASCII,

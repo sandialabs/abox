@@ -42,6 +42,13 @@ const (
 
 	// EnvPrivilegeToken is the environment variable for the external helper auth token.
 	// Required when EnvPrivilegeSocket is set.
+	//
+	// Security note: a token passed via env var is readable by any same-UID
+	// process via /proc/<pid>/environ for the lifetime of this process. This is
+	// the weaker configuration; the normal spawn path pipes the token over stdin
+	// (see RunHelper) precisely to keep it out of the environment and /proc. Use
+	// the external-socket mode only in trusted, short-lived shells (e.g. e2e), and
+	// do not persist the token into shell history or dotfiles.
 	EnvPrivilegeToken = "ABOX_PRIVILEGE_TOKEN"
 
 	// EnvBackend explicitly selects a VM backend by name (e.g. "vmware"),
@@ -497,7 +504,10 @@ func (f *Factory) EgressClient() (rpc.EgressClient, error) {
 		return f.privilegeHelper.client, nil
 	}
 
-	// Check for external helper via environment variables
+	// Check for external helper via environment variables.
+	// Note: reading the token from the environment exposes it via
+	// /proc/<pid>/environ to same-UID processes; see EnvPrivilegeToken for why
+	// the spawn path prefers stdin.
 	if socketPath := os.Getenv(EnvPrivilegeSocket); socketPath != "" {
 		token := os.Getenv(EnvPrivilegeToken)
 		if token == "" {

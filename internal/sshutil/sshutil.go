@@ -45,6 +45,25 @@ const (
 	// clients (Ubuntu 20.04's 8.2, RHEL 8's 8.0, macOS Big Sur's 8.1) abort
 	// with "Bad configuration option" and exit 255 before connecting.
 	sshOptPubkeyAlgos = "PubkeyAcceptedKeyTypes=+ssh-ed25519"
+	// The following disable client-side forwarding that a compromised guest could
+	// exploit to reach back into the operator's session. A guest we connect to is
+	// untrusted (that is the whole point of the VM), so:
+	//   - ForwardAgent=no: guest root must never be able to use the operator's
+	//     ssh-agent to sign with keys it cannot read — that would convert a VM
+	//     compromise into operator-credential theft.
+	//   - ForwardX11=no / ForwardX11Trusted=no: no X11 channel back to the
+	//     operator's display (keystroke injection / screen capture surface).
+	// These are set as explicit -o flags so they OVERRIDE any ForwardAgent/
+	// ForwardX11 the operator may have enabled globally in ~/.ssh/config (a
+	// command-line -o wins over config-file values). abox itself never requests
+	// agent/X11 forwarding, so this only ever tightens behavior. We deliberately
+	// do NOT set ClearAllForwardings here: the `abox forward` tunnel feature
+	// (pkg/cmd/forward) relies on explicit -L/-R port forwards, which that option
+	// would cancel. Guest-side sshd config is only defense-in-depth (guest root
+	// can re-enable forwarding), so this client-side gate is the load-bearing one.
+	sshOptNoAgentFwd   = "ForwardAgent=no"
+	sshOptNoX11Fwd     = "ForwardX11=no"
+	sshOptNoX11Trusted = "ForwardX11Trusted=no"
 )
 
 func CommonOptions(paths *config.Paths) []string {
@@ -56,6 +75,9 @@ func CommonOptions(paths *config.Paths) []string {
 		"-o", "UserKnownHostsFile=" + paths.KnownHosts,
 		"-o", sshOptControlPath,
 		"-o", sshOptLogLevel,
+		"-o", sshOptNoAgentFwd,
+		"-o", sshOptNoX11Fwd,
+		"-o", sshOptNoX11Trusted,
 	}
 }
 
@@ -92,7 +114,11 @@ func BuildSCPArgs(paths *config.Paths, source, dest string, recursive bool) []st
 		prefix = []string{"-r", "-O"}
 	}
 	args = append(prefix, args...)
-	args = append(args, source, dest)
+	// "--" terminates option parsing so a source/dest that begins with "-"
+	// (attacker- or instance-influenced path/host) cannot be interpreted as a
+	// scp/ssh flag. The "/." suffix syntax the -O legacy mode relies on is
+	// unaffected by the separator.
+	args = append(args, "--", source, dest)
 	return args
 }
 

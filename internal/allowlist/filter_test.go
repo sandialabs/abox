@@ -1,10 +1,38 @@
 package allowlist
 
 import (
+	"reflect"
 	"sort"
 	"sync"
 	"testing"
+
+	"github.com/miekg/dns"
 )
+
+// TestSplitDomainName_EscapedDot verifies escaped-dot label handling: a label
+// containing an escaped dot (DNS presentation form) is treated as a single
+// label, not split on the literal ".". A naive split created a matcher
+// differential.
+func TestSplitDomainName_EscapedDot(t *testing.T) {
+	got := dns.SplitDomainName(`evil\.github.com.`)
+	want := []string{`evil\.github`, "com"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("SplitDomainName(escaped) = %#v, want %#v", got, want)
+	}
+}
+
+// TestFilter_IsAllowed_EscapedLabelNoBypass locks in that a crafted escaped-dot
+// label is not reversed into a key that matches an allowlisted suffix it is not
+// actually a subdomain of.
+func TestFilter_IsAllowed_EscapedLabelNoBypass(t *testing.T) {
+	f := NewFilter()
+	f.Add("github.com")
+	// Presentation name for a single label "evil.github" under "com": must NOT
+	// match the allowlisted github.com.
+	if f.IsAllowed(`evil\.github.com`) {
+		t.Error(`IsAllowed("evil\.github.com") should be false (not a subdomain of github.com)`)
+	}
+}
 
 func TestReverseDomain(t *testing.T) {
 	tests := []struct {
@@ -60,8 +88,8 @@ func TestNormalizeDomain(t *testing.T) {
 	}
 }
 
-// TestFilter_IsAllowed_IDN verifies the L6 fix: an allowlist entry and a query
-// match regardless of whether each is expressed in Unicode or punycode.
+// TestFilter_IsAllowed_IDN verifies that an allowlist entry and a query match
+// regardless of whether each is expressed in Unicode or punycode.
 func TestFilter_IsAllowed_IDN(t *testing.T) {
 	const puny = "xn--mnchen-3ya.de" // münchen.de
 

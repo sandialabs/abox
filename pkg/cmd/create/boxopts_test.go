@@ -39,6 +39,7 @@ var knownBoxfileKeys = map[string]string{
 	"http.mitm":                  "Options.MITM",
 	"http.max_connections":       "Options.MaxConnections",
 	"http.allow_private_targets": "Options.AllowPrivateTargets",
+	"http.allowed_ports":         "Options.AllowedPorts",
 	"http.secret_injections":     "Options.SecretInjections",
 	"http.mitm_exceptions":       "Options.MITMExceptions",
 	"monitor.enabled":            "Options.MonitorEnabled",

@@ -1,6 +1,10 @@
 <network xmlns:dnsmasq='http://libvirt.org/schemas/network/dnsmasq/1.0'>
   <name>{{.Bridge}}</name>
-  <bridge name='{{.Bridge}}' stp='on' delay='0'/>
+  <!-- STP disabled: this is a host-only bridge with no uplink/forward and a
+       single guest port, so there is no loop to prevent. Disabling it removes
+       BPDU processing as guest-facing attack surface (a guest cannot inject
+       spanning-tree frames to influence bridge topology). -->
+  <bridge name='{{.Bridge}}' stp='off' delay='0'/>
   <!--
     Host-only network with a STATIC guest address (no DHCP). The guest's IP,
     default route, and resolver are all configured via cloud-init (see

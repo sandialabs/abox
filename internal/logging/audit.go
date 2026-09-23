@@ -30,6 +30,7 @@ const (
 	ActionHTTPBlock         = "http.block"
 	ActionHTTPBlockSSRF     = "http.block.ssrf"
 	ActionHTTPBlockFronting = "http.block.domain_fronting"
+	ActionHTTPBlockPort     = "http.block.port"
 
 	// Filter allows worth auditing (permitted, but notable)
 	ActionHTTPAllowFronting = "http.allow.cross_origin"
