@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"golang.org/x/net/http/httpproxy"
-	"golang.org/x/net/http2"
 
 	"github.com/sandialabs/abox/internal/allowlist"
 	"github.com/sandialabs/abox/internal/cert"
@@ -81,8 +80,10 @@ type Server struct {
 	// path reads without locking; nil until SetSecretInjections is called.
 	secretInjections atomic.Pointer[map[string][]SecretRule]
 
-	http1Server *http.Server  // used as BaseConfig for h2 and as the per-conn http.Server template for h1
-	http2Server *http2.Server // h2 server for intercepted MITM connections
+	// http1Server is the timeout template for the per-connection http.Server
+	// that serves an intercepted MITM connection — h1 and h2 alike, since
+	// net/http derives its HTTP/2 config from these same fields.
+	http1Server *http.Server
 
 	// hijack lifecycle: outer http.Server.Shutdown does not track hijacked
 	// connections, so we manage MITM/tunnel session teardown ourselves.
@@ -179,10 +180,16 @@ func NewServer(filter *allowlist.Filter, passive bool) *Server {
 	// httpproxy.FromEnvironment (not http.ProxyFromEnvironment) because the
 	// stdlib func caches the environment in a package-level sync.Once.
 	s.proxyForURL = httpproxy.FromEnvironment().ProxyFunc()
+	// Protocols enables the h2 round-tripper so upstream h2 responses
+	// (including trailers) are forwarded by ReverseProxy. Setting it
+	// supersedes ForceAttemptHTTP2.
+	transportProtocols := new(http.Protocols)
+	transportProtocols.SetHTTP1(true)
+	transportProtocols.SetHTTP2(true)
 	s.transport = &http.Transport{
 		Proxy:                 func(r *http.Request) (*url.URL, error) { return s.proxyForURL(r.URL) },
 		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, Control: s.dialControl}).DialContext,
-		ForceAttemptHTTP2:     true,
+		Protocols:             transportProtocols,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -192,14 +199,8 @@ func NewServer(filter *allowlist.Filter, passive bool) *Server {
 			NextProtos: []string{"h2", protoHTTP11},
 		},
 	}
-	// http2.ConfigureTransport wires up the h2 round-tripper so upstream h2
-	// responses (including trailers) are forwarded by ReverseProxy.
-	if err := http2.ConfigureTransport(s.transport); err != nil {
-		// Should not fail with our config; treat as programming error.
-		logging.Debug("http2.ConfigureTransport failed", "err", err)
-	}
 	s.reverseProxy = newReverseProxy(s)
-	// http1Server is the config template for intercepted MITM h1 connections
+	// http1Server is the config template for intercepted MITM connections
 	// (proxy.go intercept clones the relevant fields per-call). ReadHeaderTimeout
 	// bounds slow-headers attacks; IdleTimeout bounds keepalive lingering. We
 	// deliberately omit WriteTimeout here — it would kill long-lived MITM
@@ -208,7 +209,6 @@ func NewServer(filter *allowlist.Filter, passive bool) *Server {
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-	s.http2Server = &http2.Server{}
 	s.hijackCtx, s.hijackCancel = context.WithCancel(context.Background())
 	// Matches the upstream transport's TLSHandshakeTimeout above.
 	s.handshakeTimeout = 10 * time.Second

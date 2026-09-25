@@ -20,11 +20,22 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/net/http2"
-
 	"github.com/sandialabs/abox/internal/allowlist"
 	"github.com/sandialabs/abox/internal/cert"
 )
+
+// clientProtocols returns the protocol set for a test client transport. Stating
+// this explicitly matters: the alternative, ForceAttemptHTTP2: false, only
+// disables h2 as a side effect of the Transport's conservative "custom
+// TLSClientConfig means don't auto-enable h2" rule. That coupling is invisible
+// and would silently re-enable h2 — quietly turning the h1-only cases into h2
+// ones — if a caller ever dropped its custom TLS config.
+func clientProtocols(h2 bool) *http.Protocols {
+	p := new(http.Protocols)
+	p.SetHTTP1(true)
+	p.SetHTTP2(h2)
+	return p
+}
 
 // allowLoopback opts the test's loopback origin servers into the SSRF policy.
 // Production proxies never dial loopback; tests use 127.0.0.1 httptest backends
@@ -114,8 +125,8 @@ func clientTrustingAboxCA(t *testing.T, caPEM []byte, proxyURL *url.URL, forceH2
 		nextProtos = []string{"h2", "http/1.1"}
 	}
 	tr := &http.Transport{
-		Proxy:             http.ProxyURL(proxyURL),
-		ForceAttemptHTTP2: forceH2,
+		Proxy:     http.ProxyURL(proxyURL),
+		Protocols: clientProtocols(forceH2),
 		TLSClientConfig: &tls.Config{
 			RootCAs:    pool,
 			NextProtos: nextProtos,
@@ -261,18 +272,15 @@ func TestProxy_Intercept_HTTP2_DomainFronting(t *testing.T) {
 	// with 403 even though the CONNECT target was allowed.
 	pool := x509.NewCertPool()
 	pool.AppendCertsFromPEM(caPEM)
+	// Enable h2 on the transport so we can override :authority via Host header.
 	tr := &http.Transport{
-		Proxy:             http.ProxyURL(proxyURL),
-		ForceAttemptHTTP2: true,
+		Proxy:     http.ProxyURL(proxyURL),
+		Protocols: clientProtocols(true),
 		TLSClientConfig: &tls.Config{
 			RootCAs:    pool,
 			NextProtos: []string{"h2", "http/1.1"},
 			ServerName: "127.0.0.1", // CONNECT target SNI
 		},
-	}
-	// Configure the h2 transport so we can override :authority via Host header.
-	if err := http2.ConfigureTransport(tr); err != nil {
-		t.Fatalf("ConfigureTransport: %v", err)
 	}
 
 	client := &http.Client{Transport: tr}
@@ -1003,16 +1011,13 @@ func TestProxy_Intercept_HTTP2_FrontingAllowedLogged(t *testing.T) {
 	pool := x509.NewCertPool()
 	pool.AppendCertsFromPEM(caCertPEM)
 	tr := &http.Transport{
-		Proxy:             http.ProxyURL(proxyURL),
-		ForceAttemptHTTP2: true,
+		Proxy:     http.ProxyURL(proxyURL),
+		Protocols: clientProtocols(true),
 		TLSClientConfig: &tls.Config{
 			RootCAs:    pool,
 			NextProtos: []string{"h2", "http/1.1"},
 			ServerName: "127.0.0.1", // CONNECT target SNI
 		},
-	}
-	if err := http2.ConfigureTransport(tr); err != nil {
-		t.Fatalf("ConfigureTransport: %v", err)
 	}
 	client := &http.Client{Transport: tr}
 	req, _ := http.NewRequest("GET", ts.URL+"/", nil)

@@ -17,8 +17,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/http2"
-
 	"github.com/sandialabs/abox/internal/logging"
 )
 
@@ -36,6 +34,16 @@ const (
 	schemeHTTP  = "http"     // URL scheme and traffic-logger label
 	schemeHTTPS = "https"    // URL scheme
 )
+
+// mitmProtocols is the protocol set for the per-connection http.Server that
+// serves an intercepted MITM connection. Immutable after init and only ever
+// read by net/http, so one instance is shared by every such server.
+var mitmProtocols = func() *http.Protocols {
+	p := new(http.Protocols)
+	p.SetHTTP1(true)
+	p.SetHTTP2(true)
+	return p
+}()
 
 // requestDecision is the verdict for a fully-parsed inbound request (forward
 // proxy or post-MITM, h1 or h2).
@@ -164,41 +172,39 @@ func (h *handler) intercept(w http.ResponseWriter, connectTarget string) {
 		return
 	}
 	// Clear the deadline so long-lived MITM streams (WebSockets, SSE, large
-	// downloads) aren't killed. Must run before the h2/h1 dispatch below.
+	// downloads) aren't killed. Must run before the serve call below.
 	_ = conn.SetDeadline(time.Time{})
 
 	inner := h.requestHandler(connectTarget)
-	switch tlsConn.ConnectionState().NegotiatedProtocol {
-	case "h2":
-		// http1Server is shared as BaseConfig — http2.Server reads timeouts
-		// and limits from it without mutating.
-		h.s.http2Server.ServeConn(tlsConn, &http2.ServeConnOpts{
-			Context:    h.s.hijackCtx,
-			Handler:    inner,
-			BaseConfig: h.s.http1Server,
-		})
-	default:
-		// Fresh per-call http.Server because http.Server contains atomic state
-		// that must not be copied. Mirror ReadHeaderTimeout/IdleTimeout but
-		// NOT WriteTimeout — that would kill long-lived MITM connections
-		// (WebSockets, SSE, large downloads).
-		l := newOneShotListener(tlsConn)
-		srv := &http.Server{
-			ReadHeaderTimeout: h.s.http1Server.ReadHeaderTimeout,
-			IdleTimeout:       h.s.http1Server.IdleTimeout,
-			Handler:           inner,
-			BaseContext:       func(net.Listener) context.Context { return h.s.hijackCtx },
-			// Close the listener when our one conn finishes so srv.Serve's
-			// next Accept returns and Serve exits. Without this, Serve loops
-			// on Accept forever after the conn closes.
-			ConnState: func(_ net.Conn, state http.ConnState) {
-				if state == http.StateClosed || state == http.StateHijacked {
-					_ = l.Close()
-				}
-			},
-		}
-		_ = srv.Serve(l)
+	// One path serves both h2 and h1: http.Server.Serve sees a *tls.Conn whose
+	// handshake is already done, reads the negotiated ALPN protocol, and hands
+	// "h2" off to its internal HTTP/2 handler. TLSConfig is nil here, which is
+	// precisely the case where Serve populates TLSNextProto for us.
+	//
+	// Fresh per-call http.Server because http.Server contains atomic state
+	// that must not be copied. Mirror ReadHeaderTimeout/IdleTimeout but
+	// NOT WriteTimeout — that would kill long-lived MITM connections
+	// (WebSockets, SSE, large downloads). For h2 these carry into the HTTP/2
+	// config, which is what the old http2.ServeConnOpts.BaseConfig did.
+	l := newOneShotListener(tlsConn)
+	srv := &http.Server{
+		Protocols:         mitmProtocols,
+		ReadHeaderTimeout: h.s.http1Server.ReadHeaderTimeout,
+		IdleTimeout:       h.s.http1Server.IdleTimeout,
+		Handler:           inner,
+		BaseContext:       func(net.Listener) context.Context { return h.s.hijackCtx },
+		// Close the listener when our one conn finishes so srv.Serve's
+		// next Accept returns and Serve exits. Without this, Serve loops
+		// on Accept forever after the conn closes. This fires on the h2 path
+		// too: only the StateActive transition skips ConnState hooks, and the
+		// StateClosed one still runs when the h2 session ends.
+		ConnState: func(_ net.Conn, state http.ConnState) {
+			if state == http.StateClosed || state == http.StateHijacked {
+				_ = l.Close()
+			}
+		},
 	}
+	_ = srv.Serve(l)
 }
 
 // handleForward serves a forward-proxy request (GET http://example.com/...).
