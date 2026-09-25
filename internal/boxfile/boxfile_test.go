@@ -137,6 +137,47 @@ memory: 8192
 	}
 }
 
+// TestLoadFile_HonorsExplicitFilename pins that LoadFile reads the file it is
+// given. Load always reads "abox.yaml" from a directory, so a caller that
+// accepts a user-supplied filename (create --from-file) and routes it through
+// Load(filepath.Dir(path)) silently parses a different file.
+func TestLoadFile_HonorsExplicitFilename(t *testing.T) {
+	dir := t.TempDir()
+	named := filepath.Join(dir, "custom.yaml")
+	if err := os.WriteFile(named, []byte("version: 1\nname: from-custom\n"), 0o644); err != nil {
+		t.Fatalf("failed to create custom.yaml: %v", err)
+	}
+	// A decoy in the same directory: the name Load would have picked.
+	decoy := filepath.Join(dir, "abox.yaml")
+	if err := os.WriteFile(decoy, []byte("version: 1\nname: from-decoy\n"), 0o644); err != nil {
+		t.Fatalf("failed to create abox.yaml: %v", err)
+	}
+
+	box, absDir, err := LoadFile(named)
+	if err != nil {
+		t.Fatalf("LoadFile() error = %v", err)
+	}
+	if box.Name != "from-custom" {
+		t.Errorf("LoadFile().Name = %q, want %q", box.Name, "from-custom")
+	}
+	if absDir != dir {
+		t.Errorf("LoadFile() absDir = %q, want %q", absDir, dir)
+	}
+}
+
+// TestLoadFile_NotFoundNamesTheFile checks the not-found error names the file
+// the caller asked for, not the hardcoded "abox.yaml".
+func TestLoadFile_NotFoundNamesTheFile(t *testing.T) {
+	dir := t.TempDir()
+	_, _, err := LoadFile(filepath.Join(dir, "custom.yaml"))
+	if err == nil {
+		t.Fatal("LoadFile() error = nil, want not-found error")
+	}
+	if !strings.Contains(err.Error(), "custom.yaml") {
+		t.Errorf("LoadFile() error = %q, want it to name custom.yaml", err)
+	}
+}
+
 func TestLoad_RejectsMissingVersion(t *testing.T) {
 	dir := t.TempDir()
 	boxfilePath := filepath.Join(dir, "abox.yaml")

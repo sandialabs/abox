@@ -171,6 +171,13 @@ type HTTPConfig struct {
 	// so the guest never holds the raw credential. Each binding references a key in
 	// the per-instance secret store; only the non-sensitive mapping lives here.
 	SecretInjections []SecretInjection `yaml:"secret_injections,omitempty"`
+	// MITMExceptions lists domains carried as a transparent TLS tunnel (no
+	// interception) even when MITM is enabled — for apps that pin certificates and
+	// break under interception. An exception only downgrades MITM to a tunnel for an
+	// already-allowlisted host; it never grants access. Tunneling forfeits inner-Host
+	// inspection and domain-fronting detection for those domains (scoped equivalent
+	// of mitm: false). A host matches the domain and all its subdomains.
+	MITMExceptions []string `yaml:"mitm_exceptions,omitempty"`
 }
 
 // SecretInjection binds a stored secret value to an outbound request header for a
@@ -221,6 +228,61 @@ func ValidateSecretInjections(injections []SecretInjection) error {
 			return fmt.Errorf("secret_injections[%d]: duplicate host+header (%s, %s)", i, inj.Host, inj.Header)
 		}
 		seen[dedupe] = struct{}{}
+	}
+	return nil
+}
+
+// ValidateMITMExceptions validates the list of domains that bypass TLS interception
+// (carried as a transparent tunnel even when MITM is enabled). Shared by
+// Instance.Validate (guards hand-edited config.yaml) and boxfile.Validate.
+//
+// A leading "*." is accepted and stripped: the runtime matcher (allowlist.Filter)
+// already matches a domain and all its subdomains, so "*.example.com" and
+// "example.com" are equivalent.
+//
+// It is a hard error for a secret-injection host to be covered by an exception:
+// injection happens only on MITM-intercepted requests, so tunneling such a host
+// would silently forward the guest's request without the injected credential (and
+// without stripping a guest-supplied one), defeating the credential boundary.
+func ValidateMITMExceptions(exceptions []string, injections []SecretInjection) error {
+	if len(exceptions) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(exceptions))
+	// matcher mirrors the runtime suffix-matching semantics so the conflict check
+	// below uses the exact same matching the proxy applies at request time.
+	matcher := allowlist.NewFilter()
+	for i, host := range exceptions {
+		bare := strings.TrimPrefix(strings.TrimSpace(host), "*.")
+		// Reject any residual wildcard (e.g. "*.*.example.com" or "a.*.b"): only a
+		// single leading "*." is meaningful (the suffix matcher already covers all
+		// subdomains). validation.ValidateDomain would accept a leftover "*." label,
+		// but the runtime stores it as a literal "*" that matches nothing — a silently
+		// inert entry that would still MITM the pinned app with no error.
+		if strings.Contains(bare, "*") {
+			return fmt.Errorf("mitm_exceptions[%d]: invalid host %q: wildcard only allowed as a single leading %q", i, host, "*.")
+		}
+		// Normalize to the canonical form the runtime matcher uses (lowercase +
+		// punycode) BEFORE validating, so IDN entries like "münchen.de" are checked
+		// in their ASCII form — exactly as allowlist.Add does.
+		norm := allowlist.NormalizeDomain(bare)
+		if err := validation.ValidateDomain(strings.TrimSuffix(norm, ".")); err != nil {
+			return fmt.Errorf("mitm_exceptions[%d]: invalid host: %w", i, err)
+		}
+		// Dedupe on the canonical form so IDN-equivalent or "*."-prefixed duplicates
+		// can't slip past.
+		if _, dup := seen[norm]; dup {
+			return fmt.Errorf("mitm_exceptions[%d]: duplicate host (%q)", i, host)
+		}
+		seen[norm] = struct{}{}
+		matcher.Add(bare)
+	}
+	// A secret-injection host suffix-covered by an exception can never receive its
+	// injected credential (a tunnel has no request to modify) — reject the overlap.
+	for j, inj := range injections {
+		if matcher.IsAllowed(inj.Host) {
+			return fmt.Errorf("mitm_exceptions conflicts with secret_injections[%d] host %q: a tunneled host cannot receive injected credentials", j, inj.Host)
+		}
 	}
 	return nil
 }
@@ -763,6 +825,12 @@ func (i *Instance) Validate() error {
 	// Validate secret-injection bindings so a hand-edited config.yaml fails at
 	// Load rather than only when the daemon starts.
 	if err := ValidateSecretInjections(i.HTTP.SecretInjections); err != nil {
+		return fmt.Errorf("http: %w", err)
+	}
+
+	// Validate MITM exceptions (and their conflict with secret injections) so a
+	// hand-edited config.yaml fails at Load rather than only when the daemon starts.
+	if err := ValidateMITMExceptions(i.HTTP.MITMExceptions, i.HTTP.SecretInjections); err != nil {
 		return fmt.Errorf("http: %w", err)
 	}
 

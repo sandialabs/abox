@@ -181,6 +181,15 @@ func runUpTUI(ctx context.Context, opts *Options, box *boxfile.Boxfile, boxDir s
 // Unified work functions (called by both TUI and plain paths)
 // ---------------------------------------------------------------------------
 
+// startRunFn is a test seam for the start phase. start.Run spawns the filter
+// daemons as detached child processes (see startDaemonProcess in
+// pkg/cmd/start/filter.go) whose socket/PID files live in $XDG_RUNTIME_DIR, not
+// under the instance directory — so a unit test that reaches it escapes its
+// temp-dir sandbox and leaves processes behind. Tests swap this for a no-op to
+// exercise the create phase alone. Matches the startDNSFilterFn/applyFilteredFn
+// seams in pkg/cmd/start, which exist for the same reason.
+var startRunFn = start.Run
+
 // doNewInstance runs the full create+start+secure+provision pipeline.
 func buildNewInstanceSteps(box *boxfile.Boxfile, boxDir string) ([]tui.Step, error) {
 	steps := []tui.Step{
@@ -208,49 +217,12 @@ func buildNewInstanceSteps(box *boxfile.Boxfile, boxDir string) ([]tui.Step, err
 func doNewInstance(ctx context.Context, opts *Options, box *boxfile.Boxfile, boxDir string, notify tui.PhaseNotifier) error {
 	w := opts.Factory.IO.Out
 
-	// Phase 0: Create
+	// Phase 0: Create. Hand the parsed boxfile to create rather than mapping it
+	// here: create owns the single abox.yaml -> Options mapping, and it resolves
+	// monitor policies and overrides.<backend>.template itself (the latter needs
+	// the backend, which it detects).
 	notify.PhaseStart(0)
-	var monitorPolicies []string
-	if len(box.Monitor.Policies) > 0 {
-		var err error
-		monitorPolicies, err = box.ResolvePolicyPaths(boxDir)
-		if err != nil {
-			notify.PhaseDone(0, err)
-			return err
-		}
-	}
-	// Detect backend to load the correct overrides (avoids hardcoding a backend name).
-	be, err := opts.Factory.AutoDetectBackend()
-	if err != nil {
-		notify.PhaseDone(0, err)
-		return fmt.Errorf("failed to detect backend: %w", err)
-	}
-	templateContent, err := box.LoadOverrideContent(be.Name(), "template", boxDir)
-	if err != nil {
-		notify.PhaseDone(0, err)
-		return err
-	}
-
-	createOpts := &create.Options{
-		Factory:             opts.Factory,
-		CPUs:                box.CPUs,
-		Memory:              box.Memory,
-		Base:                box.Base,
-		Upstream:            box.DNS.Upstream,
-		Disk:                box.Disk,
-		Subnet:              box.Subnet,
-		User:                box.User,
-		Allowlist:           box.Allowlist,
-		MonitorEnabled:      box.Monitor.Enabled,
-		MonitorVersion:      box.Monitor.Version,
-		MonitorKprobes:      box.Monitor.Kprobes,
-		MonitorPolicies:     monitorPolicies,
-		MITM:                box.GetMITM(),
-		AllowPrivateTargets: box.GetAllowPrivateTargets(),
-		TemplateContent:     templateContent,
-		Brief:               true,
-	}
-	if err := create.Run(ctx, createOpts, box.Name); err != nil {
+	if err := create.RunFromBoxfile(ctx, opts.Factory, box, boxDir, true); err != nil {
 		notify.PhaseDone(0, err)
 		return fmt.Errorf("failed to create instance: %w", err)
 	}
@@ -258,7 +230,7 @@ func doNewInstance(ctx context.Context, opts *Options, box *boxfile.Boxfile, box
 
 	// Phase 1: Start
 	notify.PhaseStart(1)
-	if err := start.Run(ctx, &start.Options{Factory: opts.Factory, Brief: true}, box.Name); err != nil {
+	if err := startRunFn(ctx, &start.Options{Factory: opts.Factory, Brief: true}, box.Name); err != nil {
 		notify.PhaseDone(1, err)
 		return fmt.Errorf("failed to start instance: %w", err)
 	}
@@ -266,7 +238,7 @@ func doNewInstance(ctx context.Context, opts *Options, box *boxfile.Boxfile, box
 
 	// Phase 2: Secure
 	notify.PhaseStart(2)
-	be, err = opts.Factory.BackendFor(box.Name)
+	be, err := opts.Factory.BackendFor(box.Name)
 	if err != nil {
 		notify.PhaseDone(2, err)
 		return fmt.Errorf("failed to get backend: %w", err)
@@ -324,7 +296,7 @@ func doExistingInstance(ctx context.Context, opts *Options, box *boxfile.Boxfile
 	}
 
 	fmt.Fprintf(w, "Starting existing instance %q...\n", box.Name)
-	if err := start.Run(ctx, &start.Options{Factory: opts.Factory, Brief: true}, box.Name); err != nil {
+	if err := startRunFn(ctx, &start.Options{Factory: opts.Factory, Brief: true}, box.Name); err != nil {
 		notify.PhaseDone(0, err)
 		return fmt.Errorf("failed to start instance: %w", err)
 	}

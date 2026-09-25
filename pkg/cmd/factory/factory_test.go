@@ -3,6 +3,7 @@ package factory
 import (
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/sandialabs/abox/internal/backend"
@@ -278,3 +279,104 @@ func (nonSetterBackend) ResourceNames(instanceName string) backend.ResourceNames
 }
 func (nonSetterBackend) GenerateMAC() string { return "00:00:00:00:00:00" }
 func (nonSetterBackend) StorageDir() string  { return "/tmp/nonsetter" }
+
+// TestBackendForNew_Precedence covers the abox.yaml backend: key. The tiers are
+// ABOX_BACKEND > preferred > auto-detect. The middle tier is the fragile one:
+// resolveBackend falls through to AutoDetect when the env var is unset, so
+// consulting it first would make preferred unreachable wherever detection
+// succeeds — which is everywhere that can actually create a VM.
+func TestBackendForNew_Precedence(t *testing.T) {
+	setup := func(t *testing.T) {
+		t.Helper()
+		backend.ResetForTesting()
+		t.Cleanup(backend.ResetForTesting)
+		// "auto" has the lowest priority number, so AutoDetect picks it.
+		backend.Register("auto", 1, func() backend.Backend { return &fakeBackend{name: "auto"} })
+		backend.Register("chosen", 50, func() backend.Backend { return &fakeBackend{name: "chosen"} })
+		backend.Register("fromenv", 60, func() backend.Backend { return &fakeBackend{name: "fromenv"} })
+	}
+
+	t.Run("preferred beats auto-detect", func(t *testing.T) {
+		setup(t)
+		t.Setenv(EnvBackend, "")
+
+		b, err := (&Factory{}).BackendForNew("chosen")
+		if err != nil {
+			t.Fatalf("BackendForNew() error = %v", err)
+		}
+		if b.Name() != "chosen" {
+			t.Errorf("BackendForNew(%q) = %q, want the abox.yaml backend to win over auto-detect",
+				"chosen", b.Name())
+		}
+	})
+
+	t.Run("ABOX_BACKEND beats preferred", func(t *testing.T) {
+		setup(t)
+		t.Setenv(EnvBackend, "fromenv")
+
+		b, err := (&Factory{}).BackendForNew("chosen")
+		if err != nil {
+			t.Fatalf("BackendForNew() error = %v", err)
+		}
+		if b.Name() != "fromenv" {
+			t.Errorf("BackendForNew() = %q, want %s to win over the abox.yaml backend",
+				b.Name(), EnvBackend)
+		}
+	})
+
+	t.Run("empty preferred auto-detects", func(t *testing.T) {
+		setup(t)
+		t.Setenv(EnvBackend, "")
+
+		b, err := (&Factory{}).BackendForNew("")
+		if err != nil {
+			t.Fatalf("BackendForNew() error = %v", err)
+		}
+		if b.Name() != "auto" {
+			t.Errorf("BackendForNew(\"\") = %q, want the auto-detected backend", b.Name())
+		}
+	})
+
+	t.Run("unknown preferred names abox.yaml", func(t *testing.T) {
+		setup(t)
+		t.Setenv(EnvBackend, "")
+
+		_, err := (&Factory{}).BackendForNew("nope")
+		if err == nil {
+			t.Fatal("BackendForNew(unknown) error = nil, want an error")
+		}
+		if !strings.Contains(err.Error(), "abox.yaml") {
+			t.Errorf("error = %q, want it to say the backend came from abox.yaml", err)
+		}
+	})
+}
+
+// TestBackendForNew_RejectsExperimental pins that an experimental backend cannot
+// be selected from abox.yaml. Auto-detection never picks one and ABOX_BACKEND is
+// a deliberate per-operator action, but an abox.yaml is committed and shared
+// across a team.
+func TestBackendForNew_RejectsExperimental(t *testing.T) {
+	backend.ResetForTesting()
+	t.Cleanup(backend.ResetForTesting)
+	backend.Register("stable", 1, func() backend.Backend { return &fakeBackend{name: "stable"} })
+	backend.RegisterExperimental("risky", 50, func() backend.Backend { return &fakeBackend{name: "risky"} })
+	t.Setenv(EnvBackend, "")
+
+	_, err := (&Factory{}).BackendForNew("risky")
+	if err == nil {
+		t.Fatal("BackendForNew(experimental) error = nil, want rejection")
+	}
+	if !strings.Contains(err.Error(), "experimental") || !strings.Contains(err.Error(), EnvBackend) {
+		t.Errorf("error = %q, want it to say the backend is experimental and point at %s", err, EnvBackend)
+	}
+
+	// The same backend must still be reachable the deliberate way.
+	t.Setenv(EnvBackend, "risky")
+	b, err := (&Factory{}).BackendForNew("")
+	if err != nil {
+		t.Fatalf("BackendForNew() via %s error = %v", EnvBackend, err)
+	}
+	if b.Name() != "risky" {
+		t.Errorf("BackendForNew() = %q, want %s to still select the experimental backend", b.Name(), EnvBackend)
+	}
+}

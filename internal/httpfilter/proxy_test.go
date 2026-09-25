@@ -381,6 +381,85 @@ func TestProxy_ConnectTunnel(t *testing.T) {
 	}
 }
 
+func TestProxy_MITMException_Tunnel(t *testing.T) {
+	// Plain TCP echo upstream (no TLS). With MITM ENABLED but the host listed as a
+	// MITM exception, decideConnect must return actionTunnel: a raw byte echo then
+	// succeeds. If interception happened instead, the proxy would attempt an inner
+	// TLS handshake against our raw-byte client and the echo would never arrive.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		buf := make([]byte, 1)
+		if _, err := c.Read(buf); err != nil {
+			return
+		}
+		_, _ = c.Write(bytes.ToUpper(buf))
+	}()
+
+	// MITM loaded (mitmReady=true) AND 127.0.0.1 is an exception → tunnel.
+	caCertPEM, caKeyPEM, err := cert.GenerateCA("test-ca")
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	tmpDir := t.TempDir()
+	cp := filepath.Join(tmpDir, "ca.pem")
+	kp := filepath.Join(tmpDir, "key.pem")
+	_ = os.WriteFile(cp, caCertPEM, 0o644)
+	_ = os.WriteFile(kp, caKeyPEM, 0o600)
+
+	filter := allowlist.NewFilter()
+	filter.Add("127.0.0.1")
+	server := NewServer(filter, false)
+	allowLoopback(t, server)
+	if err := server.LoadCA(cp, kp); err != nil {
+		t.Fatalf("LoadCA: %v", err)
+	}
+	server.SetMITMExceptions([]string{"127.0.0.1"})
+	if err := server.Start("127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = server.Shutdown(context.Background()) }()
+
+	proxyConn, err := net.DialTimeout("tcp", server.listener.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer proxyConn.Close()
+	target := ln.Addr().String()
+	connectReq := "CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n"
+	if _, err := proxyConn.Write([]byte(connectReq)); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	br := bufio.NewReader(proxyConn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT status = %d, want 200", resp.StatusCode)
+	}
+
+	// Raw byte echo proves the connection is a transparent tunnel, not MITM'd.
+	if _, err := proxyConn.Write([]byte("a")); err != nil {
+		t.Fatalf("write 'a': %v", err)
+	}
+	got := make([]byte, 1)
+	if _, err := io.ReadFull(br, got); err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if got[0] != 'A' {
+		t.Errorf("tunnel echo = %q, want %q", got, "A")
+	}
+}
+
 func TestProxy_ShutdownDrainsInFlightIntercept(t *testing.T) {
 	// Verify that Shutdown returns promptly even when an h2 MITM session is
 	// in-flight (would otherwise hang because the inner server keeps reading).

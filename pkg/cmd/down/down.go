@@ -67,8 +67,9 @@ Use --suffix to target an instance created with "abox up --suffix".`,
 }
 
 func runDown(ctx context.Context, opts *Options) error {
-	// Load abox.yaml
-	box, boxDir, err := boxfile.Load(opts.Dir)
+	// Load abox.yaml leniently: teardown only needs the instance name, so an
+	// unknown key must not stand between the user and stopping a running VM.
+	box, boxDir, err := boxfile.LoadLenient(opts.Dir)
 	if err != nil {
 		return err
 	}

@@ -2,12 +2,16 @@ package create
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sandialabs/abox/internal/backend"
 	"github.com/sandialabs/abox/internal/backend/mock"
+	"github.com/sandialabs/abox/internal/boxfile"
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/iostreams"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
@@ -447,4 +451,258 @@ func TestNewCmdCreate_RequiresName(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when no name and no --from-file is provided")
 	}
+}
+
+// writeBoxfile writes an abox.yaml into a fresh temp dir and returns its path.
+func writeBoxfile(t *testing.T, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "abox.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write abox.yaml: %v", err)
+	}
+	return path
+}
+
+// boxfileWithHTTPKeys is an abox.yaml exercising every key that one of the two
+// former mapping sites used to drop.
+const boxfileWithHTTPKeys = `version: 1
+name: %s
+cpus: 2
+memory: 4096
+disk: 20G
+base: ubuntu-24.04
+allowlist:
+  - allowed.example.com
+  - second.example.com
+http:
+  max_connections: 1024
+  mitm_exceptions:
+    - pinned.example.com
+  secret_injections:
+    - key: token
+      host: api.example.com
+      header: x-api-key
+monitor:
+  kprobe_multi: true
+`
+
+// assertDroppedKeysPersisted checks the abox.yaml keys that used to be silently
+// dropped actually reached the instance config and allowlist file.
+func assertDroppedKeysPersisted(t *testing.T, name string) {
+	t.Helper()
+	inst, paths, err := config.Load(name)
+	if err != nil {
+		t.Fatalf("config.Load after create: %v", err)
+	}
+
+	if got := inst.HTTP.MITMExceptions; len(got) != 1 || got[0] != "pinned.example.com" {
+		t.Errorf("inst.HTTP.MITMExceptions = %v, want [pinned.example.com]", got)
+	}
+	if got := inst.HTTP.SecretInjections; len(got) != 1 || got[0].Host != "api.example.com" {
+		t.Errorf("inst.HTTP.SecretInjections = %v, want one binding for api.example.com", got)
+	}
+	if inst.HTTP.MaxConnections != 1024 {
+		t.Errorf("inst.HTTP.MaxConnections = %d, want 1024", inst.HTTP.MaxConnections)
+	}
+	if !inst.Monitor.KprobeMulti {
+		t.Error("inst.Monitor.KprobeMulti = false, want true")
+	}
+
+	data, err := os.ReadFile(paths.Allowlist)
+	if err != nil {
+		t.Fatalf("read allowlist: %v", err)
+	}
+	for _, domain := range []string{"allowed.example.com", "second.example.com"} {
+		if !strings.Contains(string(data), domain) {
+			t.Errorf("allowlist file missing %q from abox.yaml; got:\n%s", domain, data)
+		}
+	}
+}
+
+// TestRunCreate_FromFileHonorsBoxfileKeys covers `abox create --from-file`,
+// which used to drop allowlist: entirely (writing the deny-everything default
+// instead) because loadFromBoxfile never assigned opts.Allowlist.
+func TestRunCreate_FromFileHonorsBoxfileKeys(t *testing.T) {
+	isolateDataHome(t)
+	registerMockBackend(t, "mock", &mock.Backend{})
+
+	path := writeBoxfile(t, fmt.Sprintf(boxfileWithHTTPKeys, "fromfile"))
+	opts := &Options{Factory: newTestFactory(t), FromFile: path, Brief: true}
+
+	if err := Run(context.Background(), opts, ""); err != nil {
+		t.Fatalf("Run(--from-file) error = %v", err)
+	}
+	assertDroppedKeysPersisted(t, "fromfile")
+}
+
+// TestRunFromBoxfile_HonorsBoxfileKeys covers the `abox up` path, which used to
+// hand-build create.Options and silently dropped http.secret_injections,
+// http.mitm_exceptions, http.max_connections and monitor.kprobe_multi.
+func TestRunFromBoxfile_HonorsBoxfileKeys(t *testing.T) {
+	isolateDataHome(t)
+	registerMockBackend(t, "mock", &mock.Backend{})
+
+	path := writeBoxfile(t, fmt.Sprintf(boxfileWithHTTPKeys, "fromboxfile"))
+	box, boxDir, err := boxfile.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+
+	if err := RunFromBoxfile(context.Background(), newTestFactory(t), box, boxDir, true); err != nil {
+		t.Fatalf("RunFromBoxfile() error = %v", err)
+	}
+	assertDroppedKeysPersisted(t, "fromboxfile")
+}
+
+// TestRunCreate_BoxfileBeatsNoMITM pins the --from-file precedence rule: the
+// file wins over CLI flags for every option, --no-mitm included. The NoMITM
+// inversion therefore has to stay above applyBoxfile in Run. Changing this is a
+// deliberate semantic change to --from-file, not a refactor side effect.
+func TestRunCreate_BoxfileBeatsNoMITM(t *testing.T) {
+	isolateDataHome(t)
+	registerMockBackend(t, "mock", &mock.Backend{})
+
+	path := writeBoxfile(t, "version: 1\nname: mitmfile\ncpus: 2\nmemory: 4096\nhttp:\n  mitm: true\n")
+	opts := &Options{Factory: newTestFactory(t), FromFile: path, NoMITM: true, Brief: true}
+
+	if err := Run(context.Background(), opts, ""); err != nil {
+		t.Fatalf("Run(--from-file --no-mitm) error = %v", err)
+	}
+
+	inst, _, err := config.Load("mitmfile")
+	if err != nil {
+		t.Fatalf("config.Load after create: %v", err)
+	}
+	if !inst.HTTP.MITM {
+		t.Error("inst.HTTP.MITM = false; the boxfile's mitm: true must win over --no-mitm")
+	}
+}
+
+// TestApplyBoxfile_ClaudeExample guards the shipped example whose documented
+// `abox up` workflow silently produced an instance with no credential
+// injection, defeating the feature the example exists to demonstrate.
+func TestApplyBoxfile_ClaudeExample(t *testing.T) {
+	box, boxDir, err := boxfile.LoadFile(filepath.Join("..", "..", "..", "examples", "claude", "abox.yaml"))
+	if err != nil {
+		t.Fatalf("LoadFile(examples/claude): %v", err)
+	}
+
+	var opts Options
+	if err := applyBoxfile(&opts, box, boxDir); err != nil {
+		t.Fatalf("applyBoxfile() error = %v", err)
+	}
+
+	if len(opts.SecretInjections) != 1 {
+		t.Fatalf("SecretInjections = %v, want the api.anthropic.com binding", opts.SecretInjections)
+	}
+	if got := opts.SecretInjections[0]; got.Host != "api.anthropic.com" || got.Header != "x-api-key" {
+		t.Errorf("SecretInjections[0] = %+v, want host api.anthropic.com header x-api-key", got)
+	}
+	if len(opts.Allowlist) == 0 {
+		t.Error("Allowlist is empty; the example declares two domains")
+	}
+}
+
+// TestRunCreate_HonorsBoxfileBackend covers the abox.yaml backend: key through a
+// real create, proving Options.BackendName is actually consumed rather than just
+// populated.
+//
+// It deliberately does NOT use registerMockBackend: that helper selects its
+// backend via ABOX_BACKEND, which outranks backend: and would make this pass
+// whether or not the key is wired up. Two backends are registered and the env
+// var is cleared, so only the boxfile can pick the non-default one.
+func TestRunCreate_HonorsBoxfileBackend(t *testing.T) {
+	isolateDataHome(t)
+	backend.ResetForTesting()
+	t.Cleanup(backend.ResetForTesting)
+
+	for _, name := range []string{"autopick", "chosen"} {
+		storage := t.TempDir()
+		be := &mock.Backend{
+			NameFunc:       func() string { return name },
+			StorageDirFunc: func() string { return storage },
+		}
+		// "autopick" has the lower priority number, so AutoDetect prefers it.
+		priority := 1
+		if name == "chosen" {
+			priority = 50
+		}
+		backend.Register(name, priority, func() backend.Backend { return be })
+	}
+	t.Setenv(factory.EnvBackend, "")
+
+	path := writeBoxfile(t, "version: 1\nname: backendbox\ncpus: 2\nmemory: 4096\nbackend: chosen\n")
+	opts := &Options{Factory: newTestFactory(t), FromFile: path, NoMITM: true, Brief: true}
+
+	if err := Run(context.Background(), opts, ""); err != nil {
+		t.Fatalf("Run(--from-file with backend:) error = %v", err)
+	}
+
+	inst, _, err := config.Load("backendbox")
+	if err != nil {
+		t.Fatalf("config.Load after create: %v", err)
+	}
+	if inst.Backend != "chosen" {
+		t.Errorf("inst.Backend = %q, want %q: the abox.yaml backend: key must beat auto-detection",
+			inst.Backend, "chosen")
+	}
+}
+
+// TestCreate_RejectsMITMExceptionCoveringInjectedHost pins the interlock between
+// the two keys that only became reachable together once `abox up` stopped
+// dropping them. A tunneled host cannot receive an injected credential (there is
+// no request to modify), so the overlap must be refused rather than silently
+// producing an instance whose credential boundary does not apply.
+//
+// Both entry points are covered: the guard lives in box.Validate, and nothing
+// else would notice if either Run or RunFromBoxfile stopped calling it.
+func TestCreate_RejectsMITMExceptionCoveringInjectedHost(t *testing.T) {
+	const conflicting = `version: 1
+name: %s
+cpus: 2
+memory: 4096
+http:
+  mitm_exceptions:
+    - example.com
+  secret_injections:
+    - key: token
+      host: api.example.com
+      header: x-api-key
+`
+
+	assertRejected := func(t *testing.T, name string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("error = nil, want the exception/injection conflict to be rejected")
+		}
+		if !strings.Contains(err.Error(), "mitm_exceptions conflicts with secret_injections") {
+			t.Errorf("error = %q, want the conflict error", err)
+		}
+		if config.Exists(name) {
+			t.Errorf("instance %q was created despite the conflict", name)
+		}
+	}
+
+	t.Run("create --from-file", func(t *testing.T) {
+		isolateDataHome(t)
+		registerMockBackend(t, "mock", &mock.Backend{})
+
+		path := writeBoxfile(t, fmt.Sprintf(conflicting, "conflict-fromfile"))
+		opts := &Options{Factory: newTestFactory(t), FromFile: path, Brief: true}
+		assertRejected(t, "conflict-fromfile", Run(context.Background(), opts, ""))
+	})
+
+	t.Run("up", func(t *testing.T) {
+		isolateDataHome(t)
+		registerMockBackend(t, "mock", &mock.Backend{})
+
+		path := writeBoxfile(t, fmt.Sprintf(conflicting, "conflict-up"))
+		box, boxDir, err := boxfile.LoadFile(path)
+		if err != nil {
+			t.Fatalf("LoadFile: %v", err)
+		}
+		assertRejected(t, "conflict-up",
+			RunFromBoxfile(context.Background(), newTestFactory(t), box, boxDir, true))
+	})
 }

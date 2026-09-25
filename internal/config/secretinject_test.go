@@ -30,3 +30,40 @@ func TestValidateSecretInjections(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateMITMExceptions(t *testing.T) {
+	// Empty and valid lists (incl. a "*." entry that normalizes to the bare domain).
+	if err := ValidateMITMExceptions(nil, nil); err != nil {
+		t.Fatalf("empty list rejected: %v", err)
+	}
+	good := []string{"pinned.example.com", "*.corp.example", "münchen.de"}
+	if err := ValidateMITMExceptions(good, nil); err != nil {
+		t.Fatalf("valid exceptions rejected: %v", err)
+	}
+
+	// No conflict when the injection host is not covered by any exception.
+	inj := []SecretInjection{{Key: "k", Host: "api.anthropic.com", Header: "x-api-key"}}
+	if err := ValidateMITMExceptions([]string{"pinned.example.com"}, inj); err != nil {
+		t.Fatalf("non-conflicting injection rejected: %v", err)
+	}
+
+	cases := map[string]struct {
+		exceptions []string
+		injections []SecretInjection
+	}{
+		"invalid host":           {exceptions: []string{"not a host"}},
+		"double wildcard":        {exceptions: []string{"*.*.example.com"}},
+		"embedded wildcard":      {exceptions: []string{"a.*.example.com"}},
+		"duplicate":              {exceptions: []string{"example.com", "example.com"}},
+		"duplicate via wildcard": {exceptions: []string{"example.com", "*.example.com"}},
+		"duplicate via IDN":      {exceptions: []string{"münchen.de", "xn--mnchen-3ya.de"}},
+		"conflict exact":         {exceptions: []string{"api.anthropic.com"}, injections: []SecretInjection{{Key: "k", Host: "api.anthropic.com", Header: "x-api-key"}}},
+		"conflict via suffix":    {exceptions: []string{"anthropic.com"}, injections: []SecretInjection{{Key: "k", Host: "api.anthropic.com", Header: "x-api-key"}}},
+		"conflict via wildcard":  {exceptions: []string{"*.anthropic.com"}, injections: []SecretInjection{{Key: "k", Host: "api.anthropic.com", Header: "x-api-key"}}},
+	}
+	for name, tc := range cases {
+		if err := ValidateMITMExceptions(tc.exceptions, tc.injections); err == nil {
+			t.Errorf("%s: expected error, got nil", name)
+		}
+	}
+}

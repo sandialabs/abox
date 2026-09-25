@@ -21,6 +21,64 @@ import (
 	"github.com/sandialabs/abox/internal/filterbase"
 )
 
+func TestDecideConnect_MITMExceptions(t *testing.T) {
+	newSrv := func(allow, exceptions []string, mitm bool) *Server {
+		f := allowlist.NewFilter()
+		for _, d := range allow {
+			f.Add(d)
+		}
+		s := NewServer(f, false) // active mode
+		s.SetMITMExceptions(exceptions)
+		if mitm {
+			s.mitmReady.Store(true) // simulate LoadCA without real cert files
+		}
+		return s
+	}
+
+	tests := []struct {
+		name       string
+		allow      []string
+		exceptions []string
+		mitm       bool
+		host       string
+		want       connectAction
+	}{
+		{"exception not allowlisted still rejected", nil, []string{"pinned.example.com"}, true, "pinned.example.com", actionReject},
+		{"allowlisted exception + mitm tunnels", []string{"pinned.example.com"}, []string{"pinned.example.com"}, true, "pinned.example.com", actionTunnel},
+		{"allowlisted non-exception + mitm intercepts", []string{"example.com"}, nil, true, "example.com", actionIntercept},
+		{"exception matches subdomain", []string{"example.com"}, []string{"example.com"}, true, "api.example.com", actionTunnel},
+		{"wildcard exception matches subdomain", []string{"example.com"}, []string{"*.example.com"}, true, "api.example.com", actionTunnel},
+		{"wildcard exception matches apex", []string{"example.com"}, []string{"*.example.com"}, true, "example.com", actionTunnel},
+		{"mitm off tunnels regardless of exceptions", []string{"example.com"}, nil, false, "example.com", actionTunnel},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newSrv(tt.allow, tt.exceptions, tt.mitm)
+			if got := s.decideConnect(tt.host); got != tt.want {
+				t.Errorf("decideConnect(%q) = %d, want %d", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDecideConnect_MITMException_StatsCountedOnce(t *testing.T) {
+	f := allowlist.NewFilter()
+	f.Add("pinned.example.com")
+	s := NewServer(f, false)
+	s.SetMITMExceptions([]string{"pinned.example.com"})
+	s.mitmReady.Store(true)
+
+	if got := s.decideConnect("pinned.example.com"); got != actionTunnel {
+		t.Fatalf("decideConnect = %d, want actionTunnel(%d)", got, actionTunnel)
+	}
+	st := s.GetStats()
+	if st.TotalRequests != 1 || st.AllowedRequests != 1 || st.BlockedRequests != 0 {
+		t.Errorf("stats = {total:%d allowed:%d blocked:%d}, want {1 1 0}",
+			st.TotalRequests, st.AllowedRequests, st.BlockedRequests)
+	}
+}
+
 func TestIsBlockedIP(t *testing.T) {
 	tests := []struct {
 		name    string

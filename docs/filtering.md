@@ -163,6 +163,22 @@ sequenceDiagram
 5. Blocked requests return 403 Forbidden
 6. Allowed requests are proxied to the destination
 
+### MITM exceptions (pinned apps)
+
+When `http.mitm` is enabled the proxy intercepts allowlisted HTTPS connections to inspect the inner
+request (and detect domain fronting). Some apps pin certificates and break under interception. The
+`http.mitm_exceptions` list names domains that are instead carried as a **transparent TLS tunnel** —
+byte-for-byte, no interception — even while MITM stays on for everything else. It is a *scoped*
+equivalent of `http.mitm: false`, applied to one domain rather than the whole instance.
+
+The exception is consulted in `decideConnect` **only after** the allowlist and SSRF checks pass, so
+it never grants access: it only changes *how* an already-allowed connection is carried
+(intercept → tunnel). The dial-time SSRF/DNS-rebinding gate still applies to the tunneled dial.
+Because the traffic is not decrypted, inner-Host inspection and domain-fronting detection are skipped
+for these domains — keep the list minimal. A tunneled-exception connection is audited with action
+`http.tunnel.mitm_exception` so skipped inspection is visible in the logs. See
+[docs/abox-yaml.md](abox-yaml.md#mitm-exceptions-for-pinned-apps) for configuration.
+
 ## Component Responsibilities
 
 ### libvirt Network (abox-<name>)

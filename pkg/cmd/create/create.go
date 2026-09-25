@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -52,8 +51,10 @@ type Options struct {
 	MaxConnections      int                      // HTTP proxy concurrent-connection cap (0/unset = default)
 	AllowPrivateTargets []string                 // opt-in CIDRs the filters may reach despite SSRF deny-by-default
 	SecretInjections    []config.SecretInjection // host-side secret -> outbound header bindings (from abox.yaml)
+	MITMExceptions      []string                 // domains tunneled without TLS interception even when MITM is enabled (from abox.yaml)
 	Brief               bool                     // Suppress final summary/next-steps output
 	TemplateContent     string                   // Custom domain XML template content (from overrides.<backend>.template)
+	BackendName         string                   // Preferred VM backend (from abox.yaml backend:); ABOX_BACKEND still wins
 	Name                string                   // Instance name (positional arg)
 }
 
@@ -100,7 +101,7 @@ as an argument (overrides the name in the file) or read from the file.`,
 			if runF != nil {
 				return runF(opts)
 			}
-			return runCreate(cmd.Context(), opts, opts.Name)
+			return Run(cmd.Context(), opts, opts.Name)
 		},
 	}
 
@@ -122,8 +123,59 @@ as an argument (overrides the name in the file) or read from the file.`,
 }
 
 // Run executes the create command with the given options and instance name.
+// When opts.FromFile is set the boxfile is loaded and applied here; callers that
+// already hold a parsed boxfile (abox up) must use RunFromBoxfile instead so
+// there is exactly one abox.yaml -> Options mapping.
 func Run(ctx context.Context, opts *Options, name string) error {
-	return runCreate(ctx, opts, name)
+	// --no-mitm is inverted BEFORE the boxfile is applied, so a boxfile's mitm:
+	// value still wins over the flag. This preserves the historical --from-file
+	// precedence, where the file wins for every option; do not move it below
+	// applyBoxfile without deciding that flags-beat-file is the new rule for all
+	// options, not just this one.
+	if opts.NoMITM {
+		opts.MITM = false
+	}
+
+	var (
+		box    *boxfile.Boxfile
+		boxDir string
+	)
+	if opts.FromFile != "" {
+		var err error
+		box, boxDir, err = boxfile.LoadFile(opts.FromFile)
+		if err != nil {
+			return err
+		}
+		if err := box.Validate(boxDir); err != nil {
+			return err
+		}
+		// Name from arg takes precedence
+		if name == "" {
+			name = box.Name
+		}
+		if err := applyBoxfile(opts, box, boxDir); err != nil {
+			return err
+		}
+	}
+
+	return runCreate(ctx, opts, box, boxDir, name)
+}
+
+// RunFromBoxfile creates an instance from an already-parsed abox.yaml. It exists
+// so `abox up` does not have to assemble Options itself: the boxfile-derived
+// settings all come from applyBoxfile, and backend-dependent ones
+// (overrides.<backend>.template) are resolved by runCreate after backend
+// detection. box.Name is used as-is, so callers must apply any name suffix
+// before calling.
+func RunFromBoxfile(ctx context.Context, f *factory.Factory, box *boxfile.Boxfile, boxDir string, brief bool) error {
+	opts := &Options{Factory: f, Brief: brief}
+	if err := box.Validate(boxDir); err != nil {
+		return err
+	}
+	if err := applyBoxfile(opts, box, boxDir); err != nil {
+		return err
+	}
+	return runCreate(ctx, opts, box, boxDir, box.Name)
 }
 
 // cleanupState tracks resources created during instance creation for rollback on failure.
@@ -208,27 +260,26 @@ func (c *cleanupState) cleanupInstanceData() {
 	}
 }
 
-func runCreate(ctx context.Context, opts *Options, name string) error {
-	if opts.NoMITM {
-		opts.MITM = false
-	}
-
-	// Load configuration from file if specified (override loading is deferred
-	// until after backend detection so we use the correct backend name).
-	box, boxDir, name, err := loadFromBoxfile(opts, name)
-	if err != nil {
-		return err
-	}
-
+// runCreate is the shared body behind Run and RunFromBoxfile. box/boxDir are the
+// boxfile this instance came from, or nil/"" for a flags-only create; they are
+// carried this far only because overrides.<backend>.template cannot be resolved
+// until the backend is detected below.
+func runCreate(ctx context.Context, opts *Options, box *boxfile.Boxfile, boxDir, name string) error {
 	if err := validateCreateInputs(opts, name); err != nil {
 		return err
 	}
 
 	// Detect backend early so we can use its name for override loading
-	// and its storage dir for path computation.
-	be, err := opts.Factory.AutoDetectBackend()
+	// and its storage dir for path computation. A backend: declared in abox.yaml
+	// is honored here unless ABOX_BACKEND overrides it.
+	//
+	// Returned unwrapped: BackendForNew's errors already name the backend and say
+	// where the choice came from, and not all of them are detection failures — a
+	// "failed to detect backend:" prefix would mislabel the experimental-backend
+	// rejection, which is a refusal rather than a failure to find anything.
+	be, err := opts.Factory.BackendForNew(opts.BackendName)
 	if err != nil {
-		return fmt.Errorf("failed to detect backend: %w", err)
+		return err
 	}
 
 	// Reject monitoring on backends that provide no monitor transport (e.g.
@@ -366,33 +417,26 @@ func initInstance(
 	return inst, subnet, nil
 }
 
-// loadFromBoxfile loads and applies boxfile configuration to opts when --from-file is specified.
-// Returns the parsed boxfile (nil if not specified), its directory, the resolved name, and any error.
-func loadFromBoxfile(opts *Options, name string) (*boxfile.Boxfile, string, string, error) {
-	if opts.FromFile == "" {
-		return nil, "", name, nil
-	}
-
-	absPath, err := filepath.Abs(opts.FromFile)
-	if err != nil {
-		return nil, "", name, fmt.Errorf("invalid path %s: %w", opts.FromFile, err)
-	}
-	boxDir := filepath.Dir(absPath)
-
-	box, _, loadErr := boxfile.Load(boxDir)
-	if loadErr != nil {
-		return nil, "", name, loadErr
-	}
-	if err := box.Validate(boxDir); err != nil {
-		return nil, "", name, err
-	}
-
-	// Name from arg takes precedence
-	if name == "" {
-		name = box.Name
-	}
-
-	// Map boxfile to options
+// applyBoxfile copies every abox.yaml-derived setting onto opts. This is the
+// single mapping from boxfile.Boxfile to create.Options: both
+// `abox create --from-file` (via Run) and `abox up` (via RunFromBoxfile) reach
+// it, so a key added to abox.yaml cannot be honored by one command and silently
+// dropped by the other. It is unexported on purpose — no package outside create
+// should be able to express a boxfile mapping.
+//
+// Boxfile values overwrite whatever the caller put in opts, which is the
+// long-standing --from-file precedence (the file wins). See Run for the one
+// deliberate exception, --no-mitm.
+//
+// TemplateContent is deliberately not set here: it comes from
+// overrides.<backend>.template and cannot be resolved until the backend is
+// known, so loadBackendOverrides handles it after detection.
+//
+// INVARIANT: every yaml-tagged field of boxfile.Boxfile is either assigned here
+// or listed with a reason in knownBoxfileKeys (see boxopts_test.go), which fails
+// the build when a new key is added to neither.
+func applyBoxfile(opts *Options, box *boxfile.Boxfile, boxDir string) error {
+	opts.BackendName = box.Backend
 	opts.CPUs = box.CPUs
 	opts.Memory = box.Memory
 	opts.Base = box.Base
@@ -400,6 +444,7 @@ func loadFromBoxfile(opts *Options, name string) (*boxfile.Boxfile, string, stri
 	opts.Disk = box.Disk
 	opts.Subnet = box.Subnet
 	opts.User = box.User
+	opts.Allowlist = box.Allowlist
 	opts.MonitorEnabled = box.Monitor.Enabled
 	opts.MonitorVersion = box.Monitor.Version
 	opts.MonitorKprobeMulti = box.GetKprobeMulti()
@@ -407,7 +452,7 @@ func loadFromBoxfile(opts *Options, name string) (*boxfile.Boxfile, string, stri
 	if len(box.Monitor.Policies) > 0 {
 		resolved, err := box.ResolvePolicyPaths(boxDir)
 		if err != nil {
-			return nil, "", name, err
+			return err
 		}
 		opts.MonitorPolicies = resolved
 	}
@@ -415,8 +460,9 @@ func loadFromBoxfile(opts *Options, name string) (*boxfile.Boxfile, string, stri
 	opts.MaxConnections = box.GetMaxConnections()
 	opts.AllowPrivateTargets = box.GetAllowPrivateTargets()
 	opts.SecretInjections = box.GetSecretInjections()
+	opts.MITMExceptions = box.GetMITMExceptions()
 
-	return box, boxDir, name, nil
+	return nil
 }
 
 // validateCreateInputs validates the instance name, SSH user, resource limits, disk size,
@@ -541,6 +587,7 @@ func buildInstanceConfig(opts *Options, name string, paths *config.Paths, be bac
 			MaxConnections:      opts.MaxConnections,
 			AllowPrivateTargets: opts.AllowPrivateTargets,
 			SecretInjections:    opts.SecretInjections,
+			MITMExceptions:      opts.MITMExceptions,
 		},
 		Monitor: config.MonitorConfig{
 			Enabled:     opts.MonitorEnabled,
