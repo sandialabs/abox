@@ -21,6 +21,11 @@ import (
 // CurrentBoxfileVersion is the current version of the abox.yaml format.
 const CurrentBoxfileVersion = 1
 
+// overrideKeyTemplate is the overrides.<backend> key holding a custom domain
+// template. A custom template bypasses abox's default VM hardening, so the
+// trust gate treats it as security-relevant.
+const overrideKeyTemplate = "template"
+
 // BoxfileDNS holds DNS-related configuration in abox.yaml.
 type BoxfileDNS struct {
 	Upstream string `yaml:"upstream,omitempty"` // upstream DNS server

@@ -78,7 +78,7 @@ func summarizeOverrides(b *Boxfile) []string {
 		for _, key := range sortedKeys(b.Overrides[backend]) {
 			v := b.Overrides[backend][key]
 			switch {
-			case key == "template" && v != "":
+			case key == overrideKeyTemplate && v != "":
 				out = append(out, fmt.Sprintf("custom %s template %q (bypasses VM hardening: QEMU sandbox, device restrictions, memory isolation)", backend, v))
 			case filepath.IsAbs(v):
 				out = append(out, fmt.Sprintf("override %s.%s uses absolute host path %q", backend, key, v))
@@ -122,7 +122,7 @@ func TrustFingerprint(b *Boxfile, rawYAML []byte, baseDir string) string {
 	// Referenced host-side files, in a deterministic order.
 	var refs []string
 	for _, backend := range sortedKeys(b.Overrides) {
-		if b.Overrides[backend]["template"] != "" {
+		if b.Overrides[backend][overrideKeyTemplate] != "" {
 			refs = append(refs, "template:"+backend)
 		}
 	}
@@ -141,7 +141,7 @@ func TrustFingerprint(b *Boxfile, rawYAML []byte, baseDir string) string {
 		case strings.HasPrefix(ref, "template:"):
 			backend := strings.TrimPrefix(ref, "template:")
 			var s string
-			s, err = b.LoadOverrideContent(backend, "template", baseDir)
+			s, err = b.LoadOverrideContent(backend, overrideKeyTemplate, baseDir)
 			content = []byte(s)
 		case strings.HasPrefix(ref, "policy:"):
 			var paths []string

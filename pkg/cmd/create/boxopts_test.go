@@ -186,6 +186,7 @@ func TestApplyBoxfile_MapsKnownFields(t *testing.T) {
 			MITM:                &mitm,
 			MaxConnections:      &maxConns,
 			AllowPrivateTargets: []string{"10.0.0.0/8"},
+			AllowedPorts:        []int{8443},
 			SecretInjections: []config.SecretInjection{
 				{Key: "k", Host: "api.example.com", Header: "x-api-key"},
 			},
@@ -222,6 +223,9 @@ func TestApplyBoxfile_MapsKnownFields(t *testing.T) {
 		{"http.mitm", opts.MITM, false},
 		{"http.max_connections", opts.MaxConnections, 1024},
 		{"http.allow_private_targets", opts.AllowPrivateTargets, []string{"10.0.0.0/8"}},
+		// A non-default port: a mapping that silently fell back to the built-in
+		// 80/443 defaults would still be caught here.
+		{"http.allowed_ports", opts.AllowedPorts, []int{8443}},
 		{"http.secret_injections", opts.SecretInjections, box.HTTP.SecretInjections},
 		{"http.mitm_exceptions", opts.MITMExceptions, []string{"pinned.example.com"}},
 		{"monitor.enabled", opts.MonitorEnabled, true},

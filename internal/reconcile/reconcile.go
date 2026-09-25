@@ -195,6 +195,9 @@ func runDiffer(current, desired string) (string, bool) {
 	return string(out), true
 }
 
+// defaultDiffProg is the differ used when $DIFFPROG is unset.
+const defaultDiffProg = "diff"
+
 // differCommand resolves the differ program and its leading arguments from
 // $DIFFPROG, falling back to `diff -u --label current --label desired`.
 func differCommand() (string, []string) {
@@ -203,7 +206,7 @@ func differCommand() (string, []string) {
 			return fields[0], fields[1:]
 		}
 	}
-	return "diff", []string{"-u", "--label", "current", "--label", "desired"}
+	return defaultDiffProg, []string{"-u", "--label", "current", "--label", "desired"}
 }
 
 // indent prefixes each non-empty line of s with two spaces for readable inline

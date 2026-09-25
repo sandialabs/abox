@@ -29,10 +29,7 @@ func TestSecuritySummary_FlagsEachKey(t *testing.T) {
 	b.Overrides = map[string]map[string]string{"libvirt": {"template": "custom.xml"}}
 
 	got := SecuritySummary(b)
-	joined := ""
-	for _, s := range got {
-		joined += s + "\n"
-	}
+	joined := strings.Join(got, "\n") + "\n"
 	for _, want := range []string{
 		"/etc/setup.sh", ".ssh", "/abs/policy.yaml", "127.0.0.0/8",
 		"mitm: false", "allowed_ports", "custom", "template",
