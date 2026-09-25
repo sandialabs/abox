@@ -95,6 +95,7 @@ FULL EXAMPLE
 COMMANDS
   abox init            Generate abox.yaml interactively
   abox up              Create/start/provision from abox.yaml
+  abox up --conf-policy Reconcile a diverged allowlist (keep|replace|prompt)
   abox down            Stop instance
   abox down --remove   Stop and delete instance
   abox monitor logs <name>    View Tetragon monitoring events (requires monitor.enabled: true)

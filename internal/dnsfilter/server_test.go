@@ -211,6 +211,108 @@ func TestServer_ServeDNS_Blocked(t *testing.T) {
 	}
 }
 
+func TestServer_ServeDNS_QtypeRestricted(t *testing.T) {
+	// In active mode, non-A/AAAA queries for an allowlisted name must be answered
+	// with empty NOERROR (NODATA) and never forwarded upstream.
+	filter := allowlist.NewFilter()
+	filter.Add("github.com")
+
+	server, err := NewServer(filter, "8.8.8.8:53", false) // active mode
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+
+	mock := &mockResolver{}
+	prev := setResolver(mock)
+	defer setResolver(prev)
+
+	for _, qtype := range []uint16{dns.TypeTXT, dns.TypeMX, dns.TypeNS, dns.TypeSRV, dns.TypeHTTPS, dns.TypeANY} {
+		t.Run(dns.TypeToString[qtype], func(t *testing.T) {
+			req := &dns.Msg{}
+			req.SetQuestion("github.com.", qtype)
+
+			w := &mockResponseWriter{remote: &net.UDPAddr{IP: net.ParseIP("10.10.10.2"), Port: 12345}}
+			server.ServeDNS(w, req)
+
+			if w.msg == nil {
+				t.Fatal("ServeDNS() did not write response")
+			}
+			if w.msg.Rcode != dns.RcodeSuccess {
+				t.Errorf("Rcode = %v, want NOERROR (NODATA)", w.msg.Rcode)
+			}
+			if len(w.msg.Answer) != 0 {
+				t.Errorf("expected empty NODATA answer, got %d records", len(w.msg.Answer))
+			}
+		})
+	}
+
+	// The resolver must not be consulted for any restricted qtype.
+	if len(mock.Calls) != 0 {
+		t.Errorf("resolver called %d times for restricted qtypes, want 0", len(mock.Calls))
+	}
+}
+
+func TestServer_ServeDNS_QtypeAllowedForAddressRecords(t *testing.T) {
+	// A/AAAA queries for an allowlisted name are still forwarded upstream.
+	filter := allowlist.NewFilter()
+	filter.Add("github.com")
+
+	server, err := NewServer(filter, "8.8.8.8:53", false) // active mode
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+
+	mock := &mockResolver{
+		ExchangeFunc: func(m *dns.Msg, _ string) (*dns.Msg, error) {
+			resp := &dns.Msg{}
+			resp.SetReply(m)
+			return resp, nil
+		},
+	}
+	prev := setResolver(mock)
+	defer setResolver(prev)
+
+	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		req := &dns.Msg{}
+		req.SetQuestion("github.com.", qtype)
+		w := &mockResponseWriter{remote: &net.UDPAddr{IP: net.ParseIP("10.10.10.2"), Port: 12345}}
+		server.ServeDNS(w, req)
+	}
+
+	if len(mock.Calls) != 2 {
+		t.Errorf("resolver called %d times for A/AAAA, want 2", len(mock.Calls))
+	}
+}
+
+func TestServer_ServeDNS_QtypeForwardedInPassiveMode(t *testing.T) {
+	// Passive mode forwards all qtypes so allowlist profiling stays faithful.
+	filter := allowlist.NewFilter()
+
+	server, err := NewServer(filter, "8.8.8.8:53", true) // passive mode
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+
+	mock := &mockResolver{
+		ExchangeFunc: func(m *dns.Msg, _ string) (*dns.Msg, error) {
+			resp := &dns.Msg{}
+			resp.SetReply(m)
+			return resp, nil
+		},
+	}
+	prev := setResolver(mock)
+	defer setResolver(prev)
+
+	req := &dns.Msg{}
+	req.SetQuestion("example.com.", dns.TypeTXT)
+	w := &mockResponseWriter{remote: &net.UDPAddr{IP: net.ParseIP("10.10.10.2"), Port: 12345}}
+	server.ServeDNS(w, req)
+
+	if len(mock.Calls) != 1 {
+		t.Errorf("resolver called %d times in passive mode for TXT, want 1", len(mock.Calls))
+	}
+}
+
 func TestServer_ServeDNS_PassiveMode(t *testing.T) {
 	filter := allowlist.NewFilter()
 	// Don't add any domains - normally everything would be blocked
@@ -446,7 +548,7 @@ func TestServer_DNSRebindingStatsAccounting(t *testing.T) {
 	})
 }
 
-// TestServer_DNSRebindingAppliesToAllowlisted asserts the M1 fix: allowlisting a
+// TestServer_DNSRebindingAppliesToAllowlisted asserts that allowlisting a
 // domain no longer exempts its answers from rebinding protection. A trusted name
 // resolving to a private/metadata IP is blocked unless the operator opts the
 // range in via allow_private_targets (which the HTTP config shares with DNS).

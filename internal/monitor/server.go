@@ -60,10 +60,10 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	s.logWriter = writer
 
-	// Start RPC server with UID verification for defense-in-depth.
-	// This ensures only the same user who started the daemon can control it,
+	// UnixListenSecure verifies the peer UID (== this process) on every
+	// connection, so only the same user who started the daemon can control it,
 	// even if socket permissions were somehow modified.
-	listener, err := rpc.UnixListenWithStaleAndUIDCheck(s.rpcSocketPath, getUID())
+	listener, err := rpc.UnixListenSecure(s.rpcSocketPath)
 	if err != nil {
 		s.closeLogWriter()
 		return fmt.Errorf("failed to listen on RPC socket: %w", err)
@@ -85,11 +85,6 @@ func (s *Server) Start(ctx context.Context) error {
 	go s.readLoop(ctx)
 
 	return nil
-}
-
-// getUID returns the current user ID.
-func getUID() int {
-	return os.Getuid()
 }
 
 // readLoop continuously reads from the virtio-serial socket and logs events.

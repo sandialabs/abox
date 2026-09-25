@@ -42,7 +42,11 @@ func NewBaseAPIServer(socketPath string, filter *allowlist.Filter, server allowl
 // to register services before Serve() is called, avoiding the gRPC race where
 // RegisterService after Serve causes a fatal error.
 func (b *BaseAPIServer) Start(register func(*grpc.Server)) error {
-	listener, err := rpc.UnixListenWithStaleCheck(b.socketPath)
+	// UnixListenSecure verifies the peer UID (== this process) on every
+	// connection, so the filter API (which can flip the filter to passive or shut
+	// the daemon down) is not reachable by other local users even if the socket
+	// mode were changed. Same-user by construction.
+	listener, err := rpc.UnixListenSecure(b.socketPath)
 	if err != nil {
 		return fmt.Errorf("failed to listen on socket: %w", err)
 	}

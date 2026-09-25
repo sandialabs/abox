@@ -22,6 +22,54 @@ These measures are applied automatically when abox creates a VM. No user configu
 | `memballoon=none` | Removes memory balloon device (not needed, eliminates attack surface) |
 | `video=none` | No emulated GPU or display |
 | USB controller `none` | No USB bus emulated |
+| `machine=q35` (pinned) | PCIe topology with native AHCI; drops the legacy i440fx/PIIX3 southbridge (ISA bridge, legacy IDE, ACPI PM) and removes the host-dependent default-machine ambiguity |
+| `virtio-non-transitional` devices | Network, RNG, and virtio-serial run modern virtio 1.0 only, dropping the legacy virtio config-plane exposed to guest drivers |
+
+### Network Filtering (L2)
+
+| Measure | Effect |
+|---------|--------|
+| `no-mac-spoofing` nwfilter | Pins the guest to its assigned MAC; frames with a spoofed source MAC are dropped |
+| `no-arp-spoofing` nwfilter | Drops ARP whose sender addresses the guest doesn't own (ARP cache-poisoning defense) |
+| STP disabled on bridge | Host-only bridge has no loop/uplink, so spanning-tree is removed as guest-facing (BPDU) attack surface |
+
+The per-instance `abox-<name>-traffic` filter remains a stateful, default-deny
+allowlist (inbound: host→guest SSH only; outbound: DNS + HTTP proxy + gateway
+ICMP; IPv6 fully dropped). IP-source anti-spoofing is intentionally not layered
+on: guests are statically addressed (no DHCP lease for libvirt to learn the IP),
+and egress is already destination-pinned to the gateway.
+
+### Operator Session (`abox ssh`)
+
+| Measure | Effect |
+|---------|--------|
+| `ForwardAgent=no` | Guest root can never use the operator's ssh-agent to sign with keys it cannot read (blocks VM-compromise → credential-theft) |
+| `ForwardX11=no` / `ForwardX11Trusted=no` | No X11 channel back to the operator's display (keystroke-injection / screen-capture surface) |
+
+These are set as explicit command-line options, so they override any
+`ForwardAgent`/`ForwardX11` the operator may have enabled globally in
+`~/.ssh/config`. The `abox forward` tunnel feature (explicit `-L`/`-R`) is
+unaffected. Guest-side sshd config is only defense-in-depth here — guest root
+could re-enable forwarding — so the client-side setting is the load-bearing one.
+
+### Log Rendering
+
+Traffic and monitor logs contain guest-influenced strings (Tetragon exec
+args/paths, DNS query names, HTTP URLs). `abox dns/http/monitor logs` renders
+them through a sanitizing writer that strips terminal control bytes (ANSI/OSC
+escape sequences, `0x7f`), so a malicious guest cannot spoof or corrupt the
+operator's terminal. The on-disk log files stay byte-for-byte faithful for
+forensics and machine parsing — only the terminal rendering is sanitized.
+
+### DNS Query Types
+
+In enforcing (active) mode, the DNS filter answers only `A`/`AAAA` queries for
+allowlisted names. Every other query type (`TXT`, `MX`, `NS`, `SRV`, `ANY`,
+`HTTPS`/`SVCB`, ...) receives an empty `NOERROR` (NODATA) response and is never
+forwarded upstream, shrinking the DNS-tunneling/exfiltration surface. Clients
+that probe for `HTTPS`/`SVCB` records fall back to `A`/`AAAA` automatically.
+Passive (profiling) mode still forwards all query types so allowlist discovery
+stays faithful.
 
 ### Performance Tuning
 
@@ -34,6 +82,39 @@ These measures are applied automatically when abox creates a VM. No user configu
 | vhost multiqueue (`queues=min(vCPUs,4)`) | Spreads network RX/TX across vCPUs via multiple virtio-net queues |
 
 **Note:** If you use a custom domain template via `overrides.libvirt.template` in `abox.yaml`, these host hardening measures are not automatically applied. Your custom template must include them explicitly. See [abox.yaml: Backend Overrides](abox-yaml.md#backend-overrides).
+
+## Host-Side Prerequisites (Operator Responsibility)
+
+Some of the isolation posture depends on host configuration that abox cannot set
+or verify from the VM definition. These are the operator's responsibility on the
+hypervisor host.
+
+### Speculative-Execution Posture
+
+abox uses `<cpu mode='host-model'>`, so the guest vCPU inherits the host CPU's
+microcode-based mitigation flags automatically. To make that meaningful:
+
+- Ensure host microcode is current and exposes `MD_CLEAR` (MDS/MFBS mitigation).
+  Verify with `cat /sys/devices/system/cpu/vulnerabilities/*`.
+- Disable SMT (hyper-threading) **or** enforce core scheduling so sibling
+  threads never co-schedule different security domains — cross-VM sibling
+  leakage (L1TF/MDS) is not mitigated by microcode alone.
+- Consider a vCPU model without TSX (`hle`/`rtm`) if your workload doesn't need
+  it, to remove TAA exposure.
+
+### Unprivileged QEMU and Host Confinement
+
+- Run QEMU as an unprivileged user/group via `user=`/`group=` in
+  `/etc/libvirt/qemu.conf`. abox's storage layer assumes this (per-uid setgid
+  image dirs — see [privilege-helper.md](privilege-helper.md)) but does **not**
+  enforce it; a root-run QEMU widens the blast radius of any escape.
+- Enable libvirtd's own seccomp sandbox (`seccomp_sandbox = 1` in `qemu.conf`)
+  for defense-in-depth on top of abox's `-sandbox` QEMU flags.
+- Keep host AppArmor/SELinux (svirt) confinement of the QEMU process enabled
+  (the distro default on Ubuntu/RHEL); abox does not add a per-domain
+  `<seclabel>`, so per-VM confinement comes from the host security driver.
+- Keep host QEMU/libvirt/kernel patched. abox uses the `vhost` virtio-net
+  backend (not slirp), which avoids the userspace slirp escape history.
 
 ## Guest Hardening
 

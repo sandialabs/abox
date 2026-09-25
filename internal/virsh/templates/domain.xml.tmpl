@@ -10,7 +10,13 @@
     <nosharepages/>
   </memoryBacking>
   <os>
-    <type arch='x86_64'>hvm</type>
+    <!-- Pin the q35 machine type explicitly. q35 gives a PCIe topology with
+         native AHCI and drops the legacy i440fx PIIX3 southbridge (ISA bridge,
+         legacy IDE, ACPI PM) that the default machine type would otherwise pull
+         in, trimming the emulated device/parser surface exposed to the guest.
+         Pinning also removes the host-dependent "whatever this libvirt/QEMU
+         defaults to" ambiguity. -->
+    <type arch='x86_64' machine='q35'>hvm</type>
     <boot dev='hd'/>
   </os>
   <features>
@@ -46,17 +52,23 @@
     <interface type='network'>
       <mac address='{{.MACAddress}}'/>
       <source network='{{.Bridge}}'/>
-      <model type='virtio'/>
+      <!-- virtio-non-transitional = modern virtio 1.0 only; drops the legacy
+           virtio config-plane the transitional device would otherwise expose to
+           the guest driver. Requires libvirt >= 5.2. If you customize this
+           template you MUST keep this model in sync with the update-device
+           fragments in ApplyNWFilter/RemoveNWFilter (internal/virsh/virsh.go),
+           or live nwfilter apply/remove fails. -->
+      <model type='virtio-non-transitional'/>
       <driver name='vhost' queues='{{.NetQueues}}'/>
     </interface>
-    <rng model='virtio'>
+    <rng model='virtio-non-transitional'>
       <backend model='random'>/dev/urandom</backend>
     </rng>
     <controller type='usb' model='none'/>
     <video><model type='none'/></video>
     <memballoon model='none'/>
 {{- if .MonitorSocket}}
-    <controller type='virtio-serial' index='0'/>
+    <controller type='virtio-serial' index='0' model='virtio-non-transitional'/>
     <channel type='unix'>
       <source mode='bind' path='{{.MonitorSocket}}'>
         <permissions mode='0600' owner='{{.MonitorSocketUID}}' group='{{.MonitorSocketGID}}'/>

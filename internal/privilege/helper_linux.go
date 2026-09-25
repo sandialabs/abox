@@ -12,8 +12,12 @@ import (
 	"github.com/sandialabs/abox/internal/rpc"
 )
 
-// resolvePlatformCommands resolves the absolute path to iptables (the only
-// external command the Linux egress helper invokes). Idempotent.
+// resolvePlatformCommands resolves the absolute paths to iptables and ip6tables
+// (the external commands the Linux egress helper invokes). Idempotent.
+//
+// iptables is required. ip6tables is best-effort at resolution time — a host may
+// legitimately lack it — but the egress path fails closed at Apply if IPv6 is
+// actually enabled on the kernel and ip6tables is missing (see ensureIPv6Denied).
 func resolvePlatformCommands() error {
 	iptablesMu.Lock()
 	defer iptablesMu.Unlock()
@@ -34,6 +38,15 @@ func resolvePlatformCommands() error {
 		return fmt.Errorf("failed to get absolute path for iptables: %w", err)
 	}
 	iptablesAbs = abs
+
+	// ip6tables: resolve if present, leave empty otherwise. Same no-symlink-resolve
+	// reasoning (ip6tables-nft is also a multi-call binary). Absence is handled at
+	// Apply time, not here.
+	if p6, err6 := exec.LookPath("ip6tables"); err6 == nil {
+		if abs6, aerr := filepath.Abs(p6); aerr == nil {
+			ip6tablesAbs = abs6
+		}
+	}
 	return nil
 }
 

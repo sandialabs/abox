@@ -40,6 +40,7 @@ type Options struct {
 	User                string
 	DryRun              bool
 	FromFile            string
+	TrustBoxfile        string                   // expected abox.yaml fingerprint for non-interactive trust (--trust-boxfile / ABOX_TRUST_BOXFILE)
 	Allowlist           []string                 // If non-nil, use these instead of defaults
 	MonitorEnabled      bool                     // Enable Tetragon monitoring via virtio-serial
 	MonitorVersion      string                   // Tetragon version to use (empty = latest)
@@ -50,6 +51,7 @@ type Options struct {
 	NoMITM              bool                     // Disable TLS MITM (inverted to MITM in runCreate)
 	MaxConnections      int                      // HTTP proxy concurrent-connection cap (0/unset = default)
 	AllowPrivateTargets []string                 // opt-in CIDRs the filters may reach despite SSRF deny-by-default
+	AllowedPorts        []int                    // opt-in destination ports (empty = built-in 443/80+443 defaults)
 	SecretInjections    []config.SecretInjection // host-side secret -> outbound header bindings (from abox.yaml)
 	MITMExceptions      []string                 // domains tunneled without TLS interception even when MITM is enabled (from abox.yaml)
 	Brief               bool                     // Suppress final summary/next-steps output
@@ -114,6 +116,7 @@ as an argument (overrides the name in the file) or read from the file.`,
 	cmd.Flags().StringVar(&opts.User, "user", "", "SSH username (auto-detected from base image if not specified)")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "Print generated XML without creating instance")
 	cmd.Flags().StringVar(&opts.FromFile, "from-file", "", "Read configuration from abox.yaml file")
+	cmd.Flags().StringVar(&opts.TrustBoxfile, "trust-boxfile", "", "Expected abox.yaml security fingerprint; trusts a security-relevant abox.yaml non-interactively (for CI). Source the value from a separately-reviewed channel, not the same checkout.")
 	cmd.Flags().BoolVar(&opts.MonitorEnabled, "monitor", false, "Enable Tetragon monitoring via virtio-serial")
 	cmd.Flags().StringVar(&opts.MonitorVersion, "monitor-version", "", "Tetragon version to use (empty for latest)")
 
@@ -142,11 +145,24 @@ func Run(ctx context.Context, opts *Options, name string) error {
 	)
 	if opts.FromFile != "" {
 		var err error
-		box, boxDir, err = boxfile.LoadFile(opts.FromFile)
+		var rawYAML []byte
+		box, boxDir, rawYAML, err = boxfile.LoadFileRaw(opts.FromFile)
 		if err != nil {
 			return err
 		}
 		if err := box.Validate(boxDir); err != nil {
+			return err
+		}
+		// Trust gate: a repo-supplied abox.yaml with security-relevant settings
+		// must be confirmed before ANY of its values are acted on — including
+		// the --dry-run path and the sudo/privilege prompt in executeCreate.
+		// `abox up` runs the same gate itself (see runUp) before calling
+		// RunFromBoxfile, so the gate fires exactly once on either path.
+		trustToken := opts.TrustBoxfile
+		if trustToken == "" {
+			trustToken = os.Getenv("ABOX_TRUST_BOXFILE")
+		}
+		if err := cmdutil.TrustBoxfile(opts.Factory.IO, opts.Factory.Prompter, opts.Factory.ColorScheme, box, rawYAML, boxDir, trustToken); err != nil {
 			return err
 		}
 		// Name from arg takes precedence
@@ -166,7 +182,8 @@ func Run(ctx context.Context, opts *Options, name string) error {
 // settings all come from applyBoxfile, and backend-dependent ones
 // (overrides.<backend>.template) are resolved by runCreate after backend
 // detection. box.Name is used as-is, so callers must apply any name suffix
-// before calling.
+// before calling. Callers are also responsible for the abox.yaml trust gate
+// (cmdutil.TrustBoxfile) — abox up runs it in runUp before calling this.
 func RunFromBoxfile(ctx context.Context, f *factory.Factory, box *boxfile.Boxfile, boxDir string, brief bool) error {
 	opts := &Options{Factory: f, Brief: brief}
 	if err := box.Validate(boxDir); err != nil {
@@ -263,7 +280,8 @@ func (c *cleanupState) cleanupInstanceData() {
 // runCreate is the shared body behind Run and RunFromBoxfile. box/boxDir are the
 // boxfile this instance came from, or nil/"" for a flags-only create; they are
 // carried this far only because overrides.<backend>.template cannot be resolved
-// until the backend is detected below.
+// until the backend is detected below. The abox.yaml trust gate has already run
+// by this point (in Run for --from-file, in runUp for abox up).
 func runCreate(ctx context.Context, opts *Options, box *boxfile.Boxfile, boxDir, name string) error {
 	if err := validateCreateInputs(opts, name); err != nil {
 		return err
@@ -312,7 +330,8 @@ func runCreate(ctx context.Context, opts *Options, box *boxfile.Boxfile, boxDir,
 		return err
 	}
 
-	warnCustomTemplate(opts, be)
+	// A custom template's security impact is surfaced (and confirmed) by the
+	// trust gate above, which runs before this point — no separate warning here.
 
 	// Dry-run mode: generate XML with example values and exit
 	if opts.DryRun {
@@ -459,6 +478,7 @@ func applyBoxfile(opts *Options, box *boxfile.Boxfile, boxDir string) error {
 	opts.MITM = box.GetMITM()
 	opts.MaxConnections = box.GetMaxConnections()
 	opts.AllowPrivateTargets = box.GetAllowPrivateTargets()
+	opts.AllowedPorts = box.GetAllowedPorts()
 	opts.SecretInjections = box.GetSecretInjections()
 	opts.MITMExceptions = box.GetMITMExceptions()
 
@@ -516,25 +536,6 @@ func loadBackendOverrides(opts *Options, box *boxfile.Boxfile, boxDir string, be
 	return nil
 }
 
-// warnCustomTemplate prints a security warning when a custom domain template is used.
-func warnCustomTemplate(opts *Options, be backend.Backend) {
-	if opts.TemplateContent == "" {
-		return
-	}
-
-	cs := opts.Factory.ColorScheme
-	errOut := opts.Factory.IO.ErrOut
-	fmt.Fprintln(errOut)
-	fmt.Fprintln(errOut, cs.Yellow(cs.Bold("WARNING:"))+cs.Yellow(" Using a custom domain template. This bypasses abox's default VM"))
-	fmt.Fprintln(errOut, cs.Yellow("hardening which includes: QEMU sandbox mode, disabled nested virtualization,"))
-	fmt.Fprintln(errOut, cs.Yellow("disabled USB/balloon/video devices, and memory isolation (nosharepages)."))
-	fmt.Fprintln(errOut)
-	fmt.Fprintln(errOut, cs.Yellow("You are responsible for ensuring your template maintains appropriate security"))
-	fmt.Fprintln(errOut, cs.Yellow("isolation. See 'abox overrides dump "+be.Name()+".template' for the default template"))
-	fmt.Fprintln(errOut, cs.Yellow("as a reference."))
-	fmt.Fprintln(errOut)
-}
-
 // allocateSubnet validates or allocates a subnet and returns subnet, gateway, and any error.
 // It routes through the backend so a backend that implements
 // backend.NetworkDefaulter (e.g. macOS vmnet's host-mode pool) can supply its
@@ -586,6 +587,7 @@ func buildInstanceConfig(opts *Options, name string, paths *config.Paths, be bac
 			MITM:                opts.MITM,
 			MaxConnections:      opts.MaxConnections,
 			AllowPrivateTargets: opts.AllowPrivateTargets,
+			AllowedPorts:        opts.AllowedPorts,
 			SecretInjections:    opts.SecretInjections,
 			MITMExceptions:      opts.MITMExceptions,
 		},

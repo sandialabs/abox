@@ -30,6 +30,7 @@ func egressReq(bridge string, p backend.EgressPolicy) *rpc.EgressReq {
 		DnsPort:      int32(p.DNSPort),      //nolint:gosec // port is 0-65535, fits int32
 		HttpPort:     int32(p.HTTPPort),     //nolint:gosec // port is 0-65535, fits int32
 		GuestDnsPort: int32(p.GuestDNSPort), //nolint:gosec // port is 0-65535, fits int32
+		Gateway:      p.Gateway,
 	}
 }
 

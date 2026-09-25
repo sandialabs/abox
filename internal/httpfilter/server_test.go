@@ -5,12 +5,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -254,7 +256,7 @@ func TestServer_CheckHost(t *testing.T) {
 	}
 }
 
-// TestServer_CheckHost_AllowlistedPrivateIP asserts the M1 fix: allowlisting a
+// TestServer_CheckHost_AllowlistedPrivateIP asserts that allowlisting a
 // host no longer exempts it from SSRF protection. Because the proxy dials from
 // the host, an allowlisted name/IP that points at a private/metadata address is
 // still blocked unless the operator opts the range in via allow_private_targets.
@@ -1105,7 +1107,7 @@ func TestServer_DecideConnect(t *testing.T) {
 		t.Errorf("decideConnect(allowed, no MITM) = %v, want actionTunnel", got)
 	}
 
-	// M1: an allowlisted private-IP CONNECT target is still rejected by SSRF —
+	// An allowlisted private-IP CONNECT target is still rejected by SSRF —
 	// allowlisting does not exempt it, since the proxy dials from the host.
 	if got := server.decideConnect("127.0.0.1"); got != actionReject {
 		t.Errorf("decideConnect(allowlisted private IP, no opt-in) = %v, want actionReject", got)
@@ -1200,4 +1202,82 @@ func TestServer_DecideRequest_Healthcheck(t *testing.T) {
 	if dd := server.decideRequest(direct, HealthcheckDomain+":443"); dd.forward || dd.status != http.StatusOK {
 		t.Errorf("decideRequest(healthcheck via CONNECT) = %+v, want forward=false status=200", dd)
 	}
+}
+
+// TestPortAllowed covers the destination-port restriction: default sets,
+// the missing-port scheme fallback, an explicit override, and fail-closed on a
+// malformed host.
+func TestPortAllowed(t *testing.T) {
+	server := NewServer(allowlist.NewFilter(), false)
+
+	tests := []struct {
+		name      string
+		hostPort  string
+		scheme    string
+		isConnect bool
+		want      bool
+	}{
+		{"connect default 443 allowed", "github.com:443", schemeHTTPS, true, true},
+		{"connect default 22 blocked", "github.com:22", schemeHTTPS, true, false},
+		{"connect default 80 blocked", "github.com:80", schemeHTTPS, true, false},
+		{"forward default 80 allowed", "github.com:80", schemeHTTP, false, true},
+		{"forward default 443 allowed", "github.com:443", schemeHTTPS, false, true},
+		{"forward default 8080 blocked", "github.com:8080", schemeHTTP, false, false},
+		{"forward no port http -> 80 allowed", "github.com", schemeHTTP, false, true},
+		{"forward no port https -> 443 allowed", "github.com", schemeHTTPS, false, true},
+		{"malformed host fails closed", "a:b:c:d", schemeHTTPS, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := server.portAllowed(tt.hostPort, tt.scheme, tt.isConnect); got != tt.want {
+				t.Errorf("portAllowed(%q, %q, connect=%v) = %v, want %v", tt.hostPort, tt.scheme, tt.isConnect, got, tt.want)
+			}
+		})
+	}
+
+	// Explicit override replaces the defaults for both paths.
+	server.SetAllowedPorts([]int{22, 443})
+	if !server.portAllowed("github.com:22", schemeHTTPS, true) {
+		t.Error("port 22 should be allowed after opt-in")
+	}
+	if server.portAllowed("github.com:80", schemeHTTP, false) {
+		t.Error("port 80 should be blocked when override omits it")
+	}
+
+	// Empty slice restores defaults.
+	server.SetAllowedPorts(nil)
+	if server.portAllowed("github.com:22", schemeHTTPS, true) {
+		t.Error("port 22 should be blocked again after restoring defaults")
+	}
+}
+
+// TestConnect_PortRestrictionEndToEnd verifies destination-port enforcement through
+// the real proxy: with default ports (443 only) a CONNECT to a non-443 port is rejected
+// with 403 before any allowlist/tunnel decision, while opting the port in via
+// SetAllowedPorts lets the same CONNECT succeed.
+func TestConnect_PortRestrictionEndToEnd(t *testing.T) {
+	filter := allowlist.NewFilter()
+	filter.Add("127.0.0.1")
+	server := NewServer(filter, false) // tunnel mode (no MITM)
+	if err := server.SetAllowPrivateTargets([]string{"127.0.0.0/8"}); err != nil {
+		t.Fatalf("SetAllowPrivateTargets: %v", err)
+	}
+	// Deliberately do NOT allow all ports: exercise the default (443 only).
+	startTunnelModeServer(t, server)
+
+	// A CONNECT to an arbitrary non-443 port is rejected by the default policy.
+	rawConnectThroughAbox(t, server, "127.0.0.1:2222", http.StatusForbidden)
+
+	// After opting the port in, the CONNECT is no longer port-blocked. (It may
+	// still fail to reach a real upstream, but it must get past the 403 gate; we
+	// assert the negative: it is NOT 403 for a permitted port by checking a
+	// reachable echo upstream.)
+	echo := tunnelEchoServer(t)
+	_, portStr, err := net.SplitHostPort(echo.Addr().String())
+	if err != nil {
+		t.Fatalf("split echo addr: %v", err)
+	}
+	echoPort, _ := strconv.Atoi(portStr)
+	server.SetAllowedPorts([]int{echoPort})
+	rawConnectThroughAbox(t, server, echo.Addr().String(), http.StatusOK)
 }

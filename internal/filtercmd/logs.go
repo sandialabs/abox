@@ -77,6 +77,15 @@ func ViewLogs(opts LogOptions, name string, filterType FilterType) error {
 		return err
 	}
 
+	// Traffic and monitor logs carry guest-influenced strings (Tetragon exec
+	// args/paths, DNS query names, HTTP URLs). Render them through a sanitizing
+	// writer so a malicious guest cannot smuggle ANSI/OSC escape sequences into
+	// the operator's terminal. The on-disk log files stay byte-for-byte faithful;
+	// only the terminal rendering is sanitized. Service logs are abox-authored,
+	// but sanitizing them too is harmless and keeps a single code path. This wraps
+	// every downstream sink (plain tail, jq-follow, jq-tail) at one boundary.
+	opts.Out = logutil.NewSanitizingWriter(opts.Out)
+
 	t, err := resolveLogTarget(paths, filterType, opts.Service)
 	if err != nil {
 		return err

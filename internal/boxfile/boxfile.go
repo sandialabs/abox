@@ -21,6 +21,11 @@ import (
 // CurrentBoxfileVersion is the current version of the abox.yaml format.
 const CurrentBoxfileVersion = 1
 
+// overrideKeyTemplate is the overrides.<backend> key holding a custom domain
+// template. A custom template bypasses abox's default VM hardening, so the
+// trust gate treats it as security-relevant.
+const overrideKeyTemplate = "template"
+
 // BoxfileDNS holds DNS-related configuration in abox.yaml.
 type BoxfileDNS struct {
 	Upstream string `yaml:"upstream,omitempty"` // upstream DNS server
@@ -43,6 +48,10 @@ type BoxfileHTTP struct {
 	// default SSRF deny of private/loopback/link-local/metadata ranges. Empty =
 	// deny all such targets (the secure default).
 	AllowPrivateTargets []string `yaml:"allow_private_targets,omitempty"`
+	// AllowedPorts restricts the destination ports the proxy may reach. Empty =
+	// built-in defaults (443 for CONNECT, 80+443 for forward). Widening it is a
+	// security-relevant change surfaced by the abox.yaml trust prompt.
+	AllowedPorts []int `yaml:"allowed_ports,omitempty"`
 	// SecretInjections binds host-side secret store values into outbound request
 	// headers (see config.SecretInjection). The value lives in the secret store,
 	// never in abox.yaml.
@@ -155,21 +164,36 @@ func (b *Boxfile) GetMITMExceptions() []string {
 	return b.HTTP.MITMExceptions
 }
 
+// GetAllowedPorts returns the configured destination-port allow-list (nil if
+// unset = the proxy's built-in defaults).
+func (b *Boxfile) GetAllowedPorts() []int {
+	return b.HTTP.AllowedPorts
+}
+
 // Load reads abox.yaml from the specified directory (or current directory if empty).
 // Returns the parsed Boxfile and the directory containing the file.
 func Load(dir string) (*Boxfile, string, error) {
+	box, absDir, _, err := LoadRaw(dir)
+	return box, absDir, err
+}
+
+// LoadRaw is Load plus the exact raw abox.yaml bytes that were parsed. The trust
+// gate (see trust.go) fingerprints THESE bytes — never a second os.ReadFile — so
+// the recorded fingerprint always attests to the bytes actually used (no TOCTOU
+// between the hashed content and the parsed content).
+func LoadRaw(dir string) (*Boxfile, string, []byte, error) {
 	if dir == "" {
 		var err error
 		dir, err = os.Getwd()
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to get current directory: %w", err)
+			return nil, "", nil, fmt.Errorf("failed to get current directory: %w", err)
 		}
 	}
 
 	// Convert to absolute path
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to resolve path: %w", err)
+		return nil, "", nil, fmt.Errorf("failed to resolve path: %w", err)
 	}
 
 	return loadFile(filepath.Join(absDir, "abox.yaml"), true)
@@ -199,7 +223,8 @@ func LoadLenient(dir string) (*Boxfile, string, error) {
 		return nil, "", fmt.Errorf("failed to resolve path: %w", err)
 	}
 
-	return loadFile(filepath.Join(absDir, "abox.yaml"), false)
+	box, absDir, _, err := loadFile(filepath.Join(absDir, "abox.yaml"), false)
+	return box, absDir, err
 }
 
 // LoadFile reads a boxfile from an explicit path rather than looking for
@@ -211,15 +236,25 @@ func LoadLenient(dir string) (*Boxfile, string, error) {
 // this rather than Load(filepath.Dir(path)): Load always reads "abox.yaml", so
 // routing a named file through it silently loads a different file.
 func LoadFile(path string) (*Boxfile, string, error) {
+	box, absDir, _, err := loadFile(path, true)
+	return box, absDir, err
+}
+
+// LoadFileRaw is LoadFile plus the exact raw bytes that were parsed, with the
+// same TOCTOU guarantee as LoadRaw: the trust gate fingerprints these bytes,
+// never a second os.ReadFile.
+func LoadFileRaw(path string) (*Boxfile, string, []byte, error) {
 	return loadFile(path, true)
 }
 
 // loadFile parses a boxfile. When strict, unknown keys are rejected (see
 // decodeError); otherwise they are ignored, which is the historical behavior.
-func loadFile(path string, strict bool) (*Boxfile, string, error) {
+// The returned []byte is the exact raw content that was parsed, for the trust
+// fingerprint (see LoadRaw).
+func loadFile(path string, strict bool) (*Boxfile, string, []byte, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to resolve path: %w", err)
+		return nil, "", nil, fmt.Errorf("failed to resolve path: %w", err)
 	}
 	absDir := filepath.Dir(absPath)
 	name := filepath.Base(absPath)
@@ -227,9 +262,9 @@ func loadFile(path string, strict bool) (*Boxfile, string, error) {
 	data, err := os.ReadFile(absPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, "", fmt.Errorf("%s not found in %s", name, absDir)
+			return nil, "", nil, fmt.Errorf("%s not found in %s", name, absDir)
 		}
-		return nil, "", fmt.Errorf("failed to read %s: %w", name, err)
+		return nil, "", nil, fmt.Errorf("failed to read %s: %w", name, err)
 	}
 
 	// Pass 1: permissive, to read the version before anything can reject the
@@ -238,7 +273,7 @@ func loadFile(path string, strict bool) (*Boxfile, string, error) {
 	// buried under unknown-key errors for keys that abox simply doesn't have yet.
 	var raw map[string]any
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, "", fmt.Errorf("failed to parse %s: %w", name, err)
+		return nil, "", nil, fmt.Errorf("failed to parse %s: %w", name, err)
 	}
 	// The version gate and the single-document check are skipped when lenient:
 	// the lenient caller (teardown) only needs the instance name, and a version
@@ -246,7 +281,7 @@ func loadFile(path string, strict bool) (*Boxfile, string, error) {
 	// user and stopping a running VM.
 	if strict {
 		if err := checkBoxfileVersion(name, raw); err != nil {
-			return nil, "", err
+			return nil, "", nil, err
 		}
 	}
 
@@ -262,18 +297,18 @@ func loadFile(path string, strict bool) (*Boxfile, string, error) {
 		// either way, since there is nothing usable to return.
 		var typeErr *yaml.TypeError
 		if strict || !errors.As(err, &typeErr) {
-			return nil, "", decodeError(name, err)
+			return nil, "", nil, decodeError(name, err)
 		}
 	}
 	box.srcName = name
 
 	if strict {
 		if err := checkSingleDocument(name, dec); err != nil {
-			return nil, "", err
+			return nil, "", nil, err
 		}
 	}
 
-	return box, absDir, nil
+	return box, absDir, data, nil
 }
 
 // checkBoxfileVersion enforces the required, supported version: field, reading

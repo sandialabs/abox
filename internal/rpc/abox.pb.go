@@ -243,6 +243,7 @@ type EgressReq struct {
 	DnsPort       int32                  `protobuf:"varint,2,opt,name=dns_port,json=dnsPort,proto3" json:"dns_port,omitempty"`                  // dnsfilter listen port (REDIRECT target + INPUT accept)
 	HttpPort      int32                  `protobuf:"varint,3,opt,name=http_port,json=httpPort,proto3" json:"http_port,omitempty"`               // httpfilter listen port (INPUT accept)
 	GuestDnsPort  int32                  `protobuf:"varint,4,opt,name=guest_dns_port,json=guestDnsPort,proto3" json:"guest_dns_port,omitempty"` // guest-facing DNS port REDIRECTed to dns_port (normally 53)
+	Gateway       string                 `protobuf:"bytes,7,opt,name=gateway,proto3" json:"gateway,omitempty"`                                  // bridge gateway IPv4; pins the HTTP/ICMP INPUT accepts to -d <gateway>
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -303,6 +304,13 @@ func (x *EgressReq) GetGuestDnsPort() int32 {
 		return x.GuestDnsPort
 	}
 	return 0
+}
+
+func (x *EgressReq) GetGateway() string {
+	if x != nil {
+		return x.Gateway
+	}
+	return ""
 }
 
 // Pf-specific messages. The subnet is the single source of truth for what the
@@ -1049,12 +1057,13 @@ const file_internal_rpc_abox_proto_rawDesc = "" +
 	"\x06domain\x18\x01 \x01(\tR\x06domain\"&\n" +
 	"\n" +
 	"DomainList\x12\x18\n" +
-	"\adomains\x18\x01 \x03(\tR\adomains\"\xa5\x01\n" +
+	"\adomains\x18\x01 \x03(\tR\adomains\"\xbf\x01\n" +
 	"\tEgressReq\x12\x16\n" +
 	"\x06bridge\x18\x01 \x01(\tR\x06bridge\x12\x19\n" +
 	"\bdns_port\x18\x02 \x01(\x05R\adnsPort\x12\x1b\n" +
 	"\thttp_port\x18\x03 \x01(\x05R\bhttpPort\x12$\n" +
-	"\x0eguest_dns_port\x18\x04 \x01(\x05R\fguestDnsPortJ\x04\b\x05\x10\x06J\x04\b\x06\x10\aR\n" +
+	"\x0eguest_dns_port\x18\x04 \x01(\x05R\fguestDnsPort\x12\x18\n" +
+	"\agateway\x18\a \x01(\tR\agatewayJ\x04\b\x05\x10\x06J\x04\b\x06\x10\aR\n" +
 	"allow_dhcpR\n" +
 	"allow_icmp\"W\n" +
 	"\vPfAnchorReq\x12\x1a\n" +

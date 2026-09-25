@@ -769,6 +769,23 @@ func TestInstance_Validate(t *testing.T) {
 			inst: validInstance("test"),
 		},
 		{
+			// 1 and 65535 are the inclusive bounds of the accepted range.
+			name: "valid with allowed ports at range bounds",
+			inst: func() Instance { i := validInstance("test"); i.HTTP.AllowedPorts = []int{1, 443, 65535}; return i }(),
+		},
+		{
+			name: "valid with empty allowed ports",
+			inst: func() Instance { i := validInstance("test"); i.HTTP.AllowedPorts = nil; return i }(),
+		},
+		{
+			name: "valid with allow_private_targets cidr",
+			inst: func() Instance {
+				i := validInstance("test")
+				i.HTTP.AllowPrivateTargets = []string{"10.0.0.0/8", "192.168.0.0/16"}
+				return i
+			}(),
+		},
+		{
 			name:    "invalid name",
 			inst:    validInstance("../bad"),
 			wantErr: true,
@@ -801,6 +818,55 @@ func TestInstance_Validate(t *testing.T) {
 		{
 			name:    "http log level command injection",
 			inst:    func() Instance { i := validInstance("test"); i.HTTP.LogLevel = "info; rm -rf /"; return i }(),
+			wantErr: true,
+		},
+		{
+			name:    "allowed port zero",
+			inst:    func() Instance { i := validInstance("test"); i.HTTP.AllowedPorts = []int{0}; return i }(),
+			wantErr: true,
+		},
+		{
+			name:    "allowed port negative",
+			inst:    func() Instance { i := validInstance("test"); i.HTTP.AllowedPorts = []int{-1}; return i }(),
+			wantErr: true,
+		},
+		{
+			name:    "allowed port above range",
+			inst:    func() Instance { i := validInstance("test"); i.HTTP.AllowedPorts = []int{65536}; return i }(),
+			wantErr: true,
+		},
+		{
+			// The loop must check every entry, not just the first.
+			name:    "allowed port invalid in trailing position",
+			inst:    func() Instance { i := validInstance("test"); i.HTTP.AllowedPorts = []int{443, 99999}; return i }(),
+			wantErr: true,
+		},
+		{
+			name: "invalid allow_private_targets cidr",
+			inst: func() Instance {
+				i := validInstance("test")
+				i.HTTP.AllowPrivateTargets = []string{"not-a-cidr"}
+				return i
+			}(),
+			wantErr: true,
+		},
+		{
+			// A bare IP is not a CIDR block; net.ParseCIDR must reject it.
+			name: "allow_private_targets bare ip",
+			inst: func() Instance {
+				i := validInstance("test")
+				i.HTTP.AllowPrivateTargets = []string{"10.0.0.1"}
+				return i
+			}(),
+			wantErr: true,
+		},
+		{
+			name: "invalid allow_private_targets cidr in trailing position",
+			inst: func() Instance {
+				i := validInstance("test")
+				i.HTTP.AllowPrivateTargets = []string{"10.0.0.0/8", "999.0.0.0/8"}
+				return i
+			}(),
 			wantErr: true,
 		},
 		{

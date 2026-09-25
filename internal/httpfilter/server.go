@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -117,6 +118,16 @@ type Server struct {
 	// maxConns caps concurrent client connections (0 = unlimited). Bounds host
 	// fd/goroutine use against a hostile VM. Read once in Start.
 	maxConns int
+
+	// allowedPorts is the set of destination ports the proxy may reach (config:
+	// http.allowed_ports). nil means "use the built-in defaults" (443 for
+	// CONNECT/tunnel, 80+443 for absolute-URI forward requests). When non-nil it
+	// replaces the default for both paths. Set once before Start; read on the
+	// request path. Restricting the port prevents an allowlisted host from being
+	// reached on an arbitrary port (e.g. raw-TCP smuggling through a CONNECT
+	// tunnel). Guest-supplied, so widening it beyond the default is surfaced by
+	// the abox.yaml trust prompt (boxfile.SecuritySummary).
+	allowedPorts map[int]bool
 
 	// TLS key logging for packet capture (abox tap)
 	keyLog     *keyLogWriter // shared writer set on all MITM TLS configs
@@ -275,6 +286,26 @@ func (s *Server) checkHost(host string) (allowed, blockedBySSRF bool) {
 
 	allowed = explicitlyAllowed || !s.IsActive()
 	return allowed, false
+}
+
+// auditPortBlocked records a request rejected because its destination port is
+// not in the allowed set. host is the bare hostname, hostPort the full target,
+// urlStr the request URL for forward requests ("" for CONNECT).
+func (s *Server) auditPortBlocked(host, hostPort, urlStr string) {
+	atomic.AddUint64(&s.stats.TotalRequests, 1)
+	atomic.AddUint64(&s.stats.BlockedRequests, 1)
+	logging.Audit("http blocked disallowed port",
+		"action", logging.ActionHTTPBlockPort,
+		"host", host,
+		"target", hostPort,
+	)
+	if logger := s.TrafficLogger(); logger != nil {
+		opts := []logging.EventOption{}
+		if urlStr != "" {
+			opts = append(opts, logging.WithURL(urlStr))
+		}
+		logger.LogBlock(host, "port_not_allowed", "", opts...)
+	}
 }
 
 // decideConnect is the policy callback invoked from proxy.go for every CONNECT
@@ -454,6 +485,76 @@ func (s *Server) SetMaxConns(n int) {
 		n = 0
 	}
 	s.maxConns = n
+}
+
+// defaultConnectPorts / defaultForwardPorts are the built-in destination-port
+// allowlists used when http.allowed_ports is unset. CONNECT (and its tunnel)
+// defaults to HTTPS only; absolute-URI forward requests also allow plain HTTP.
+var (
+	defaultConnectPorts = map[int]bool{443: true}
+	defaultForwardPorts = map[int]bool{80: true, 443: true}
+)
+
+// SetAllowedPorts overrides the destination-port allowlist for both the CONNECT
+// and forward paths (config: http.allowed_ports). An empty/nil slice restores
+// the built-in defaults. Must be called before Start. Invalid entries (outside
+// 1-65535) are ignored; duplicates are de-duplicated.
+func (s *Server) SetAllowedPorts(ports []int) {
+	if len(ports) == 0 {
+		s.allowedPorts = nil
+		return
+	}
+	set := make(map[int]bool, len(ports))
+	for _, p := range ports {
+		if p >= 1 && p <= 65535 {
+			set[p] = true
+		}
+	}
+	if len(set) == 0 {
+		s.allowedPorts = nil
+		return
+	}
+	s.allowedPorts = set
+}
+
+// portAllowed reports whether the destination port in hostPort is permitted.
+// isConnect selects the CONNECT/tunnel default set (443) vs the forward default
+// set (80+443); a configured allowedPorts overrides both. scheme supplies the
+// default port when hostPort carries none (forward requests often omit it).
+//
+// It fails CLOSED: any parse error other than a genuinely missing port (which
+// falls back to the scheme default) is treated as not-allowed. This prevents a
+// malformed Host from silently bypassing the port restriction.
+func (s *Server) portAllowed(hostPort, scheme string, isConnect bool) bool {
+	allowed := s.allowedPorts
+	if allowed == nil {
+		if isConnect {
+			allowed = defaultConnectPorts
+		} else {
+			allowed = defaultForwardPorts
+		}
+	}
+
+	_, portStr, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		// Missing port: use the scheme default (http=80, https=443). Any other
+		// parse error is treated as unparseable → fail closed.
+		if !strings.Contains(err.Error(), "missing port") {
+			return false
+		}
+		switch scheme {
+		case schemeHTTP:
+			portStr = "80"
+		default:
+			portStr = "443"
+		}
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return false
+	}
+	return allowed[port]
 }
 
 // SetAllowPrivateTargets configures the opt-in list of otherwise-blocked

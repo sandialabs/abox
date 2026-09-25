@@ -265,10 +265,19 @@ abox net filter dev passive   # Allow all, capture domains
 abox net filter dev active    # Enable blocking
 ```
 
+Both `add` and `remove` persist to the allowlist file (`remove` rewrites the
+file, preserving comments, ordering, and other entries), so a removal survives a
+daemon restart, `allowlist reload`, or a later `add`. Changes also apply live to
+the running filters.
+
 The allowlist file location:
 ```
 ~/.local/share/abox/instances/<name>/allowlist.conf
 ```
+
+When an instance is driven by `abox.yaml`, re-running `abox up` reconciles this
+file against the `allowlist:` block — see
+[Syncing the allowlist on abox up](abox-yaml.md#syncing-the-allowlist-on-abox-up).
 
 ### Allowlist Syntax
 

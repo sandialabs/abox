@@ -23,6 +23,9 @@ func TestCommonOptions(t *testing.T) {
 		"-o", "UserKnownHostsFile=/home/user/.local/share/abox/instances/test/known_hosts",
 		"-o", "ControlPath=none",
 		"-o", "LogLevel=ERROR",
+		"-o", "ForwardAgent=no",
+		"-o", "ForwardX11=no",
+		"-o", "ForwardX11Trusted=no",
 	}
 
 	if !reflect.DeepEqual(options, expected) {
@@ -70,21 +73,21 @@ func TestBuildSSHArgs(t *testing.T) {
 			user:     "ubuntu",
 			ip:       "10.10.10.2",
 			cmd:      nil,
-			expected: []string{"-i", "/path/to/key", "-o", "IdentitiesOnly=yes", "-o", "PubkeyAcceptedKeyTypes=+ssh-ed25519", "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=/path/to/known_hosts", "-o", "ControlPath=none", "-o", "LogLevel=ERROR", "ubuntu@10.10.10.2"},
+			expected: []string{"-i", "/path/to/key", "-o", "IdentitiesOnly=yes", "-o", "PubkeyAcceptedKeyTypes=+ssh-ed25519", "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=/path/to/known_hosts", "-o", "ControlPath=none", "-o", "LogLevel=ERROR", "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "ubuntu@10.10.10.2"},
 		},
 		{
 			name:     "single-command",
 			user:     "ubuntu",
 			ip:       "10.10.10.2",
 			cmd:      []string{"ls", "-la"},
-			expected: []string{"-i", "/path/to/key", "-o", "IdentitiesOnly=yes", "-o", "PubkeyAcceptedKeyTypes=+ssh-ed25519", "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=/path/to/known_hosts", "-o", "ControlPath=none", "-o", "LogLevel=ERROR", "ubuntu@10.10.10.2", "ls", "-la"},
+			expected: []string{"-i", "/path/to/key", "-o", "IdentitiesOnly=yes", "-o", "PubkeyAcceptedKeyTypes=+ssh-ed25519", "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=/path/to/known_hosts", "-o", "ControlPath=none", "-o", "LogLevel=ERROR", "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "ubuntu@10.10.10.2", "ls", "-la"},
 		},
 		{
 			name:     "complex-command",
 			user:     "root",
 			ip:       "192.168.1.1",
 			cmd:      []string{"cat", "/etc/hosts"},
-			expected: []string{"-i", "/path/to/key", "-o", "IdentitiesOnly=yes", "-o", "PubkeyAcceptedKeyTypes=+ssh-ed25519", "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=/path/to/known_hosts", "-o", "ControlPath=none", "-o", "LogLevel=ERROR", "root@192.168.1.1", "cat", "/etc/hosts"},
+			expected: []string{"-i", "/path/to/key", "-o", "IdentitiesOnly=yes", "-o", "PubkeyAcceptedKeyTypes=+ssh-ed25519", "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=/path/to/known_hosts", "-o", "ControlPath=none", "-o", "LogLevel=ERROR", "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "root@192.168.1.1", "cat", "/etc/hosts"},
 		},
 	}
 
@@ -116,14 +119,21 @@ func TestBuildSCPArgs(t *testing.T) {
 			source:    "/local/file.txt",
 			dest:      "user@host:/remote/path",
 			recursive: false,
-			expected:  []string{"-O", "-i", "/path/to/key", "-o", "IdentitiesOnly=yes", "-o", "PubkeyAcceptedKeyTypes=+ssh-ed25519", "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=/path/to/known_hosts", "-o", "ControlPath=none", "-o", "LogLevel=ERROR", "/local/file.txt", "user@host:/remote/path"},
+			expected:  []string{"-O", "-i", "/path/to/key", "-o", "IdentitiesOnly=yes", "-o", "PubkeyAcceptedKeyTypes=+ssh-ed25519", "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=/path/to/known_hosts", "-o", "ControlPath=none", "-o", "LogLevel=ERROR", "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "--", "/local/file.txt", "user@host:/remote/path"},
 		},
 		{
 			name:      "recursive",
 			source:    "/local/dir",
 			dest:      "user@host:/remote/path",
 			recursive: true,
-			expected:  []string{"-r", "-O", "-i", "/path/to/key", "-o", "IdentitiesOnly=yes", "-o", "PubkeyAcceptedKeyTypes=+ssh-ed25519", "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=/path/to/known_hosts", "-o", "ControlPath=none", "-o", "LogLevel=ERROR", "/local/dir", "user@host:/remote/path"},
+			expected:  []string{"-r", "-O", "-i", "/path/to/key", "-o", "IdentitiesOnly=yes", "-o", "PubkeyAcceptedKeyTypes=+ssh-ed25519", "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=/path/to/known_hosts", "-o", "ControlPath=none", "-o", "LogLevel=ERROR", "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "--", "/local/dir", "user@host:/remote/path"},
+		},
+		{
+			name:      "dash-prefixed source is not treated as a flag",
+			source:    "-oProxyCommand=evil",
+			dest:      "user@host:/remote/path",
+			recursive: false,
+			expected:  []string{"-O", "-i", "/path/to/key", "-o", "IdentitiesOnly=yes", "-o", "PubkeyAcceptedKeyTypes=+ssh-ed25519", "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=/path/to/known_hosts", "-o", "ControlPath=none", "-o", "LogLevel=ERROR", "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ForwardX11Trusted=no", "--", "-oProxyCommand=evil", "user@host:/remote/path"},
 		},
 	}
 

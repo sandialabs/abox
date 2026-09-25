@@ -64,6 +64,12 @@ func (s *IOStreams) IsTerminal() bool {
 	return s.isTerminal
 }
 
+// SetTerminal overrides the terminal detection. Intended for tests that need to
+// exercise interactive code paths against buffer-backed IOStreams.
+func (s *IOStreams) SetTerminal(isTerminal bool) {
+	s.isTerminal = isTerminal
+}
+
 // SetOutput redirects both Out and ErrOut to w and saves the originals
 // so they can be restored with RestoreOutput.
 func (s *IOStreams) SetOutput(w io.Writer) {

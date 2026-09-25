@@ -74,6 +74,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) handleConnect(w http.ResponseWriter, r *http.Request) {
+	// Restrict the CONNECT target port BEFORE the allowlist/MITM decision, so no
+	// future exception path can bypass it. r.Host carries the explicit port that
+	// CONNECT requests always include (per RFC); extractHost strips it for the
+	// host checks, so read the port from the raw r.Host here.
+	if !h.s.portAllowed(r.Host, schemeHTTPS, true) {
+		h.s.auditPortBlocked(extractHost(r.Host), r.Host, "")
+		http.Error(w, "Access denied", http.StatusForbidden)
+		return
+	}
 	host := extractHost(r.Host)
 	switch h.s.decideConnect(host) {
 	case actionReject:
@@ -225,6 +234,17 @@ func (h *handler) requestHandler(connectTarget string) http.Handler {
 			r.URL.Host = connectTarget
 		} else if r.URL.Host == "" {
 			r.URL.Host = r.Host
+		}
+
+		// Restrict the destination port for forward-proxy (absolute-URI) requests.
+		// MITM'd requests (connectTarget != "") already had their port vetted at
+		// CONNECT time in handleConnect, so only gate the forward path here.
+		if connectTarget == "" && !h.s.portAllowed(r.URL.Host, r.URL.Scheme, false) {
+			h.s.auditPortBlocked(extractHost(r.URL.Host), r.URL.Host, urlString(r))
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, "Access denied\n")
+			return
 		}
 
 		d := h.s.decideRequest(r, connectTarget)

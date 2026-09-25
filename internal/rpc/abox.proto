@@ -101,6 +101,7 @@ message EgressReq {
   int32 dns_port = 2;        // dnsfilter listen port (REDIRECT target + INPUT accept)
   int32 http_port = 3;       // httpfilter listen port (INPUT accept)
   int32 guest_dns_port = 4;  // guest-facing DNS port REDIRECTed to dns_port (normally 53)
+  string gateway = 7;        // bridge gateway IPv4; pins the HTTP/ICMP INPUT accepts to -d <gateway>
 }
 
 // Pf-specific messages. The subnet is the single source of truth for what the

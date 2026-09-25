@@ -167,6 +167,10 @@ type HTTPConfig struct {
 	// reach despite the default SSRF deny of loopback/private/link-local/metadata
 	// ranges. Empty = deny all such targets. Shared by both filters.
 	AllowPrivateTargets []string `yaml:"allow_private_targets,omitempty"`
+	// AllowedPorts restricts the destination ports the proxy may reach. Empty =
+	// built-in defaults (443 for CONNECT/tunnel, 80+443 for absolute-URI forward
+	// requests). Widening it lets an allowlisted host be reached on other ports.
+	AllowedPorts []int `yaml:"allowed_ports,omitempty"`
 	// SecretInjections maps host-side secret values into outbound request headers
 	// so the guest never holds the raw credential. Each binding references a key in
 	// the per-instance secret store; only the non-sensitive mapping lives here.
@@ -800,38 +804,9 @@ func (i *Instance) Validate() error {
 		return fmt.Errorf("dns: %w", err)
 	}
 
-	// Validate HTTP log level
-	if err := validation.ValidateLogLevel(i.HTTP.LogLevel); err != nil {
-		return fmt.Errorf("http: %w", err)
-	}
-
-	// Validate HTTP max connections (0 = unset, resolved to the default at startup).
-	if i.HTTP.MaxConnections < 0 {
-		return fmt.Errorf("http: max_connections must be >= 0 (got %d)", i.HTTP.MaxConnections)
-	}
-
-	// Validate allow_private_targets CIDR syntax so a hand-edited config.yaml fails
-	// at Load rather than only when the daemon starts (mirrors boxfile.Validate,
-	// which uses filterbase.NewTargetChecker). We only check syntax here — config
-	// cannot import filterbase (filterbase imports config), so the full policy
-	// check (e.g. rejecting a default-route CIDR) still happens at daemon start via
-	// filterbase.NewTargetChecker.
-	for _, cidr := range i.HTTP.AllowPrivateTargets {
-		if _, _, err := net.ParseCIDR(cidr); err != nil {
-			return fmt.Errorf("http: invalid allow_private_targets CIDR %q: %w", cidr, err)
-		}
-	}
-
-	// Validate secret-injection bindings so a hand-edited config.yaml fails at
-	// Load rather than only when the daemon starts.
-	if err := ValidateSecretInjections(i.HTTP.SecretInjections); err != nil {
-		return fmt.Errorf("http: %w", err)
-	}
-
-	// Validate MITM exceptions (and their conflict with secret injections) so a
-	// hand-edited config.yaml fails at Load rather than only when the daemon starts.
-	if err := ValidateMITMExceptions(i.HTTP.MITMExceptions, i.HTTP.SecretInjections); err != nil {
-		return fmt.Errorf("http: %w", err)
+	// Validate the HTTP filter settings
+	if err := validateHTTPConfig(&i.HTTP); err != nil {
+		return err
 	}
 
 	// Note: DNS/HTTP filter ports are NOT range-validated here. They are normally
@@ -854,6 +829,54 @@ func (i *Instance) Validate() error {
 
 	// Validate disk size
 	return validation.ValidateDiskSize(i.Disk)
+}
+
+// validateHTTPConfig checks the HTTP filter settings. Split out of Validate so
+// that function stays within its cognitive-complexity budget; each check already
+// prefixes its own error with "http: ", so callers must not wrap again.
+func validateHTTPConfig(h *HTTPConfig) error {
+	// Validate HTTP log level
+	if err := validation.ValidateLogLevel(h.LogLevel); err != nil {
+		return fmt.Errorf("http: %w", err)
+	}
+
+	// Validate HTTP max connections (0 = unset, resolved to the default at startup).
+	if h.MaxConnections < 0 {
+		return fmt.Errorf("http: max_connections must be >= 0 (got %d)", h.MaxConnections)
+	}
+
+	// Validate allow_private_targets CIDR syntax so a hand-edited config.yaml fails
+	// at Load rather than only when the daemon starts (mirrors boxfile.Validate,
+	// which uses filterbase.NewTargetChecker). We only check syntax here — config
+	// cannot import filterbase (filterbase imports config), so the full policy
+	// check (e.g. rejecting a default-route CIDR) still happens at daemon start via
+	// filterbase.NewTargetChecker.
+	for _, cidr := range h.AllowPrivateTargets {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return fmt.Errorf("http: invalid allow_private_targets CIDR %q: %w", cidr, err)
+		}
+	}
+
+	// Validate allowed_ports range (1-65535); empty = built-in defaults.
+	for _, p := range h.AllowedPorts {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("http: allowed_ports entries must be 1-65535 (got %d)", p)
+		}
+	}
+
+	// Validate secret-injection bindings so a hand-edited config.yaml fails at
+	// Load rather than only when the daemon starts.
+	if err := ValidateSecretInjections(h.SecretInjections); err != nil {
+		return fmt.Errorf("http: %w", err)
+	}
+
+	// Validate MITM exceptions (and their conflict with secret injections) so a
+	// hand-edited config.yaml fails at Load rather than only when the daemon starts.
+	if err := ValidateMITMExceptions(h.MITMExceptions, h.SecretInjections); err != nil {
+		return fmt.Errorf("http: %w", err)
+	}
+
+	return nil
 }
 
 // IsLegacyStorage reports whether an instance's disk storage predates the

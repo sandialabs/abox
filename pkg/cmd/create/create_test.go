@@ -520,15 +520,34 @@ func assertDroppedKeysPersisted(t *testing.T, name string) {
 	}
 }
 
+// trustPrompter answers yes to every Confirm so tests whose boxfile carries
+// security-relevant keys can pass the first-use trust gate interactively; the
+// other prompt methods are unused.
+type trustPrompter struct{}
+
+func (trustPrompter) Confirm(string) bool                  { return true }
+func (trustPrompter) ConfirmWithDefault(string, bool) bool { return true }
+func (trustPrompter) Select(string, []cmdutil.Option) int  { return 0 }
+func (trustPrompter) SelectWithGroups(string, map[string][]cmdutil.Option, []string) int {
+	return 0
+}
+func (trustPrompter) Input(string, string) string                { return "" }
+func (trustPrompter) MultiSelect(string, []cmdutil.Option) []int { return nil }
+
 // TestRunCreate_FromFileHonorsBoxfileKeys covers `abox create --from-file`,
 // which used to drop allowlist: entirely (writing the deny-everything default
-// instead) because loadFromBoxfile never assigned opts.Allowlist.
+// instead) because the old boxfile-loading path never assigned opts.Allowlist.
 func TestRunCreate_FromFileHonorsBoxfileKeys(t *testing.T) {
 	isolateDataHome(t)
 	registerMockBackend(t, "mock", &mock.Backend{})
 
 	path := writeBoxfile(t, fmt.Sprintf(boxfileWithHTTPKeys, "fromfile"))
 	opts := &Options{Factory: newTestFactory(t), FromFile: path, Brief: true}
+	// The boxfile carries security-relevant keys (http.secret_injections,
+	// http.mitm_exceptions), so Run's first-use trust gate fires; confirm it
+	// interactively.
+	opts.Factory.IO.SetTerminal(true)
+	opts.Factory.Prompter = trustPrompter{}
 
 	if err := Run(context.Background(), opts, ""); err != nil {
 		t.Fatalf("Run(--from-file) error = %v", err)

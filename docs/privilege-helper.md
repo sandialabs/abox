@@ -124,6 +124,15 @@ abox checks for privilege escalation methods in this order:
 2. **Setuid helper** - checks `/usr/local/bin/abox-helper` and `/usr/bin/abox-helper`
 3. **sudo/pkexec** - interactive password prompt
 
+> **Security note (external helper mode).** `ABOX_PRIVILEGE_TOKEN` passed as an
+> environment variable is readable by any same-UID process via
+> `/proc/<pid>/environ` for the lifetime of the abox process, and may be captured
+> by shell history or session logs. This is the weaker configuration and is
+> intended for e2e/CI use. The normal spawn path pipes the token to the helper
+> over stdin, keeping it out of the environment and `/proc`. When you must use
+> external-helper mode, set the env vars only in a trusted, short-lived shell and
+> do not persist them.
+
 ### Uninstalling
 
 ```bash

@@ -16,6 +16,7 @@ import (
 	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/pfvalidate"
 	"github.com/sandialabs/abox/internal/rpc"
+	"github.com/sandialabs/abox/internal/validation"
 )
 
 // Supported iptables protocols for DNS/HTTP redirect rules.
@@ -28,8 +29,9 @@ const (
 // startup and cached for the process lifetime. iptables is the only external
 // command the egress helper invokes.
 var (
-	iptablesMu  sync.RWMutex
-	iptablesAbs string
+	iptablesMu   sync.RWMutex
+	iptablesAbs  string
+	ip6tablesAbs string
 )
 
 // iptablesPath returns the resolved absolute path for iptables, falling back to
@@ -42,6 +44,16 @@ func iptablesPath() string {
 		return iptablesAbs
 	}
 	return "iptables"
+}
+
+// ip6tablesPath returns the resolved absolute path for ip6tables, or "" if it
+// was not found at resolution time. Callers must treat "" as "ip6tables
+// unavailable" and decide (fail-closed) based on whether IPv6 is actually
+// enabled on the host (see ensureIPv6Denied).
+func ip6tablesPath() string {
+	iptablesMu.RLock()
+	defer iptablesMu.RUnlock()
+	return ip6tablesAbs
 }
 
 // iptablesRun and iptablesCheck are the two seams through which every iptables
@@ -69,6 +81,33 @@ var (
 	// the seam the flush routines use to enumerate existing rules for a bridge.
 	iptablesList = func(args ...string) ([]byte, error) {
 		cmd, err := safeCommand(iptablesPath(), args...)
+		if err != nil {
+			return nil, err
+		}
+		return cmd.Output()
+	}
+)
+
+// ip6tablesRun / ip6tablesCheck / ip6tablesList are the IPv6 counterparts of the
+// iptables seams above, used to install the IPv6 default-deny chains. They are
+// package-level vars so tests can fake them independently of the IPv4 seams.
+var (
+	ip6tablesRun = func(args ...string) ([]byte, error) {
+		cmd, err := safeCommand(ip6tablesPath(), args...)
+		if err != nil {
+			return nil, err
+		}
+		return cmd.CombinedOutput()
+	}
+	ip6tablesCheck = func(args ...string) bool {
+		cmd, err := safeCommand(ip6tablesPath(), args...)
+		if err != nil {
+			return false
+		}
+		return cmd.Run() == nil
+	}
+	ip6tablesList = func(args ...string) ([]byte, error) {
+		cmd, err := safeCommand(ip6tablesPath(), args...)
 		if err != nil {
 			return nil, err
 		}
@@ -145,6 +184,17 @@ func validateGuestPort(p int32) (string, error) {
 	return strconv.Itoa(port), nil
 }
 
+// validateGateway validates the bridge gateway address as a strict IPv4 dotted
+// quad before it is ever placed into an iptables `-d` argument. This is a trust
+// boundary: an unvalidated value could carry a hostname (which `iptables -d`
+// would DNS-resolve at rule-install time) or otherwise unexpected input.
+func validateGateway(gw string) (string, error) {
+	if err := validation.ValidateIPv4(gw); err != nil {
+		return "", err
+	}
+	return gw, nil
+}
+
 // ruleParams holds the resolved, validated egress rule parameters for a bridge.
 // It is the helper's view of a backend.EgressPolicy: the single description of
 // what the helper installs/flushes/verifies for a bridge. Gateway ICMP is always
@@ -156,6 +206,7 @@ type ruleParams struct {
 	guestDNS string // guest-facing DNS port REDIRECTed to dnsPort (e.g. "53")
 	dnsPort  string // dnsfilter listen port
 	httpPort string // httpfilter listen port
+	gateway  string // bridge gateway IPv4; pins the HTTP/ICMP INPUT accepts (empty = unpinned)
 }
 
 // resolveRules validates an EgressReq (a trust boundary: every field is bounded
@@ -185,6 +236,11 @@ func resolveRules(req *rpc.EgressReq, lenient bool) (*ruleParams, error) {
 		if s, err := validatePort(req.HttpPort); err == nil {
 			r.httpPort = s
 		}
+		// A malformed/empty gateway on teardown is dropped from the match set
+		// (the accept without -d still matches for deletion); never fail a flush.
+		if s, err := validateGateway(req.Gateway); err == nil {
+			r.gateway = s
+		}
 		return r, nil
 	}
 
@@ -200,9 +256,17 @@ func resolveRules(req *rpc.EgressReq, lenient bool) (*ruleParams, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid guest_dns_port: %w", err)
 	}
+	// The gateway is REQUIRED on Apply: it pins the HTTP/ICMP accepts to the
+	// gateway destination. Hard-fail rather than install an under-scoped accept
+	// (an old client that does not set it surfaces here during a rolling upgrade).
+	gwStr, err := validateGateway(req.Gateway)
+	if err != nil {
+		return nil, fmt.Errorf("invalid gateway: %w", err)
+	}
 	r.guestDNS = guestStr
 	r.dnsPort = dnsStr
 	r.httpPort = httpStr
+	r.gateway = gwStr
 	return r, nil
 }
 
@@ -266,14 +330,14 @@ var (
 // prefixes (see chainPrefix / fwdChainPrefix) guarantee the INPUT and FORWARD
 // chains for one bridge never collide.
 //
-// Rationale for a dedicated chain (M1/M2 fix): a bare `-A INPUT ... -j DROP` at
+// Rationale for a dedicated chain: a bare `-A INPUT ... -j DROP` at
 // the bottom of INPUT is unreachable on any host that has an earlier broad accept
 // (ufw/firewalld/docker commonly append `-A INPUT ... -j ACCEPT`), silently
 // killing the guest->host deny while the rule still "exists" (so a naive Verify
 // passes). Putting the whole set in a dedicated chain and jumping to it from the
-// parent chain at position 1 guarantees reachability (M1), and lets teardown
+// parent chain at position 1 guarantees reachability, and lets teardown
 // remove the entire chain instead of pattern-matching individual rules that could
-// collide with an operator's own rules (M2).
+// collide with an operator's own rules.
 func (c chainSpec) name(bridge string) string {
 	sum := sha256.Sum256([]byte(bridge))
 	return c.prefix + hex.EncodeToString(sum[:8])
@@ -297,13 +361,30 @@ func (c chainSpec) insertJumpArgs(bridge string) []string {
 
 // chainAcceptArgs builds a `-A <chain>` ACCEPT rule for a proto/port, appended to
 // the dedicated INPUT chain (order within the chain is by append order).
-func chainAcceptArgs(verb, bridge, proto, port string) []string {
-	return []string{"-w", verb, inputChain.name(bridge), "-p", proto, "--dport", port, "-j", targetACCEPT}
+//
+// dest optionally pins the rule to a destination IP (`-d <dest>`). It MUST be
+// left empty for the DNS accepts: the NAT PREROUTING REDIRECT rewrites the
+// guest's DNS packet destination to loopback before it reaches INPUT, so a
+// `-d <gateway>` match would never fire and guest DNS would break. It is set to
+// the gateway for the HTTP proxy accept, where the guest addresses the gateway
+// directly and the destination is unmodified at INPUT.
+func chainAcceptArgs(verb, bridge, proto, port, dest string) []string {
+	args := []string{"-w", verb, inputChain.name(bridge)}
+	if dest != "" {
+		args = append(args, "-d", dest)
+	}
+	return append(args, "-p", proto, "--dport", port, "-j", targetACCEPT)
 }
 
-// chainICMPAcceptArgs builds the ICMP ACCEPT rule inside the dedicated INPUT chain.
-func chainICMPAcceptArgs(verb, bridge string) []string {
-	return []string{"-w", verb, inputChain.name(bridge), "-p", "icmp", "-j", targetACCEPT}
+// chainICMPAcceptArgs builds the ICMP ACCEPT rule inside the dedicated INPUT
+// chain. dest optionally pins it to the gateway (`-d <dest>`); the guest pings
+// the gateway directly, so this destination is not rewritten by NAT.
+func chainICMPAcceptArgs(verb, bridge, dest string) []string {
+	args := []string{"-w", verb, inputChain.name(bridge)}
+	if dest != "" {
+		args = append(args, "-d", dest)
+	}
+	return append(args, "-p", "icmp", "-j", targetACCEPT)
 }
 
 // establishedArgs builds the conntrack ESTABLISHED,RELATED ACCEPT inside a
@@ -340,16 +421,16 @@ func dropArgs(verb, chain string) []string {
 //     cloud-init, so there is no DHCP rule.)
 //  3. A single jump `-I INPUT 1 -i <bridge> -j <chain>` at the TOP of INPUT.
 //
-// Why a dedicated chain (M1/M2 hardening): all abox networks are host-only (no
+// Why a dedicated chain: all abox networks are host-only (no
 // uplink), so the topology already blocks guest->internet, but a guest can still
 // reach the HOST on non-filter ports, so the host itself must enforce the
 // guest->host deny. A bare DROP appended to the bottom of INPUT is UNREACHABLE on
 // any host that has an earlier broad accept (ufw/firewalld/docker commonly add
 // `-A INPUT ... -j ACCEPT`), silently killing the deny while the rule still exists.
 // Housing the whole set in a dedicated chain reached from INPUT position 1
-// guarantees the deny is evaluated before any other INPUT rule (M1), and lets
+// guarantees the deny is evaluated before any other INPUT rule, and lets
 // teardown drop the entire chain instead of pattern-matching individual rules that
-// could collide with an operator's own INPUT rules (M2).
+// could collide with an operator's own INPUT rules.
 //
 // Safety: the chain is entered only for `-i <bridge>` traffic (guest->host) and
 // its ESTABLISHED/DNS/HTTP/ICMP accepts precede the DROP, so guest->host
@@ -386,11 +467,13 @@ func (s *EgressServer) Apply(ctx context.Context, req *rpc.EgressReq) (*rpc.Empt
 	_ = s.flushNATRules(r)
 	_ = s.flushChainRules(inputChain, r)
 	_ = s.flushChainRules(forwardChain, r)
+	_ = s.flushV6Chains(r)
 
 	rollback := func() {
 		_ = s.flushNATRules(r)
 		_ = s.flushChainRules(inputChain, r)
 		_ = s.flushChainRules(forwardChain, r)
+		_ = s.flushV6Chains(r)
 	}
 
 	// NAT PREROUTING REDIRECT guestDNS -> dnsfilter port, for udp and tcp.
@@ -423,6 +506,14 @@ func (s *EgressServer) Apply(ctx context.Context, req *rpc.EgressReq) (*rpc.Empt
 		return nil, err
 	}
 
+	// IPv6 default-deny: the IPv4 rules above are blind to IPv6, so install
+	// the ip6tables INPUT/FORWARD default-deny too. Fails closed if IPv6 is live
+	// on the host but ip6tables is unavailable.
+	if err := s.ensureIPv6Denied(r); err != nil {
+		rollback()
+		return nil, err
+	}
+
 	return &rpc.Empty{}, nil
 }
 
@@ -447,14 +538,18 @@ func (s *EgressServer) buildChain(r *ruleParams) error {
 		return err
 	}
 	for _, proto := range []string{protoUDP, protoTCP} {
-		if err := s.appendRule(chainAcceptArgs("-A", r.bridge, proto, r.dnsPort)); err != nil {
+		// DNS accepts carry NO -d: the NAT REDIRECT rewrites the destination to
+		// loopback before INPUT, so pinning to the gateway would never match.
+		if err := s.appendRule(chainAcceptArgs("-A", r.bridge, proto, r.dnsPort, "")); err != nil {
 			return err
 		}
 	}
-	if err := s.appendRule(chainAcceptArgs("-A", r.bridge, protoTCP, r.httpPort)); err != nil {
+	// HTTP and ICMP are addressed to the gateway directly (no NAT rewrite), so
+	// pin them to -d <gateway> to prevent reaching any other host IP on the port.
+	if err := s.appendRule(chainAcceptArgs("-A", r.bridge, protoTCP, r.httpPort, r.gateway)); err != nil {
 		return err
 	}
-	if err := s.appendRule(chainICMPAcceptArgs("-A", r.bridge)); err != nil {
+	if err := s.appendRule(chainICMPAcceptArgs("-A", r.bridge, r.gateway)); err != nil {
 		return err
 	}
 	if err := s.appendRule(dropArgs("-A", inputChain.name(r.bridge))); err != nil {
@@ -553,15 +648,15 @@ func (s *EgressServer) alreadyApplied(r *ruleParams) bool {
 		ruleExists(natRedirectArgs("-C", r.bridge, protoTCP, r.guestDNS, r.dnsPort)...) &&
 		ruleExists(inputChain.jumpArgs("-C", r.bridge)...) &&
 		ruleExists(establishedArgs("-C", inputChain.name(r.bridge))...) &&
-		ruleExists(chainAcceptArgs("-C", r.bridge, protoUDP, r.dnsPort)...) &&
-		ruleExists(chainAcceptArgs("-C", r.bridge, protoTCP, r.dnsPort)...) &&
-		ruleExists(chainAcceptArgs("-C", r.bridge, protoTCP, r.httpPort)...) &&
-		ruleExists(chainICMPAcceptArgs("-C", r.bridge)...) &&
+		ruleExists(chainAcceptArgs("-C", r.bridge, protoUDP, r.dnsPort, "")...) &&
+		ruleExists(chainAcceptArgs("-C", r.bridge, protoTCP, r.dnsPort, "")...) &&
+		ruleExists(chainAcceptArgs("-C", r.bridge, protoTCP, r.httpPort, r.gateway)...) &&
+		ruleExists(chainICMPAcceptArgs("-C", r.bridge, r.gateway)...) &&
 		ruleExists(dropArgs("-C", inputChain.name(r.bridge))...)
 	if !applied {
 		return false
 	}
-	return s.fwdApplied(r)
+	return s.fwdApplied(r) && s.ipv6Applied(r)
 }
 
 // fwdApplied reports whether the FORWARD default-deny (jump + chain ESTABLISHED
@@ -597,7 +692,7 @@ func (s *EgressServer) Remove(ctx context.Context, req *rpc.EgressReq) (*rpc.Emp
 
 	// Surface flush failures so the teardown caller learns that stale host rules
 	// may have survived (unlike Apply, where stale-clearing is best-effort).
-	if err := errors.Join(s.flushNATRules(r), s.flushChainRules(inputChain, r), s.flushChainRules(forwardChain, r)); err != nil {
+	if err := errors.Join(s.flushNATRules(r), s.flushChainRules(inputChain, r), s.flushChainRules(forwardChain, r), s.flushV6Chains(r)); err != nil {
 		return nil, err
 	}
 
@@ -680,7 +775,7 @@ func natRuleIsAbox(line string, r *ruleParams) bool {
 // (idempotent). Because ALL of abox's rules for the family live inside the
 // dedicated chain — never spliced into the parent chain itself — teardown is a
 // whole-object delete: (1) remove every parent->chain jump, (2) flush the chain,
-// (3) delete the chain. This is the M2 fix: abox never pattern-matches individual
+// (3) delete the chain. abox never pattern-matches individual
 // parent-chain rules for deletion, so it can NEVER remove an operator's own rule
 // (even one that happens to be `-i <bridge> ... -j DROP`).
 //

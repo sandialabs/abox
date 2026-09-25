@@ -5,6 +5,7 @@ package privilege
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -21,53 +22,102 @@ type fakeIptables struct {
 	runCalls [][]string      // recorded mutating invocations (adds/deletes/chain ops)
 	present  map[string]bool // set of "-C ..." joined args that report as present
 	chains   map[string]bool // existing chain names
+
+	// IPv6 family state (separate namespace, as real ip6tables is).
+	v6RunCalls [][]string
+	v6Present  map[string]bool
+	v6Chains   map[string]bool
 }
 
-// installFakeIptables swaps the seams for the duration of the test.
+// installFakeIptables swaps the seams for the duration of the test. It fakes both
+// the IPv4 (iptables) and IPv6 (ip6tables) families; the v6 path is given a
+// resolved binary path so ip6tablesPath() is non-empty and ensureIPv6Denied
+// exercises the install path rather than the fail-closed skip.
 func installFakeIptables(t *testing.T) *fakeIptables {
 	t.Helper()
-	f := &fakeIptables{present: map[string]bool{}, chains: map[string]bool{}}
+	f := &fakeIptables{
+		present: map[string]bool{}, chains: map[string]bool{},
+		v6Present: map[string]bool{}, v6Chains: map[string]bool{},
+	}
 
 	origRun, origCheck, origList := iptablesRun, iptablesCheck, iptablesList
+	orig6Run, orig6Check, orig6List := ip6tablesRun, ip6tablesCheck, ip6tablesList
+	iptablesMu.Lock()
+	origAbs, orig6Abs := iptablesAbs, ip6tablesAbs
+	ip6tablesAbs = "/usr/sbin/ip6tables" // make ip6tablesPath() non-empty
+	iptablesMu.Unlock()
 	t.Cleanup(func() {
 		iptablesRun, iptablesCheck, iptablesList = origRun, origCheck, origList
+		ip6tablesRun, ip6tablesCheck, ip6tablesList = orig6Run, orig6Check, orig6List
+		iptablesMu.Lock()
+		iptablesAbs, ip6tablesAbs = origAbs, orig6Abs
+		iptablesMu.Unlock()
 	})
 
 	iptablesRun = func(args ...string) ([]byte, error) {
 		f.runCalls = append(f.runCalls, append([]string(nil), args...))
-		f.applyMutation(args)
+		applyMutation(f.present, f.chains, args)
 		return nil, nil
 	}
 	iptablesCheck = func(args ...string) bool {
 		return f.present[strings.Join(args, " ")]
 	}
 	iptablesList = func(args ...string) ([]byte, error) {
-		// args end with the chain name (e.g. "-w -S INPUT" or "-w -S ABOX-xxxx").
-		chain := args[len(args)-1]
-		if chain == "INPUT" || chain == "PREROUTING" {
-			return nil, nil // built-in chains always list
-		}
-		if !f.chains[chain] {
-			return nil, errors.New("no such chain")
-		}
+		return listChain(f.chains, args)
+	}
+
+	ip6tablesRun = func(args ...string) ([]byte, error) {
+		f.v6RunCalls = append(f.v6RunCalls, append([]string(nil), args...))
+		applyMutation(f.v6Present, f.v6Chains, args)
 		return nil, nil
 	}
+	ip6tablesCheck = func(args ...string) bool {
+		return f.v6Present[strings.Join(args, " ")]
+	}
+	ip6tablesList = func(args ...string) ([]byte, error) {
+		return listChain(f.v6Chains, args)
+	}
 	return f
+}
+
+// listChain models `iptables -S <chain>`: built-ins always list; a dedicated
+// chain lists only if it exists.
+func listChain(chains map[string]bool, args []string) ([]byte, error) {
+	chain := args[len(args)-1]
+	if chain == "INPUT" || chain == "PREROUTING" || chain == "FORWARD" {
+		return nil, nil
+	}
+	if !chains[chain] {
+		return nil, errors.New("no such chain")
+	}
+	return nil, nil
+}
+
+// markV6Present marks the IPv6 default-deny rule set (both families) present, so
+// alreadyApplied's ipv6Applied() check passes.
+func (f *fakeIptables) markV6Present(bridge string) {
+	for _, c := range []chainSpec{inputChain, forwardChain} {
+		f.v6Chains[c.name(bridge)] = true
+		f.v6Present[strings.Join(c.jumpArgs("-C", bridge), " ")] = true
+		f.v6Present[strings.Join(establishedArgs("-C", c.name(bridge)), " ")] = true
+		f.v6Present[strings.Join(dropArgs("-C", c.name(bridge)), " ")] = true
+	}
 }
 
 // applyMutation updates the modeled state to mirror real iptables: -N creates a
 // chain, -X removes it, -F is a no-op on state; an add (-A/-I) makes the
 // corresponding -C check succeed and a delete (-D) makes it fail. This lets
 // addNATRedirect's post-add verification and the jump idempotency (-C) work.
-func (f *fakeIptables) applyMutation(args []string) {
+// present/chains are the family-specific state maps (IPv4 or IPv6).
+func applyMutation(present, chains map[string]bool, args []string) {
 	// Chain lifecycle verbs: "-w -N <chain>" / "-w -X <chain>".
 	for i, a := range args {
 		if a == "-N" && i+1 < len(args) {
-			f.chains[args[i+1]] = true
+			chains[args[i+1]] = true
 			return
 		}
 		if a == "-X" && i+1 < len(args) {
-			delete(f.chains, args[i+1])
+			delete(chains, args[i+1])
 			return
 		}
 		if a == "-F" {
@@ -82,11 +132,11 @@ func (f *fakeIptables) applyMutation(args []string) {
 		switch a {
 		case "-A", "-I":
 			check[i] = "-C"
-			f.present[strings.Join(stripInsertPos(check), " ")] = true
+			present[strings.Join(stripInsertPos(check), " ")] = true
 			return
 		case "-D":
 			check[i] = "-C"
-			delete(f.present, strings.Join(check, " "))
+			delete(present, strings.Join(check, " "))
 			return
 		}
 	}
@@ -146,10 +196,10 @@ func (f *fakeIptables) inputNATRuleSet(bridge string) {
 	f.markPresent(natRedirectArgs("-C", bridge, protoTCP, testGuestDNS, testDNSPort)...)
 	f.markPresent(inputChain.jumpArgs("-C", bridge)...)
 	f.markPresent(establishedArgs("-C", inputChain.name(bridge))...)
-	f.markPresent(chainAcceptArgs("-C", bridge, protoUDP, testDNSPort)...)
-	f.markPresent(chainAcceptArgs("-C", bridge, protoTCP, testDNSPort)...)
-	f.markPresent(chainAcceptArgs("-C", bridge, protoTCP, testHTTPPort)...)
-	f.markPresent(chainICMPAcceptArgs("-C", bridge)...)
+	f.markPresent(chainAcceptArgs("-C", bridge, protoUDP, testDNSPort, "")...)
+	f.markPresent(chainAcceptArgs("-C", bridge, protoTCP, testDNSPort, "")...)
+	f.markPresent(chainAcceptArgs("-C", bridge, protoTCP, testHTTPPort, testGateway)...)
+	f.markPresent(chainICMPAcceptArgs("-C", bridge, testGateway)...)
 	f.markPresent(dropArgs("-C", inputChain.name(bridge))...)
 }
 
@@ -161,6 +211,7 @@ func (f *fakeIptables) inputNATRuleSet(bridge string) {
 func (f *fakeIptables) completeRuleSet(bridge string) {
 	f.inputNATRuleSet(bridge)
 	f.markFwdPresent(bridge)
+	f.markV6Present(bridge)
 }
 
 // markFwdPresent marks the FORWARD default-deny rule set (jump + chain ESTABLISHED
@@ -177,10 +228,11 @@ const (
 	testGuestDNS = "53"
 	testDNSPort  = "34711"
 	testHTTPPort = "45123"
+	testGateway  = "10.20.30.1"
 )
 
 func testEgressReq() *rpc.EgressReq {
-	return &rpc.EgressReq{Bridge: testBridge, DnsPort: 34711, HttpPort: 45123, GuestDnsPort: 53}
+	return &rpc.EgressReq{Bridge: testBridge, DnsPort: 34711, HttpPort: 45123, GuestDnsPort: 53, Gateway: testGateway}
 }
 
 // TestChainNameLimit guards the iptables 29-char chain-name limit and determinism.
@@ -226,10 +278,10 @@ func TestApplyBuildsChainInOrder(t *testing.T) {
 	// Expected chain contents, in append order.
 	wantOrder := [][]string{
 		establishedArgs("-A", inputChain.name(testBridge)),
-		chainAcceptArgs("-A", testBridge, protoUDP, testDNSPort),
-		chainAcceptArgs("-A", testBridge, protoTCP, testDNSPort),
-		chainAcceptArgs("-A", testBridge, protoTCP, testHTTPPort),
-		chainICMPAcceptArgs("-A", testBridge),
+		chainAcceptArgs("-A", testBridge, protoUDP, testDNSPort, ""),
+		chainAcceptArgs("-A", testBridge, protoTCP, testDNSPort, ""),
+		chainAcceptArgs("-A", testBridge, protoTCP, testHTTPPort, testGateway),
+		chainICMPAcceptArgs("-A", testBridge, testGateway),
 		dropArgs("-A", inputChain.name(testBridge)),
 	}
 	// Find the index of each in runCalls and assert strictly increasing (order).
@@ -333,26 +385,27 @@ func TestEnsureJumpSkipsWhenPresent(t *testing.T) {
 func TestAlreadyAppliedRequiresChainAndJump(t *testing.T) {
 	f := installFakeIptables(t)
 	s := &EgressServer{}
-	r := &ruleParams{bridge: testBridge, guestDNS: testGuestDNS, dnsPort: testDNSPort, httpPort: testHTTPPort}
+	r := &ruleParams{bridge: testBridge, guestDNS: testGuestDNS, dnsPort: testDNSPort, httpPort: testHTTPPort, gateway: testGateway}
 
 	// NAT + all chain rules present but NO jump -> not applied (deny unreachable).
 	f.markPresent(natRedirectArgs("-C", testBridge, protoUDP, testGuestDNS, testDNSPort)...)
 	f.markPresent(natRedirectArgs("-C", testBridge, protoTCP, testGuestDNS, testDNSPort)...)
 	f.markPresent(establishedArgs("-C", inputChain.name(testBridge))...)
-	f.markPresent(chainAcceptArgs("-C", testBridge, protoUDP, testDNSPort)...)
-	f.markPresent(chainAcceptArgs("-C", testBridge, protoTCP, testDNSPort)...)
-	f.markPresent(chainAcceptArgs("-C", testBridge, protoTCP, testHTTPPort)...)
-	f.markPresent(chainICMPAcceptArgs("-C", testBridge)...)
+	f.markPresent(chainAcceptArgs("-C", testBridge, protoUDP, testDNSPort, "")...)
+	f.markPresent(chainAcceptArgs("-C", testBridge, protoTCP, testDNSPort, "")...)
+	f.markPresent(chainAcceptArgs("-C", testBridge, protoTCP, testHTTPPort, testGateway)...)
+	f.markPresent(chainICMPAcceptArgs("-C", testBridge, testGateway)...)
 	f.markPresent(dropArgs("-C", inputChain.name(testBridge))...)
 	f.markFwdPresent(testBridge)
+	f.markV6Present(testBridge)
 	if s.alreadyApplied(r) {
 		t.Fatal("alreadyApplied must be false without the INPUT jump")
 	}
 
-	// Add the jump -> complete (INPUT chain + jump + FORWARD default-deny).
+	// Add the jump -> complete (INPUT chain + jump + FORWARD default-deny + IPv6).
 	f.markPresent(inputChain.jumpArgs("-C", testBridge)...)
 	if !s.alreadyApplied(r) {
-		t.Fatal("alreadyApplied must be true with jump + full chain + FORWARD")
+		t.Fatal("alreadyApplied must be true with jump + full chain + FORWARD + IPv6")
 	}
 
 	// Remove the DROP -> incomplete again.
@@ -411,7 +464,7 @@ func TestRemoveDeletesJumpAndChain(t *testing.T) {
 	}
 }
 
-// TestRemoveLeavesOperatorRulesUntouched is the M2 regression guard: because all
+// TestRemoveLeavesOperatorRulesUntouched is a regression guard: because all
 // abox INPUT rules live in the dedicated chain and teardown is a whole-chain
 // delete, an operator's own `-i <bridge> ... -j DROP` (or any other) INPUT rule is
 // NEVER pattern-matched or deleted. We assert the ONLY INPUT-level delete Remove
@@ -458,7 +511,7 @@ func TestRemoveIdempotentNoJumpNoChain(t *testing.T) {
 const testVMNet = "vmnet7"
 
 func testVMNetReq() *rpc.EgressReq {
-	return &rpc.EgressReq{Bridge: testVMNet, DnsPort: 34711, HttpPort: 45123, GuestDnsPort: 53}
+	return &rpc.EgressReq{Bridge: testVMNet, DnsPort: 34711, HttpPort: 45123, GuestDnsPort: 53, Gateway: testGateway}
 }
 
 // TestFwdChainNameDistinctAndBounded confirms the FORWARD chain name is distinct
@@ -594,10 +647,11 @@ func TestAlreadyAppliedRequiresForward(t *testing.T) {
 		t.Run(bridge, func(t *testing.T) {
 			f := installFakeIptables(t)
 			s := &EgressServer{}
-			r := &ruleParams{bridge: bridge, guestDNS: testGuestDNS, dnsPort: testDNSPort, httpPort: testHTTPPort}
+			r := &ruleParams{bridge: bridge, guestDNS: testGuestDNS, dnsPort: testDNSPort, httpPort: testHTTPPort, gateway: testGateway}
 
-			// Full INPUT+NAT set but NO FORWARD rules -> not applied.
+			// Full INPUT+NAT set (and IPv6) but NO FORWARD rules -> not applied.
 			f.inputNATRuleSet(bridge)
+			f.markV6Present(bridge)
 			if s.alreadyApplied(r) {
 				t.Fatalf("%s alreadyApplied must be false without the FORWARD default-deny", bridge)
 			}
@@ -605,7 +659,7 @@ func TestAlreadyAppliedRequiresForward(t *testing.T) {
 			// Add the FORWARD rules -> complete.
 			f.markFwdPresent(bridge)
 			if !s.alreadyApplied(r) {
-				t.Fatalf("%s alreadyApplied must be true with INPUT+NAT+FORWARD present", bridge)
+				t.Fatalf("%s alreadyApplied must be true with INPUT+NAT+FORWARD+IPv6 present", bridge)
 			}
 
 			// Remove the FORWARD DROP -> incomplete again.
@@ -804,23 +858,43 @@ func TestValidateGuestPort(t *testing.T) {
 
 func TestResolveRulesValidation(t *testing.T) {
 	t.Run("valid request", func(t *testing.T) {
-		req := &rpc.EgressReq{Bridge: "abox-dev", DnsPort: 34711, HttpPort: 45123, GuestDnsPort: 53}
-		if _, err := resolveRules(req, false); err != nil {
+		req := &rpc.EgressReq{Bridge: "abox-dev", DnsPort: 34711, HttpPort: 45123, GuestDnsPort: 53, Gateway: testGateway}
+		r, err := resolveRules(req, false)
+		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if r.gateway != testGateway {
+			t.Errorf("gateway = %q, want %q", r.gateway, testGateway)
 		}
 	})
 
 	t.Run("bogus guest_dns_port rejected", func(t *testing.T) {
-		req := &rpc.EgressReq{Bridge: "abox-dev", DnsPort: 34711, HttpPort: 45123, GuestDnsPort: 70000}
+		req := &rpc.EgressReq{Bridge: "abox-dev", DnsPort: 34711, HttpPort: 45123, GuestDnsPort: 70000, Gateway: testGateway}
 		if _, err := resolveRules(req, false); err == nil {
 			t.Fatal("expected error for out-of-range guest_dns_port")
 		}
 	})
 
 	t.Run("sub-5353 filter port rejected", func(t *testing.T) {
-		req := &rpc.EgressReq{Bridge: "abox-dev", DnsPort: 53, HttpPort: 45123, GuestDnsPort: 53}
+		req := &rpc.EgressReq{Bridge: "abox-dev", DnsPort: 53, HttpPort: 45123, GuestDnsPort: 53, Gateway: testGateway}
 		if _, err := resolveRules(req, false); err == nil {
 			t.Fatal("expected error for filter port below 5353")
+		}
+	})
+
+	// The gateway is required on Apply (dest-IP pin): a missing or non-IPv4
+	// gateway must fail rather than install an under-scoped accept.
+	t.Run("missing gateway rejected on apply", func(t *testing.T) {
+		req := &rpc.EgressReq{Bridge: "abox-dev", DnsPort: 34711, HttpPort: 45123, GuestDnsPort: 53}
+		if _, err := resolveRules(req, false); err == nil {
+			t.Fatal("expected error for missing gateway")
+		}
+	})
+
+	t.Run("non-ipv4 gateway rejected on apply", func(t *testing.T) {
+		req := &rpc.EgressReq{Bridge: "abox-dev", DnsPort: 34711, HttpPort: 45123, GuestDnsPort: 53, Gateway: "not-an-ip"}
+		if _, err := resolveRules(req, false); err == nil {
+			t.Fatal("expected error for non-IPv4 gateway")
 		}
 	})
 
@@ -835,7 +909,31 @@ func TestResolveRulesValidation(t *testing.T) {
 		if r.guestDNS != "" || r.dnsPort != "" || r.httpPort != "" {
 			t.Errorf("expected all ports empty, got guestDNS=%q dnsPort=%q httpPort=%q", r.guestDNS, r.dnsPort, r.httpPort)
 		}
+		if r.gateway != "" {
+			t.Errorf("expected empty gateway, got %q", r.gateway)
+		}
 	})
+}
+
+// TestChainAcceptArgsGatewayPin is the gateway-pin regression guard: the DNS accepts
+// must carry NO -d (their destination is rewritten to loopback by the NAT
+// REDIRECT before INPUT), while the HTTP and ICMP accepts must be pinned to the
+// gateway.
+func TestChainAcceptArgsGatewayPin(t *testing.T) {
+	dnsArgs := chainAcceptArgs("-A", testBridge, protoUDP, testDNSPort, "")
+	if slices.Contains(dnsArgs, "-d") {
+		t.Errorf("DNS accept must NOT be pinned to a destination, got: %v", dnsArgs)
+	}
+
+	httpArgs := strings.Join(chainAcceptArgs("-A", testBridge, protoTCP, testHTTPPort, testGateway), " ")
+	if !strings.Contains(httpArgs, "-d "+testGateway) {
+		t.Errorf("HTTP accept must be pinned to -d %s, got: %s", testGateway, httpArgs)
+	}
+
+	icmpArgs := strings.Join(chainICMPAcceptArgs("-A", testBridge, testGateway), " ")
+	if !strings.Contains(icmpArgs, "-d "+testGateway) {
+		t.Errorf("ICMP accept must be pinned to -d %s, got: %s", testGateway, icmpArgs)
+	}
 }
 
 // TestFlushNATRulesEmptyGuestDNS guards the lenient-teardown fix: with no valid

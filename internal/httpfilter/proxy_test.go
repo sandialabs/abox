@@ -29,13 +29,29 @@ import (
 // allowLoopback opts the test's loopback origin servers into the SSRF policy.
 // Production proxies never dial loopback; tests use 127.0.0.1 httptest backends
 // as stand-in upstreams, so they must explicitly permit the range — mirroring a
-// user setting http.allow_private_targets. Without this the M1 dial-time gate
+// user setting http.allow_private_targets. Without this the dial-time SSRF gate
 // rejects the connection to the test origin.
 func allowLoopback(t *testing.T, s *Server) {
 	t.Helper()
 	if err := s.SetAllowPrivateTargets([]string{"127.0.0.0/8", "::1/128"}); err != nil {
 		t.Fatalf("SetAllowPrivateTargets: %v", err)
 	}
+	// Test origins are httptest servers on random high loopback ports, so the
+	// default 443/80 destination-port restriction would reject the CONNECT/forward.
+	// Permit the full range for tests that exercise the proxy machinery itself.
+	allowAllPorts(t, s)
+}
+
+// allowAllPorts opts a test server out of the destination-port restriction so
+// it can reach httptest origins on random high ports. Production restricts to
+// 443/80 by default.
+func allowAllPorts(t *testing.T, s *Server) {
+	t.Helper()
+	ports := make([]int, 0, 65535)
+	for p := 1; p <= 65535; p++ {
+		ports = append(ports, p)
+	}
+	s.SetAllowedPorts(ports)
 }
 
 // testProxy spins up a proxy Server with MITM loaded, allowlists 127.0.0.1

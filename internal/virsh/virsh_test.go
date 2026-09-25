@@ -523,6 +523,14 @@ func TestNetworkXML(t *testing.T) {
 	if strings.Contains(xml, "nat") {
 		t.Error("isolated network XML must NOT contain NAT")
 	}
+	// Hardening: STP is disabled on the host-only bridge (no uplink/loop; removes
+	// BPDU processing as guest-facing attack surface).
+	if !strings.Contains(xml, "stp='off'") {
+		t.Error("host-only bridge should disable STP")
+	}
+	if strings.Contains(xml, "stp='on'") {
+		t.Error("host-only bridge must NOT enable STP")
+	}
 }
 
 func TestNWFilterXML(t *testing.T) {
@@ -571,6 +579,20 @@ func TestNWFilterXML(t *testing.T) {
 		}
 	})
 
+	t.Run("L2 anti-spoofing filterrefs", func(t *testing.T) {
+		xml, err := NWFilterXML(inst, "", 53)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// Pin the guest to its assigned MAC and prevent ARP spoofing on the bridge.
+		if !strings.Contains(xml, "<filterref filter='no-mac-spoofing'/>") {
+			t.Error("XML should reference the no-mac-spoofing filter")
+		}
+		if !strings.Contains(xml, "<filterref filter='no-arp-spoofing'/>") {
+			t.Error("XML should reference the no-arp-spoofing filter")
+		}
+	})
+
 	t.Run("stateful SSH-only inbound policy", func(t *testing.T) {
 		xml, err := NWFilterXML(inst, "", 53)
 		if err != nil {
@@ -594,6 +616,21 @@ func TestNWFilterXML(t *testing.T) {
 		}
 		if !strings.Contains(xml, "action='drop' direction='out'") {
 			t.Error("XML must default-deny outbound")
+		}
+	})
+
+	// <all/> matches IPv4 only, so a separate <all-ipv6/> terminal drop is
+	// required in both directions or a guest could reach host services over IPv6.
+	t.Run("IPv6 default-deny in both directions", func(t *testing.T) {
+		xml, err := NWFilterXML(inst, "", 53)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(xml, "direction='in' priority='999'>\n    <all-ipv6/>") {
+			t.Error("XML must drop inbound IPv6 at terminal priority")
+		}
+		if !strings.Contains(xml, "direction='out' priority='999'>\n    <all-ipv6/>") {
+			t.Error("XML must drop outbound IPv6 at terminal priority")
 		}
 	})
 }
@@ -628,6 +665,17 @@ func TestDomainXMLWithOptions(t *testing.T) {
 		if !strings.Contains(xml, "abox-dev") {
 			t.Error("XML should contain network name")
 		}
+		// Hardening: pinned q35 machine type (trims legacy i440fx device surface).
+		if !strings.Contains(xml, "machine='q35'") {
+			t.Error("XML should pin the q35 machine type")
+		}
+		// Hardening: virtio devices are modern-only (virtio-non-transitional).
+		if !strings.Contains(xml, "<model type='virtio-non-transitional'/>") {
+			t.Error("interface should use virtio-non-transitional model")
+		}
+		if !strings.Contains(xml, "<rng model='virtio-non-transitional'>") {
+			t.Error("rng should use virtio-non-transitional model")
+		}
 	})
 
 	t.Run("with monitor", func(t *testing.T) {
@@ -641,6 +689,10 @@ func TestDomainXMLWithOptions(t *testing.T) {
 		}
 		if !strings.Contains(xml, "virtio-serial") {
 			t.Error("XML should contain virtio-serial when monitor enabled")
+		}
+		// Hardening: the virtio-serial controller is modern-only too.
+		if !strings.Contains(xml, "type='virtio-serial' index='0' model='virtio-non-transitional'") {
+			t.Error("virtio-serial controller should use virtio-non-transitional model")
 		}
 	})
 }

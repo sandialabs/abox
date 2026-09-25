@@ -279,6 +279,77 @@ func TestAllowlistReload(t *testing.T) {
 	}
 }
 
+// TestAllowlistRemovePersists verifies that `abox allowlist remove` is written
+// through to the on-disk allowlist file, so the domain does not reappear after a
+// reload or a filter restart. This regresses the reported bug where a removed
+// domain came back because remove only updated the in-memory filter.
+func TestAllowlistRemovePersists(t *testing.T) {
+	skipIfBackendUnavailable(t)
+	skipIfNoConfiguredBaseImage(t)
+	skipInShortMode(t)
+
+	env := newTestEnv(t)
+	inst := env.newTestInstance()
+	inst.create()
+	inst.start()
+
+	if !inst.waitForRunning(60 * time.Second) {
+		t.Fatal("Instance did not start")
+	}
+	time.Sleep(5 * time.Second) // let filters come up
+
+	// Add two domains, then remove one.
+	inst.allowlistAdd("keep.example.com")
+	inst.allowlistAdd("remove.example.com")
+	inst.allowlistRemove("remove.example.com")
+
+	// The on-disk file must no longer contain the removed domain.
+	_, paths, err := config.Load(inst.name)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	data, err := os.ReadFile(paths.Allowlist)
+	if err != nil {
+		t.Fatalf("reading allowlist file: %v", err)
+	}
+	if strings.Contains(string(data), "remove.example.com") {
+		t.Errorf("removed domain still on disk after remove:\n%s", string(data))
+	}
+
+	assertRemovedGone := func(t *testing.T, stage string) {
+		domains := inst.allowlistList()
+		for _, d := range domains {
+			if strings.Contains(d, "remove.example.com") {
+				t.Errorf("[%s] remove.example.com reappeared: %v", stage, domains)
+			}
+		}
+		foundKeep := false
+		for _, d := range domains {
+			if strings.Contains(d, "keep.example.com") {
+				foundKeep = true
+			}
+		}
+		if !foundKeep {
+			t.Errorf("[%s] keep.example.com should still be present: %v", stage, domains)
+		}
+	}
+
+	// A reload re-reads the file into the running filters; the removal must hold.
+	if result := env.run("allowlist", "reload", inst.name); !result.Success() {
+		t.Fatalf("allowlist reload failed: %v", result.Err)
+	}
+	assertRemovedGone(t, "after reload")
+
+	// A full stop/start reloads the filters from disk from scratch; still gone.
+	inst.stop()
+	inst.start()
+	if !inst.waitForRunning(60 * time.Second) {
+		t.Fatal("Instance did not restart")
+	}
+	time.Sleep(5 * time.Second)
+	assertRemovedGone(t, "after restart")
+}
+
 // TestDNSBlocking tests that DNS queries to non-allowlisted domains are blocked.
 func TestDNSBlocking(t *testing.T) {
 	skipIfBackendUnavailable(t)

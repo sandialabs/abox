@@ -56,11 +56,18 @@ func (l *Loader) Load() error {
 	return nil
 }
 
-// parseFile reads and parses the allowlist file.
-// Supports wildcard syntax: *.domain.com (equivalent to domain.com)
+// parseFile reads and parses the loader's allowlist file.
 func (l *Loader) parseFile() ([]string, error) {
+	return parseAllowlistFile(l.path)
+}
+
+// parseAllowlistFile reads and parses an allowlist file into its normalized,
+// validated domains. It needs no Loader or Filter, so callers that only want the
+// file's contents (e.g. LoadDomainSet) can reuse it directly.
+// Supports wildcard syntax: *.domain.com (equivalent to domain.com).
+func parseAllowlistFile(path string) ([]string, error) {
 	// Use O_NOFOLLOW for atomic symlink protection (prevents TOCTOU race)
-	file, err := OpenFileNoFollow(l.path, os.O_RDONLY, 0)
+	file, err := OpenFileNoFollow(path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open allowlist file: %w", err)
 	}
@@ -77,15 +84,10 @@ func (l *Loader) parseFile() ([]string, error) {
 			continue
 		}
 
-		// Handle wildcard syntax: *.domain.com -> domain.com
-		// The radix tree automatically matches subdomains, so we just
-		// strip the wildcard prefix for storage
-		line = strings.TrimPrefix(line, "*.")
-
-		// Convert IDN/Unicode entries to punycode before validation so a Unicode
-		// allowlist line matches the ASCII form DNS queries arrive in (and passes
-		// the ASCII-only domain validation below).
-		line = toASCIIDomain(line)
+		// Normalize (strip "*." wildcard prefix, punycode) so a Unicode allowlist
+		// line matches the ASCII form DNS queries arrive in. The radix tree matches
+		// subdomains, so stripping the wildcard prefix is equivalent.
+		line = canonicalAllowlistEntry(line)
 
 		// Validate domain format (skip invalid entries silently)
 		if err := validation.ValidateDomain(line); err != nil {
@@ -100,6 +102,16 @@ func (l *Loader) parseFile() ([]string, error) {
 	}
 
 	return domains, nil
+}
+
+// canonicalAllowlistEntry reduces a raw allowlist line (or a bare domain) to the
+// canonical form used for storage and comparison: wildcard prefix stripped,
+// trailing dot removed, lowercased, and IDN converted to punycode. Shared by the
+// file parser, RemoveDomain's line matching, and the domain-set helpers so all
+// three normalize identically.
+func canonicalAllowlistEntry(domain string) string {
+	domain = strings.TrimPrefix(strings.TrimSpace(domain), "*.")
+	return toASCIIDomain(strings.TrimSuffix(domain, "."))
 }
 
 // Watch starts watching the configuration file for changes.
@@ -240,5 +252,114 @@ func (l *Loader) SaveDomain(domain string) error {
 		return fmt.Errorf("failed to flush domain write: %w", err)
 	}
 
+	return nil
+}
+
+// RemoveDomain atomically rewrites the configuration file, dropping any line
+// whose domain (after stripping the "*." wildcard prefix and normalizing to
+// ASCII) matches domain. Comments, blank lines, ordering, and every other entry
+// are preserved — each kept line is re-emitted newline-terminated, so a file
+// whose final line lacked a trailing newline gains one (the only rewrite that is
+// not byte-for-byte). It is the persistence counterpart to SaveDomain, so a
+// removal survives a later Load()/reload instead of being resurrected from a
+// stale file.
+//
+// Returns (true, nil) if at least one line was removed, (false, nil) if no line
+// matched (not an error — mirrors Filter.Remove's bool semantics so API callers
+// can still distinguish "not found").
+func (l *Loader) RemoveDomain(domain string) (bool, error) {
+	// Normalize the target the same way the parser normalizes stored lines, so
+	// "*.GitHub.com" on disk matches a remove of "github.com" and vice versa.
+	target := canonicalAllowlistEntry(domain)
+
+	// Read existing lines with symlink protection (matches parseFile/SaveDomain).
+	file, err := OpenFileNoFollow(l.path, os.O_RDONLY, 0)
+	if err != nil {
+		return false, fmt.Errorf("failed to open allowlist file: %w", err)
+	}
+
+	var kept []string
+	removed := false
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		raw := scanner.Text()
+		trimmed := strings.TrimSpace(raw)
+
+		// Comments and blank lines are never candidates; keep them verbatim.
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			kept = append(kept, raw)
+			continue
+		}
+
+		if canonicalAllowlistEntry(trimmed) == target {
+			removed = true
+			continue // drop this line
+		}
+		kept = append(kept, raw)
+	}
+	if err := scanner.Err(); err != nil {
+		_ = file.Close()
+		return false, fmt.Errorf("error reading allowlist file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return false, fmt.Errorf("failed to close allowlist file: %w", err)
+	}
+
+	// Nothing matched: leave the file untouched (avoids a needless rewrite and a
+	// spurious fsnotify reload event).
+	if !removed {
+		return false, nil
+	}
+
+	if err := l.atomicWriteLines(kept); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// atomicWriteLines writes lines (each newline-terminated) to l.path atomically:
+// a temp file in the same directory at 0600, fsync, then rename over the
+// destination. Rename replaces a symlink destination with the regular file
+// rather than following it (mirrors internal/secretstore's write()).
+func (l *Loader) atomicWriteLines(lines []string) error {
+	dir := filepath.Dir(l.path)
+	tmp, err := os.CreateTemp(dir, ".allowlist-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp allowlist file: %w", err)
+	}
+	tmpName := tmp.Name()
+	// Best-effort cleanup if we bail before the rename.
+	defer func() { _ = os.Remove(tmpName) }()
+
+	// os.CreateTemp already yields 0600, but set it explicitly to be robust
+	// against a permissive umask on some platforms.
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("failed to set allowlist file permissions: %w", err)
+	}
+
+	w := bufio.NewWriter(tmp)
+	for _, line := range lines {
+		if _, err := w.WriteString(line + "\n"); err != nil {
+			_ = tmp.Close()
+			return fmt.Errorf("failed to write allowlist line: %w", err)
+		}
+	}
+	if err := w.Flush(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("failed to flush allowlist file: %w", err)
+	}
+	// fsync before rename so a host crash can't leave a torn/empty file that
+	// Load() would silently read as an empty allowlist.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("failed to sync allowlist file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to close temp allowlist file: %w", err)
+	}
+	if err := os.Rename(tmpName, l.path); err != nil {
+		return fmt.Errorf("failed to replace allowlist file: %w", err)
+	}
 	return nil
 }

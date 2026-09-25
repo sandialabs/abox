@@ -1,6 +1,20 @@
 <filter name='abox-{{.Name}}-traffic' chain='root' priority='-500'>
 {{if .UUID}}  <uuid>{{.UUID}}</uuid>
-{{end}}  <!-- Stateful policy, made explicit rather than relying on libvirt's per-rule
+{{end}}  <!-- L2 anti-spoofing: pin the guest to the MAC libvirt assigned to this
+       interface. no-mac-spoofing drops frames whose source MAC differs from the
+       interface's; no-arp-spoofing drops ARP whose sender hardware/protocol
+       address the guest doesn't own. This stops a compromised guest from
+       impersonating another L2 identity on the host-only bridge (ARP cache
+       poisoning, MAC hijacking). These reference libvirt's stock predefined
+       filters in /etc/libvirt/nwfilter/. IP-source anti-spoofing is not
+       referenced here: the guest is statically addressed (no DHCP lease for
+       libvirt to learn the IP from), and egress is already destination-pinned to
+       the gateway by the allowlist rules below, so no-ip-spoofing would add
+       fail-closed risk without additional containment. -->
+  <filterref filter='no-mac-spoofing'/>
+  <filterref filter='no-arp-spoofing'/>
+
+  <!-- Stateful policy, made explicit rather than relying on libvirt's per-rule
        reverse-direction derivation: inbound is SSH-only, outbound is a
        default-deny allowlist. Each initiator rule sets state='NEW'; return
        traffic is admitted by the ESTABLISHED,RELATED accepts below; and the
@@ -65,11 +79,24 @@
 
   <!-- Default deny, both directions. These are load-bearing: the root chain's
        implicit default is to fall through (accept), so without them the filter
-       is fail-open. They must remain the highest priority number. -->
+       is fail-open. They must remain the highest priority number.
+
+       <all/> matches IPv4 only in libvirt's nwfilter language, so a separate
+       <all-ipv6/> drop is required to deny IPv6. The host-only bridge has no
+       IPv6 use case (guests are statically IPv4-addressed via cloud-init and
+       there is no uplink/RA), so ALL IPv6 — including ICMPv6/NDP — is dropped.
+       Without this a guest that self-assigns a link-local fe80:: address could
+       reach host services over IPv6, which the IPv4-only rules never see. -->
   <rule action='drop' direction='in' priority='999'>
     <all/>
   </rule>
   <rule action='drop' direction='out' priority='999'>
     <all/>
+  </rule>
+  <rule action='drop' direction='in' priority='999'>
+    <all-ipv6/>
+  </rule>
+  <rule action='drop' direction='out' priority='999'>
+    <all-ipv6/>
   </rule>
 </filter>

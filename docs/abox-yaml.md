@@ -116,6 +116,7 @@ monitor:
 | `http.mitm_exceptions` | []string | [] | Domains carried as a transparent TLS tunnel (no interception) even when `http.mitm` is enabled, for apps that pin certificates. Each entry matches the domain and its subdomains. A domain must still be allowlisted to be reachable — an exception only downgrades interception to a tunnel, it never grants access. See [MITM exceptions for pinned apps](#mitm-exceptions-for-pinned-apps). |
 | `http.max_connections` | int | 512 | Cap on concurrent client connections to the HTTP proxy, bounding host fd/goroutine use against a runaway or hostile VM. Raise for heavy parallel workloads; keep below the host's `ulimit -n`. Existing instances without this key use the default automatically. |
 | `http.allow_private_targets` | []string | [] | Opt-in list of CIDRs the DNS/HTTP filters may connect to despite the default SSRF deny of private/loopback/link-local/metadata ranges. Shared by both filters. See [Reaching internal hosts](#reaching-internal-hosts). |
+| `http.allowed_ports` | []int | [] | Destination ports the proxy may reach. Empty uses the built-in defaults (443 for HTTPS `CONNECT`/tunnels, 80 and 443 for plain-HTTP forward requests). Setting this replaces the defaults for both paths. Widening it lets an allowlisted host be reached on other ports (e.g. raw TCP tunneled through `CONNECT`), so a non-default value is flagged when a repo's `abox.yaml` is first trusted. |
 | `http.secret_injections` | []object | [] | Bind host-side secret values to outbound request headers so the guest never holds the raw credential. See [Secret injection](#secret-injection) and [docs/secrets.md](secrets.md). |
 | `http.secret_injections[].key` | string | (required) | Name of the value in the per-instance secret store (`abox secrets set`). |
 | `http.secret_injections[].host` | string | (required) | Exact host to inject into (e.g. `api.anthropic.com`). |
@@ -204,6 +205,86 @@ provision:
   - /opt/shared/common.sh   # Absolute paths also work
 overlay: files/             # Resolves to /home/user/project/files/
 ```
+
+## Trusting a repository's abox.yaml
+
+A repository-supplied `abox.yaml` is a wider trust surface than your own shell:
+it can replace the hardened VM template, copy absolute host paths into the guest,
+re-open SSRF-blocked ranges (`http.allow_private_targets`), disable TLS inspection
+(`http.mitm: false`), widen the proxy port allowlist (`http.allowed_ports`), bind
+host-side secrets into outbound requests (`http.secret_injections`), or redirect
+the guest's resolver (`dns.upstream`).
+
+The first time `abox up` / `abox create --from-file` runs against an `abox.yaml`
+that sets any of those, abox prints a summary of the security-relevant settings
+and asks you to confirm (direnv-style). Approval is remembered per directory **and
+content fingerprint** — the fingerprint covers the `abox.yaml` bytes *and* the
+contents of any referenced custom template / monitor policy files, so editing
+either re-triggers the prompt. Nothing security-relevant set → no prompt.
+
+Non-interactive runs (CI, pipes) **fail closed** rather than silently applying the
+settings. To approve in automation, review once, then pass the printed fingerprint
+via `--trust-boxfile=<sha256>` or `ABOX_TRUST_BOXFILE=<sha256>`.
+
+> **CI footgun.** Computing the fingerprint in the same pipeline from the same
+> checkout you are gating (`ABOX_TRUST_BOXFILE=$(...)`) defeats the control — a
+> malicious change would self-approve. Source the expected value from a separately
+> reviewed channel (e.g. a pinned value reviewed in its own PR).
+
+TTY detection only decides whether you get a prompt; it is not the security
+boundary. The boundary is "fail closed unless trusted."
+
+## Re-running abox up on an existing instance
+
+`abox up` is idempotent, but an instance's live state can drift from `abox.yaml`
+between runs: you might `abox allowlist add/remove` at runtime, or edit
+`abox.yaml` after the instance was created. `abox up` handles the two cases
+differently.
+
+### Syncing the allowlist on abox up
+
+The `allowlist:` block is the one setting `abox up` keeps in sync with the
+instance's on-disk allowlist. Because you can also change that allowlist at
+runtime (`abox allowlist add/remove/edit`), the two can diverge — so rather than
+blindly overwriting your runtime edits on every `abox up`, abox reconciles them
+apt/dpkg-style.
+
+When the on-disk allowlist differs from the `allowlist:` block, the resolution
+is controlled by `--conf-policy` (or `ABOX_CONF_POLICY`):
+
+| Value | Behavior |
+|-------|----------|
+| `keep` | Keep the on-disk allowlist; leave runtime edits intact. |
+| `replace` | Overwrite the on-disk allowlist with the `abox.yaml` version. |
+| `prompt` | Ask interactively (keep / replace / show diff). **Default on a TTY.** |
+
+When unset, `abox up` prompts on an interactive terminal and **keeps** the
+on-disk version non-interactively (CI, pipes) — it never silently discards your
+runtime edits. To force the `abox.yaml` version in automation, pass
+`--conf-policy=replace` (or `ABOX_CONF_POLICY=replace`). The "show diff" option
+honors `$DIFFPROG` (falling back to `diff -u`), matching how `abox allowlist
+edit` honors `$VISUAL`/`$EDITOR`.
+
+### Config drift warnings
+
+Every *other* `abox.yaml` field (`cpus`, `memory`, `disk`, `dns.upstream`,
+`http.*`, `monitor.*`, `subnet`, `base`) is applied only when the instance is
+first created. If you edit one of these and re-run `abox up` on an existing
+instance, abox does **not** silently apply it — instead it prints a warning
+listing each field that differs from the instance's saved config and how to
+apply it:
+
+```
+WARNING: abox.yaml differs from instance "dev"; abox up does not apply these to an existing instance:
+  - cpus: abox.yaml=8, instance=2 (apply with `abox config edit` + `abox restart`)
+  - http.allow_private_targets: abox.yaml=[10.0.5.0/24], instance=(none) (apply by recreating the instance (`abox down --remove` then `abox up`))
+```
+
+Resource fields (`cpus`, `memory`, `disk`, `dns.upstream`) can be applied with
+`abox config edit` followed by `abox restart`. Filter and monitor settings take
+effect only on a fresh instance, so applying them means recreating it
+(`abox down --remove` then `abox up`). The instance still starts either way; the
+warning is informational.
 
 ## Validation
 
@@ -456,7 +537,7 @@ The template uses Go `text/template` syntax. Available variables are listed in `
 
 **Warning:** Custom templates bypass abox's default VM hardening (QEMU sandbox, disabled nested virt, disabled USB/balloon/video, `nosharepages`). You are responsible for maintaining appropriate isolation in your template. See [Hardening](hardening.md) for what the defaults provide.
 
-**Constraint:** A custom template **must** keep the network interface as `<model type='virtio'/>` with `<driver name='vhost'/>` (as the default template does). abox applies and removes the egress `nwfilter` at runtime via `virsh update-device`, which must match the running interface's model and driver — a template that changes them will cause egress apply/remove to fail (fail-closed: the VM will not start unfiltered).
+**Constraint:** A custom template **must** keep the network interface as `<model type='virtio-non-transitional'/>` with `<driver name='vhost'/>` (as the default template does). abox applies and removes the egress `nwfilter` at runtime via `virsh update-device`, which must match the running interface's model and driver — a template that changes them will cause egress apply/remove to fail (fail-closed: the VM will not start unfiltered).
 
 ## See Also
 

@@ -533,11 +533,12 @@ func NWFilterExists(name string) bool {
 // The cpus parameter is needed to include the correct vhost driver queues
 // in the update-device XML, matching the running domain's interface definition.
 //
-// The interface model/driver below are hardcoded to virtio/vhost to match the
-// default domain template. A custom domain template (overrides.libvirt.template)
-// MUST keep the interface as virtio/vhost too, or this update-device will fail
-// ("cannot modify network device model/driver attributes") and egress
-// apply/remove will not work — documented in docs/abox-yaml.md.
+// The interface model/driver below are hardcoded to virtio-non-transitional/vhost
+// to match the default domain template. A custom domain template
+// (overrides.libvirt.template) MUST keep the interface model/driver identical, or
+// this update-device will fail ("cannot modify network device model/driver
+// attributes") and egress apply/remove will not work — documented in
+// docs/abox-yaml.md.
 func ApplyNWFilter(domainName, networkName, filterName, macAddress string, cpus int) error {
 	logging.Debug("applying nwfilter", "domain", domainName, "filter", filterName)
 	// Validate MAC address to prevent XML injection
@@ -552,7 +553,7 @@ func ApplyNWFilter(domainName, networkName, filterName, macAddress string, cpus 
 	ifaceXML := fmt.Sprintf(`<interface type='network'>
   <mac address='%s'/>
   <source network='%s'/>
-  <model type='virtio'/>
+  <model type='virtio-non-transitional'/>
   <driver name='vhost' queues='%d'/>
   <filterref filter='%s'/>
 </interface>`, escapeXML(macAddress), escapeXML(networkName), netQueues(cpus), escapeXML(filterName))
@@ -578,7 +579,7 @@ func RemoveNWFilter(domainName, networkName, macAddress string, cpus int) error 
 	ifaceXML := fmt.Sprintf(`<interface type='network'>
   <mac address='%s'/>
   <source network='%s'/>
-  <model type='virtio'/>
+  <model type='virtio-non-transitional'/>
   <driver name='vhost' queues='%d'/>
 </interface>`, escapeXML(macAddress), escapeXML(networkName), netQueues(cpus))
 

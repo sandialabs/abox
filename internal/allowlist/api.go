@@ -3,6 +3,7 @@ package allowlist
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -33,6 +34,13 @@ type AllowlistAPIHandler struct {
 	// complete for callers that talk to the socket directly (bypassing the CLI).
 	Instance string
 	Label    string
+
+	// writeMu serializes allowlist-file mutations (Add/Remove/Reload). gRPC
+	// dispatches each RPC on its own goroutine, so without this a Remove's
+	// read-modify-rewrite (RemoveDomain) could race a concurrent Add's append
+	// (SaveDomain) and lose one of the two edits. The Filter is independently
+	// thread-safe; this only guards the file + reload sequencing.
+	writeMu sync.Mutex
 }
 
 // audit emits a service-layer audit record for a successful state change,
@@ -44,6 +52,9 @@ func (h *AllowlistAPIHandler) audit(action string, keysAndValues ...any) {
 
 // Add adds a domain to the allowlist.
 func (h *AllowlistAPIHandler) Add(domain string) (*rpc.StringMsg, error) {
+	h.writeMu.Lock()
+	defer h.writeMu.Unlock()
+
 	domain = NormalizeDomain(domain)
 
 	// Validate domain format
@@ -68,6 +79,9 @@ func (h *AllowlistAPIHandler) Add(domain string) (*rpc.StringMsg, error) {
 
 // Remove removes a domain from the allowlist.
 func (h *AllowlistAPIHandler) Remove(domain string) (*rpc.StringMsg, error) {
+	h.writeMu.Lock()
+	defer h.writeMu.Unlock()
+
 	domain = NormalizeDomain(domain)
 
 	// Validate domain format
@@ -75,12 +89,22 @@ func (h *AllowlistAPIHandler) Remove(domain string) (*rpc.StringMsg, error) {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid domain: %v", err)
 	}
 
-	if h.Filter.Remove(domain) {
-		h.audit(logging.ActionAllowlistRemove, "domain", domain)
-		return &rpc.StringMsg{Message: fmt.Sprintf("removed %s (edit the allowlist file to persist)", domain)}, nil
+	if !h.Filter.Remove(domain) {
+		return nil, status.Errorf(codes.NotFound, "%s not found in allowlist", domain)
 	}
 
-	return nil, status.Errorf(codes.NotFound, "%s not found in allowlist", domain)
+	// Persist the removal to the allowlist file so it survives a later reload
+	// (daemon restart, `allowlist reload`, or the fsnotify watcher). Without
+	// this the in-memory filter and the on-disk file diverge and the domain is
+	// resurrected on the next Load(). Symmetric with Add's SaveDomain.
+	if h.Loader != nil {
+		if _, err := h.Loader.RemoveDomain(strings.TrimSuffix(domain, ".")); err != nil {
+			return nil, status.Errorf(codes.Internal, "removed %s from filter but failed to persist removal to allowlist file: %v", domain, err)
+		}
+	}
+
+	h.audit(logging.ActionAllowlistRemove, "domain", domain)
+	return &rpc.StringMsg{Message: "removed " + domain}, nil
 }
 
 // List returns all domains in the allowlist.
@@ -91,6 +115,9 @@ func (h *AllowlistAPIHandler) List() (*rpc.DomainList, error) {
 
 // Reload reloads the allowlist from file.
 func (h *AllowlistAPIHandler) Reload() (*rpc.StringMsg, error) {
+	h.writeMu.Lock()
+	defer h.writeMu.Unlock()
+
 	if h.Loader == nil {
 		return nil, status.Error(codes.FailedPrecondition, "no allowlist file loaded")
 	}
