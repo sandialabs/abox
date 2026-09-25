@@ -406,9 +406,17 @@ func TestUpstream_NewServer_CapturesEnv(t *testing.T) {
 	// NewServer must capture http_proxy/https_proxy/no_proxy at construction.
 	// Safe with t.Setenv because httpproxy.FromEnvironment reads env at call
 	// time (unlike http.ProxyFromEnvironment's process-wide sync.Once).
-	t.Setenv("HTTP_PROXY", "http://corp:3128")
-	t.Setenv("HTTPS_PROXY", "http://corp:3128")
+	//
+	// Both spellings must be set. FromEnvironment resolves each setting with
+	// getEnvAny("https_proxy", "HTTPS_PROXY") — LOWERCASE FIRST — so setting
+	// only the uppercase name leaves an ambient lowercase https_proxy (common
+	// on developer machines and behind corporate proxies) winning, and the
+	// test asserts against the ambient proxy instead of these values.
+	for _, name := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"} {
+		t.Setenv(name, "http://corp:3128")
+	}
 	t.Setenv("NO_PROXY", "internal.test")
+	t.Setenv("no_proxy", "internal.test")
 
 	server := NewServer(allowlist.NewFilter(), false)
 
