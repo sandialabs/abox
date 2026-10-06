@@ -41,7 +41,7 @@ func TestMount(t *testing.T) {
 		mountPoint := filepath.Join(tempDir, "home-mount")
 
 		// Mount the home directory
-		result := env.mustRun("mount", inst.name, mountPoint)
+		result := env.mustRun("mount", "add", inst.name, mountPoint)
 		if !strings.Contains(result.Stdout, "Mounted") {
 			t.Errorf("Expected mount success message, got: %s", result.Stdout)
 		}
@@ -90,7 +90,7 @@ func TestMount(t *testing.T) {
 		mountPoint := filepath.Join(tempDir, "readonly-mount")
 
 		// Mount as read-only
-		result := env.mustRun("mount", "--read-only", inst.name, mountPoint)
+		result := env.mustRun("mount", "add", "--read-only", inst.name, mountPoint)
 		if !result.Success() {
 			t.Fatalf("Failed to mount read-only: %v", result.Err)
 		}
@@ -115,8 +115,8 @@ func TestMount(t *testing.T) {
 
 		// Use the appropriate home directory for the base image
 		user := getDefaultUser(getBaseImage())
-		env.mustRun("mount", inst.name+":/home/"+user, mountPoint1)
-		env.mustRun("mount", inst.name+":/tmp", mountPoint2)
+		env.mustRun("mount", "add", inst.name+":/home/"+user, mountPoint1)
+		env.mustRun("mount", "add", inst.name+":/tmp", mountPoint2)
 
 		// Unmount all by instance name
 		result := env.mustRun("unmount", inst.name)
@@ -132,7 +132,7 @@ func TestMount(t *testing.T) {
 		inst.forceStop()
 
 		mountPoint := filepath.Join(tempDir, "stopped-mount")
-		result := env.run("mount", inst.name, mountPoint)
+		result := env.run("mount", "add", inst.name, mountPoint)
 		if result.Success() {
 			t.Error("Mount should fail when instance is not running")
 			// Clean up if it somehow succeeded

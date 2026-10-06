@@ -76,6 +76,15 @@ func (s *EgressServer) EnsureStorageRoot(_ context.Context, req *rpc.EnsureStora
 	if err := ensureDir(want, uid, gid, storageRootMode); err != nil {
 		return nil, fmt.Errorf("failed to prepare %s: %w", want, err)
 	}
+	// The shared "instances"/"base" subdirs, under which the unprivileged
+	// client creates per-instance leaves, MUST be provisioned here, as root:
+	// see sharedStorageSubdirs for why an unprivileged chmod can never make
+	// (or keep) them setgid.
+	for _, sub := range sharedStorageSubdirs {
+		if err := ensureDir(filepath.Join(want, sub), uid, gid, storageRootMode); err != nil {
+			return nil, fmt.Errorf("failed to prepare %s: %w", filepath.Join(want, sub), err)
+		}
+	}
 
 	// regroup: after `abox migrate` relocated files (chowning them to the caller's
 	// primary group), walk the caller's OWN subtree and restore the QEMU group +
@@ -92,12 +101,36 @@ func (s *EgressServer) EnsureStorageRoot(_ context.Context, req *rpc.EnsureStora
 	return &rpc.Empty{}, nil
 }
 
+// diskFileName is the basename of the writable CoW disk (see config.Paths.Disk
+// in internal/config/config.go, kept in sync here for the same reason
+// libvirtImagesParent is: the helper avoids importing config). regroupFile uses
+// it to tell the writable disk apart from read-only sources (base image,
+// cidata.iso), which need a different group mode — see regroupFile.
+const diskFileName = "disk.qcow2"
+
+// sharedStorageSubdirs are the two subdirectories the unprivileged client
+// creates directly under the per-user storage root (see
+// config.GetPathsWithStorage's diskDir/BaseImages in internal/config/config.go:
+// "<storage root>/instances/<name>" and "<storage root>/base" — kept in sync
+// here for the same reason libvirtImagesParent is). EnsureStorageRoot
+// provisions THESE too (not just the root itself) because they must be setgid:
+// an unprivileged chmod requesting S_ISGID is silently ignored by the kernel
+// whenever the calling process is not a member of the target group (see
+// chmod(2)) — true even when the bit is already correctly set and the chmod
+// is a no-op "reassert". The calling user is never a member of the QEMU
+// group, so ANY unprivileged chmod touching these dirs' setgid bit would
+// corrupt it; provisioning them here, as root, is the only way they can ever
+// be setgid. Once setgid+group is correct here, every leaf the unprivileged
+// client creates underneath (e.g. "instances/<name>") inherits both
+// automatically at mkdir time — no further chmod is needed or safe.
+var sharedStorageSubdirs = []string{"instances", "base"}
+
 // regroupSubtree walks the caller's own storage subtree rooted at root and, for
 // every entry, chgrps it to gid and fixes its mode: directories get the setgid
-// storage-root mode (so future children inherit the group), files get group-read
-// added (the caller's owner bits on the writable disk are left intact — group
-// needs only read). Runs as root in the helper, so it MUST NOT escape the
-// subtree: it opens root as an os.Root (all subsequent operations are confined to
+// storage-root mode (so future children inherit the group), files get the
+// group mode regroupFile assigns (the caller's owner bits are left intact). Runs
+// as root in the helper, so it MUST NOT escape the subtree: it opens root as an
+// os.Root (all subsequent operations are confined to
 // it and refuse to traverse a symlink out of it) and applies chown/chmod through
 // the root's path-confined methods. Symlinks are chowned in place (Lchown) and
 // never chmod'd/followed.
@@ -144,10 +177,18 @@ func regroupSubtree(root string, uid, gid int) error {
 	})
 }
 
-// regroupFile chgrps a single regular file to gid and adds group-read, operating
-// through an O_NOFOLLOW fd so the nlink check and the chown/chmod all act on the
-// same inode with no path re-resolution. It refuses a file with extra hard links
-// (nlink>1) — see regroupSubtree for why.
+// regroupFile chgrps a single regular file to gid and adds the group mode the
+// QEMU process needs, operating through an O_NOFOLLOW fd so the nlink check and
+// the chown/chmod all act on the same inode with no path re-resolution. It
+// refuses a file with extra hard links (nlink>1) — see regroupSubtree for why.
+//
+// The group mode added depends on which file this is: the writable CoW disk
+// (basename diskFileName) needs group-READ+WRITE — libvirt's own pre-start
+// accessibility check runs before dynamic_ownership chowns the disk to the QEMU
+// user, evaluating the file's pre-chown owner/mode, so only the group bits are
+// available at that point and the writable layer needs W_OK (see diskFileMode
+// in internal/backend/libvirt/disk.go). Read-only sources (base image,
+// cidata.iso) only ever need group-read.
 func regroupFile(r *os.Root, rel string, uid, gid int) error {
 	f, err := r.OpenFile(rel, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -171,9 +212,12 @@ func regroupFile(r *os.Root, rel string, uid, gid int) error {
 	if err := f.Chown(uid, gid); err != nil {
 		return err
 	}
-	// Preserve the owner bits, add group-read (the VM process reads via group
-	// membership); deny others.
-	return f.Chmod((fi.Mode().Perm() & 0o700) | 0o040)
+	groupMode := os.FileMode(0o040)
+	if filepath.Base(rel) == diskFileName {
+		groupMode = 0o060
+	}
+	// Preserve the owner bits, add the group mode; deny others.
+	return f.Chmod((fi.Mode().Perm() & 0o700) | groupMode)
 }
 
 // ensureDir creates dir with the given owner and mode if absent, and converges an
@@ -237,11 +281,14 @@ func resolveQEMUGroupGID() (int, string, error) {
 	for _, name := range qemuDiskGroups {
 		if gid, ok := lookupGID(name); ok {
 			// kvm is a broad system group (many unrelated devices/users belong to
-			// it); resolving via it means the storage tree is readable by everyone
-			// in kvm, not just the QEMU process. Warn/audit so the operator can pin
-			// the exact group. The narrower libvirt-qemu/qemu names are fine.
+			// it); resolving via it means the storage tree is readable AND the
+			// writable disk is WRITABLE by everyone in kvm, not just the QEMU
+			// process (see diskFileMode in internal/backend/libvirt/disk.go: the
+			// disk is 0660, group-read+write, not just group-read). Warn/audit so
+			// the operator can pin the exact group. The narrower libvirt-qemu/qemu
+			// names are fine.
 			if name == "kvm" {
-				logging.Warn("resolved QEMU runtime group via the broad 'kvm' fallback; the storage tree will be group-readable by all kvm members. Set `group = \"...\"` in /etc/libvirt/qemu.conf to pin the exact QEMU group.", "group", name, "gid", gid)
+				logging.Warn("resolved QEMU runtime group via the broad 'kvm' fallback; the storage tree (including each instance's writable disk) will be group-readable AND group-writable by all kvm members. Set `group = \"...\"` in /etc/libvirt/qemu.conf to pin the exact QEMU group.", "group", name, "gid", gid)
 			}
 			return gid, name, nil
 		}

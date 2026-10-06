@@ -170,6 +170,11 @@ func TestRegroupSubtreeConfinedAndRefusesSymlinkEscape(t *testing.T) {
 	if err := os.WriteFile(disk, []byte("d"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A read-only sibling (base image) — must gain group-read only, NOT write.
+	base := filepath.Join(root, "instances", "dev", "base.qcow2")
+	if err := os.WriteFile(base, []byte("b"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	// A file OUTSIDE the subtree, with a symlink to it planted INSIDE. Its mode
 	// must be untouched by the walk (regroup must not follow the link).
@@ -196,16 +201,32 @@ func TestRegroupSubtreeConfinedAndRefusesSymlinkEscape(t *testing.T) {
 			t.Errorf("dir %s not setgid after regroup: %v", d, info.Mode())
 		}
 	}
-	// The disk gained group-read (owner bits preserved), no others.
+	// The disk gained group-read+WRITE (owner bits preserved), no others: it is
+	// the writable CoW layer, and libvirt's pre-start accessibility check runs
+	// before dynamic_ownership chowns it to the QEMU user — see regroupFile.
 	info, err := os.Stat(disk)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm()&0o040 == 0 {
-		t.Errorf("disk %v missing group-read after regroup", info.Mode().Perm())
+	if info.Mode().Perm()&0o060 != 0o060 {
+		t.Errorf("disk %v missing group-read+write after regroup", info.Mode().Perm())
 	}
 	if info.Mode().Perm()&0o007 != 0 {
 		t.Errorf("disk %v grants access to others", info.Mode().Perm())
+	}
+	// The read-only sibling gained group-read ONLY, no write.
+	binfo, err := os.Stat(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binfo.Mode().Perm()&0o040 == 0 {
+		t.Errorf("base %v missing group-read after regroup", binfo.Mode().Perm())
+	}
+	if binfo.Mode().Perm()&0o020 != 0 {
+		t.Errorf("base %v should not gain group-write after regroup", binfo.Mode().Perm())
+	}
+	if binfo.Mode().Perm()&0o007 != 0 {
+		t.Errorf("base %v grants access to others", binfo.Mode().Perm())
 	}
 	// The out-of-subtree target's mode must be UNCHANGED (walk did not follow the link).
 	oinfo, err := os.Stat(outside)

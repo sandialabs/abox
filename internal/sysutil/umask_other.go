@@ -2,6 +2,13 @@
 
 package sysutil
 
+// WithUmask simply runs fn on platforms without a umask (Windows): access
+// control there relies on the parent directory's ACL. Any file/dir mode
+// requested by fn's caller must be secured by other means on such platforms.
+func WithUmask(_ int, fn func()) {
+	fn()
+}
+
 // WithRestrictiveUmask simply runs fn on platforms without a umask (Windows):
 // access control there relies on the parent directory's ACL and, for the
 // privileged transport, on the peer-credential check (which is unsupported on
