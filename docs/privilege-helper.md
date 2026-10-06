@@ -23,7 +23,7 @@ The helper exposes a minimal `Egress` gRPC service — 6 RPCs total:
 
 | RPC | Purpose |
 |-----|---------|
-| `EnsureStorageRoot` | provision the caller's per-user disk storage root (owned by the caller, setgid to the QEMU group), idempotent. The helper derives the caller from the socket peer uid and creates only `<parent>/<uid>` — never an arbitrary path. With `regroup` set (used by `abox migrate`) it also re-groups the caller's own subtree to the QEMU group after files were relocated. |
+| `EnsureStorageRoot` | provision the caller's per-user disk storage root AND its `instances`/`base` subdirectories (each owned by the caller, setgid to the QEMU group), idempotent. The helper derives the caller from the socket peer uid and creates only `<parent>/<uid>` (and the two subdirs under it) — never an arbitrary path. With `regroup` set (used by `abox migrate`) it also re-groups the caller's own subtree to the QEMU group after files were relocated. |
 | `Apply`    | install the DNS REDIRECT (nat table) + INPUT accepts for a bridge (idempotent) |
 | `Remove`   | flush abox's egress rules for a bridge — scoped to abox's own ports so unrelated rules survive (idempotent) |
 | `Verify`   | report whether the host-side DNS redirect + accepts are in force |
@@ -32,21 +32,44 @@ The helper exposes a minimal `Egress` gRPC service — 6 RPCs total:
 
 ## Disk storage ownership
 
-The per-user storage root is created **once** (root-owned shared parent
-`/var/lib/libvirt/images/abox`, then the per-user `<uid>` subdir owned by the
-caller and setgid `2750` to the resolved QEMU group). The QEMU group is resolved
-from, in order: an uncommented `group = "..."` in `/etc/libvirt/qemu.conf`, the
-QEMU runtime user's primary group, then the known names (`libvirt-qemu`, `qemu`,
-`kvm`). If it resolves via the broad `kvm` fallback the helper emits a warning —
-the storage tree would then be group-readable by every `kvm` member, so pin the
-exact group with `group = "..."` in `qemu.conf`.
+The per-user storage root is created **once** by the privileged helper
+(root-owned shared parent `/var/lib/libvirt/images/abox`, then the per-user
+`<uid>` subdir, AND its `instances`/`base` subdirectories, each owned by the
+caller and setgid `2750` to the resolved QEMU group). The QEMU group is
+resolved from, in order: an uncommented `group = "..."` in
+`/etc/libvirt/qemu.conf`, the QEMU runtime user's primary group, then the
+known names (`libvirt-qemu`, `qemu`, `kvm`). If it resolves via the broad `kvm`
+fallback the helper emits a warning — the storage tree, including each
+instance's writable disk, would then be group-readable **and group-writable**
+by every `kvm` member (not just read, since the disk is `0660` — see below),
+so pin the exact group with `group = "..."` in `qemu.conf`.
 
-Disk files are mode `0640` (owner-rw, group-**read**) and directories `2750`
-(setgid). This assumes libvirtd's default `dynamic_ownership = 1`, under which
-libvirt chowns the writable disk to the QEMU user at VM start (granting
-owner-write). **Caveat:** if you set `dynamic_ownership = 0` in `qemu.conf`, the
-writable disk must be group-**writable**; adjust the disk mode accordingly, since
-the VM process would otherwise be unable to write its CoW layer.
+**Every setgid directory in this tree is provisioned by the privileged
+helper, never by the unprivileged client.** On Linux, `chmod(2)` silently
+clears the setgid bit whenever the calling process is not a member of the
+target group — even when the bit is already set and the call is a no-op
+"reassert". The calling user is never a member of the QEMU group, so any
+unprivileged chmod touching one of these directories would corrupt its
+setgid bit (and, from then on, every file subsequently created inside it
+would silently fall back to the caller's own primary group instead of the
+QEMU group — the writable disk included). The unprivileged client therefore
+never chmods a directory in this tree; it relies purely on `mkdir(2)`'s
+unconditional inheritance of the setgid bit and group from an already-setgid
+parent, which requires no privilege. (This was the actual cause of a past
+regression where `virsh start` failed with "Cannot access storage file ...
+Permission denied" despite the disk's mode looking correct — the directory
+housing it had silently lost its setgid bit to an unprivileged reassert
+chmod, so the disk inherited the caller's own group instead of the QEMU
+group.)
+
+The writable disk is mode `0660` (owner-rw, group-**read-write**); read-only
+sources (the base backing file, cloud-init ISO) are `0640` (group-**read**);
+directories are `2750` (setgid). The disk needs group-write unconditionally,
+regardless of `dynamic_ownership`: libvirt's own pre-start accessibility check
+(what `virsh start` reports as "Cannot access storage file ... (as uid:X,
+gid:Y): Permission denied" on failure) runs against the file's owner/mode
+*before* `dynamic_ownership` chowns it to the QEMU runtime user, so at that
+point only the group bits apply — and the writable layer needs W_OK.
 
 > **UFW removed.** Earlier versions used `ufw allow in on <bridge>` to open the
 > bridge. The helper now installs scoped iptables INPUT accepts for exactly the

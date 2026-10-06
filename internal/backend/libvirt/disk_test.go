@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/sandialabs/abox/internal/config"
@@ -27,28 +28,99 @@ func diskPaths(t *testing.T) *config.Paths {
 	return p
 }
 
-// TestPrepareDirSetsSetgidOnLeafAndParent verifies prepareDir makes both the
-// leaf dir and its immediate parent setgid (so the QEMU group inherited from the
-// setgid storage root propagates to every dir the caller creates, regardless of
-// creation order).
-func TestPrepareDirSetsSetgidOnLeafAndParent(t *testing.T) {
+// TestPrepareDirInheritsSetgidFromParent verifies prepareDir's leaf dir
+// inherits setgid from an already-setgid parent (the shared "instances"/"base"
+// dir, which the privileged helper provisions — see sharedStorageSubdirs in
+// internal/privilege/storage_linux.go) purely via kernel inheritance at mkdir
+// time, with prepareDir itself never chmod'ing the leaf.
+func TestPrepareDirInheritsSetgidFromParent(t *testing.T) {
 	root := t.TempDir()
-	leaf := filepath.Join(root, "instances", "dev")
+	parent := filepath.Join(root, "instances")
+	leaf := filepath.Join(parent, "dev")
+
+	// Simulate the privileged helper having already made "instances" setgid.
+	if err := os.Mkdir(parent, storageDirMode.Perm()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, storageDirMode); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := prepareDir(leaf); err != nil {
 		t.Fatalf("prepareDir: %v", err)
 	}
-	for _, d := range []string{leaf, filepath.Dir(leaf)} {
-		info, err := os.Stat(d)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if want := storageDirMode | os.ModeDir; info.Mode() != want {
-			t.Errorf("dir %s mode = %v, want %v", d, info.Mode(), want)
-		}
-		if info.Mode()&os.ModeSetgid == 0 {
-			t.Errorf("dir %s is not setgid", d)
-		}
+	info, err := os.Stat(leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSetgid == 0 {
+		t.Error("leaf did not inherit setgid from its setgid parent")
+	}
+}
+
+// TestPrepareDirIgnoresUmask verifies prepareDir's leaf dir lands at exactly
+// storageDirMode.Perm() even under a restrictive ambient umask. prepareDir
+// never chmods (see its doc comment for why), so if it did not also neutralize
+// the umask, a restrictive umask (e.g. 0o077, common on hardened hosts) would
+// silently strip the group r-x the QEMU process needs to traverse/read the dir,
+// with no safe way to add it back afterward.
+func TestPrepareDirIgnoresUmask(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "instances")
+	leaf := filepath.Join(parent, "dev")
+	if err := os.Mkdir(parent, storageDirMode.Perm()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, storageDirMode); err != nil {
+		t.Fatal(err)
+	}
+
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+
+	if err := prepareDir(leaf); err != nil {
+		t.Fatalf("prepareDir: %v", err)
+	}
+	info, err := os.Stat(leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != storageDirMode.Perm() {
+		t.Errorf("leaf mode = %o, want %o (umask must not affect it)", info.Mode().Perm(), storageDirMode.Perm())
+	}
+}
+
+// TestPrepareDirNeverChmodsExistingDir verifies prepareDir does not touch the
+// mode of a dir that already exists — critical because an unprivileged,
+// non-group-member chmod reasserting S_ISGID would silently CLEAR it (see
+// chmod(2) and prepareDir's doc comment), corrupting group inheritance for
+// every file subsequently created inside. os.MkdirAll (which prepareDir
+// delegates to) is a no-op on an existing dir, so this also pins that
+// contract against a future accidental chmod being reintroduced.
+func TestPrepareDirNeverChmodsExistingDir(t *testing.T) {
+	dir := t.TempDir()
+	leaf := filepath.Join(dir, "leaf")
+	// Deliberately setgid + a mode prepareDir's old chmod would have changed.
+	if err := os.Mkdir(leaf, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(leaf, os.ModeSetgid|0o700); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := prepareDir(leaf); err != nil {
+		t.Fatalf("prepareDir: %v", err)
+	}
+	after, err := os.Stat(leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Mode() != before.Mode() {
+		t.Errorf("prepareDir changed mode of existing dir: %v -> %v", before.Mode(), after.Mode())
 	}
 }
 
@@ -136,9 +208,9 @@ func TestDiskImportAcceptsSelfContained(t *testing.T) {
 	if !sawConvert {
 		t.Errorf("non-snapshot import should convert (flatten); calls=%v", calls)
 	}
-	// The instance disk exists and carries the restrictive mode: group-read so the
-	// QEMU process (inheriting the setgid storage-root group) can reach the CoW
-	// layer (dynamic ownership grants owner-write at boot); nothing for others.
+	// The instance disk exists and carries the restrictive mode: group-read+write
+	// so the QEMU process (inheriting the setgid storage-root group) can reach the
+	// CoW layer even before dynamic ownership chowns it at boot; nothing for others.
 	info, err := os.Stat(paths.Disk)
 	if err != nil {
 		t.Fatalf("instance disk not created: %v", err)
@@ -404,10 +476,11 @@ func TestDiskExportSnapshotCopiesRaw(t *testing.T) {
 
 // TestEnsureAccessReassertsModesForOwnedFiles covers the every-boot path: for an
 // instance whose disk/base/ISO are all still owned by the caller, EnsureAccess
-// re-applies the group-readable modes (and the setgid dir mode) and returns no
-// error. This is the normal-restart case; the not-owned skip (a readonly source
-// libvirt chowned to the QEMU user at a prior boot) cannot be exercised without
-// root and is covered by the e2e up-restarts case instead.
+// re-applies the group-readable FILE modes and returns no error. This is the
+// normal-restart case; the not-owned skip (a readonly source libvirt chowned to
+// the QEMU user at a prior boot) cannot be exercised without root and is
+// covered by the e2e up-restarts case instead. EnsureAccess deliberately never
+// chmods paths.DiskDir itself (see its doc comment) — that is NOT covered here.
 func TestEnsureAccessReassertsModesForOwnedFiles(t *testing.T) {
 	paths := diskPaths(t)
 	if err := os.MkdirAll(paths.DiskDir, 0o700); err != nil {
@@ -446,13 +519,42 @@ func TestEnsureAccessReassertsModesForOwnedFiles(t *testing.T) {
 			t.Errorf("%s mode = %o, want %o", tc.path, info.Mode().Perm(), tc.want)
 		}
 	}
-	// The instance dir must be re-asserted setgid.
-	dirInfo, err := os.Stat(paths.DiskDir)
+}
+
+// TestEnsureAccessNeverChmodsDiskDir verifies EnsureAccess does not touch
+// paths.DiskDir's mode at all: an unprivileged, non-group-member chmod
+// reasserting S_ISGID would silently clear it (see chmod(2) and prepareDir's
+// doc comment), corrupting group inheritance for every file created in that
+// dir afterward. This pins that contract against a future regression.
+func TestEnsureAccessNeverChmodsDiskDir(t *testing.T) {
+	paths := diskPaths(t)
+	if err := os.MkdirAll(paths.DiskDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately setgid with a mode distinct from storageDirMode, so any
+	// chmod by EnsureAccess (reasserting storageDirMode) would be observable.
+	if err := os.Chmod(paths.DiskDir, os.ModeSetgid|0o700); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(paths.DiskDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dirInfo.Mode()&os.ModeSetgid == 0 {
-		t.Errorf("disk dir %s is not setgid after EnsureAccess: %v", paths.DiskDir, dirInfo.Mode())
+	if err := os.WriteFile(paths.Disk, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &DiskManager{}
+	if err := m.EnsureAccess(context.Background(), fullInstance(), paths); err != nil {
+		t.Fatalf("EnsureAccess: %v", err)
+	}
+
+	after, err := os.Stat(paths.DiskDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Mode() != before.Mode() {
+		t.Errorf("EnsureAccess changed DiskDir mode: %v -> %v", before.Mode(), after.Mode())
 	}
 }
 

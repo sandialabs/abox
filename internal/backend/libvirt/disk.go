@@ -21,22 +21,29 @@ import (
 
 // Storage modes for the per-user libvirt storage tree. The tree lives outside
 // $HOME under a root the privilege helper created owned by the caller and setgid
-// to the QEMU runtime group (see the helper's EnsureStorageRoot). Because the
-// root is setgid, every directory and file the calling user creates beneath it
-// inherits that group, so the QEMU process reads/writes images by group
-// membership — no ACLs and no $HOME traversal. The unprivileged create path only
-// needs to chmod the group bits into place.
+// to the QEMU runtime group — AND the privileged helper also provisions the
+// shared "instances"/"base" subdirectories directly beneath it setgid (see
+// sharedStorageSubdirs in internal/privilege/storage_linux.go), because an
+// unprivileged, non-group-member chmod can never safely set OR reassert the
+// setgid bit (see prepareDir). Because every directory in that chain is setgid,
+// every directory and file the calling user creates beneath it inherits that
+// group automatically at creation time, so the QEMU process reads/writes
+// images by group membership — no ACLs, no $HOME traversal, and (critically)
+// no unprivileged chmod of any directory's setgid bit, ever.
 const (
 	// storageDirMode: setgid (propagate the QEMU group to new entries), owner
 	// rwx, group r-x (the VM process traverses + lists), nothing for others.
 	storageDirMode = os.ModeSetgid | 0o750
-	// diskFileMode: the writable CoW disk — owner rw, group r, nothing for others.
-	// The disk is the VM's writable layer, but the group needs only READ here:
-	// with libvirtd dynamic_ownership=1 (the default) libvirt chowns the disk to
-	// the QEMU user at VM start, granting owner-write; group-write would widen
-	// access to the whole QEMU group for no benefit. (If dynamic_ownership=0 the
-	// disk must be group-writable — see docs/privilege-helper.md.)
-	diskFileMode = 0o640
+	// diskFileMode: the writable CoW disk — owner rw, group rw, nothing for
+	// others. The group needs WRITE, not just read: libvirt's own pre-start
+	// accessibility check (surfaced by `virsh start` as "Cannot access storage
+	// file ... (as uid:X, gid:Y): Permission denied") runs BEFORE
+	// dynamic_ownership's chown-to-QEMU-user takes effect, and evaluates the
+	// file's pre-chown owner/mode. At that point the file is still owned by the
+	// calling user, so only the group bits apply — and the writable layer needs
+	// W_OK. (This holds regardless of dynamic_ownership=0/1 — see
+	// docs/privilege-helper.md.)
+	diskFileMode = 0o660
 	// roFileMode: a read-only image/ISO (base backing file, cloud-init) — owner
 	// rw, group r (the VM process reads it), nothing for others.
 	roFileMode = 0o640
@@ -71,32 +78,34 @@ func (m *DiskManager) ensureStorageRoot(ctx context.Context) error {
 	return nil
 }
 
-// prepareDir creates dir (and parents) under the storage root and sets the
-// storage directory mode on both dir AND its immediate parent. The QEMU group is
-// inherited from the setgid root, so only the mode (incl. setgid) is set here —
-// no chgrp (which the unprivileged caller could not perform anyway).
+// prepareDir creates dir (a leaf under the shared "instances"/"base" level,
+// e.g. the per-instance disk dir) if absent. It does NOT chmod anything: the
+// shared "instances"/"base" directories themselves are provisioned setgid by
+// the privileged helper's EnsureStorageRoot (called by every caller of
+// prepareDir before it, via ensureStorageRoot), so by the time this runs, dir's
+// parent already exists and is already setgid to the QEMU group. Linux
+// propagates BOTH the setgid bit and the group to a new directory created
+// inside a setgid parent automatically and unconditionally, with no privilege
+// needed — that inheritance is what gives dir the right group here.
 //
-// Both the leaf and its parent are chmod'd because MkdirAll creates intermediate
-// dirs (e.g. the shared "instances"/"base" level between the storage root and
-// this leaf) with a umask-masked mode that can lack setgid; without fixing the
-// parent, a directory created there by a different code path could fail to
-// propagate the QEMU group. Making prepareDir converge the parent too keeps the
-// tree's modes deterministic regardless of creation order.
+// Deliberately no chmod: an unprivileged, non-group-member chmod call
+// unconditionally clears S_ISGID on return (see chmod(2)) — true even when the
+// call "merely reasserts" a mode dir already has. The calling user is never a
+// member of the QEMU group, so any such chmod here would immediately undo the
+// setgid bit dir just correctly inherited, causing every file subsequently
+// created inside it (disk.qcow2, cidata.iso, ...) to fall back to the caller's
+// own primary group instead of the QEMU group — exactly the bug this comment
+// is here to prevent reintroducing. Since there is no later chmod to fix up the
+// permission bits either, MkdirAll runs under umask 0 so dir's mode lands
+// exactly as storageDirMode.Perm() regardless of the caller's ambient umask —
+// otherwise a restrictive umask (e.g. 0o077) would strip the group r-x the QEMU
+// process needs to traverse/read dir, with no safe way to add it back.
 func prepareDir(dir string) error {
-	if err := os.MkdirAll(dir, storageDirMode.Perm()); err != nil {
-		return err
-	}
-	if err := os.Chmod(dir, storageDirMode); err != nil {
-		return err
-	}
-	// Converge the immediate parent (the shared instances/base level) too. Best
-	// effort: the storage root itself is helper-owned setgid and above the tree
-	// this caller manages, so a chmod failure there is not fatal to this op.
-	parent := filepath.Dir(dir)
-	if err := os.Chmod(parent, storageDirMode); err != nil && !os.IsPermission(err) {
-		return err
-	}
-	return nil
+	var err error
+	sysutil.WithUmask(0, func() {
+		err = os.MkdirAll(dir, storageDirMode.Perm())
+	})
+	return err
 }
 
 // lstatNoSymlink stats path without following symlinks and fails closed if it is
@@ -118,12 +127,9 @@ func lstatNoSymlink(path string) (os.FileInfo, error) {
 
 // chmodNoFollow chmods path only if it is a regular file, refusing symlinks.
 //
-// mode is currently 0640 at every call site (diskFileMode == roFileMode), but the
-// two are distinct consts on purpose: a dynamic_ownership=0 host needs the disk
-// group-writable (see the diskFileMode comment), which would give the disk a
-// different mode. Keeping the parameter preserves that per-file intent.
-//
-//nolint:unparam // see above — disk vs read-only mode intentionally distinct
+// mode varies by call site: diskFileMode (0660, the writable CoW disk needs
+// group-write — see its comment) vs roFileMode (0640, read-only sources only
+// need group-read).
 func chmodNoFollow(path string, mode os.FileMode) error {
 	if _, err := lstatNoSymlink(path); err != nil {
 		return err
@@ -146,10 +152,8 @@ func chmodNoFollow(path string, mode os.FileMode) error {
 // unaffected. A file the caller lost that ALSO lost its mode/group is out of
 // scope here and must be repaired by the privileged helper (`abox migrate`), as
 // EnsureAccess's doc comment notes. Symlinks are refused (fail closed) like
-// chmodNoFollow. mode is 0640 at every call site today, but diskFileMode and
-// roFileMode are intentionally distinct consts (see chmodNoFollow) and may diverge.
-//
-//nolint:unparam // mode intentionally kept per-file; see chmodNoFollow
+// chmodNoFollow. mode varies by call site (diskFileMode vs roFileMode — see
+// chmodNoFollow).
 func chmodIfOwned(path string, mode os.FileMode) error {
 	info, err := lstatNoSymlink(path)
 	if err != nil {
@@ -191,9 +195,10 @@ func (m *DiskManager) Create(ctx context.Context, inst *config.Instance, paths *
 		return fmt.Errorf("failed to create disk: %w", err)
 	}
 
-	// The disk inherits the QEMU group from the setgid dir; give the group read so
-	// the VM process can reach the CoW layer (libvirtd dynamic ownership grants
-	// owner-write at VM start), and deny others.
+	// The disk inherits the QEMU group from the setgid dir; give the group
+	// read+write (libvirt's pre-start accessibility check runs before dynamic
+	// ownership chowns the disk to the QEMU user — see diskFileMode), and deny
+	// others.
 	if err := chmodNoFollow(paths.Disk, diskFileMode); err != nil {
 		return fmt.Errorf("failed to set disk permissions: %w", err)
 	}
@@ -272,22 +277,22 @@ func (m *DiskManager) EnsureBaseImage(ctx context.Context, inst *config.Instance
 // EnsureAccess re-asserts the QEMU runtime user's access to an existing
 // instance's disk, base image, and cloud-init ISO before VM boot (idempotent):
 // it ensures the per-user storage root exists (provisioning it via the helper if
-// absent) and re-applies the group-readable MODES on the storage dir and the
-// image files.
+// absent) and re-applies the group-readable MODES on the image files.
 //
-// This is the unprivileged every-boot path, so it only fixes modes — it does NOT
-// chgrp the files (an unprivileged caller cannot). If a restore-from-backup
-// dropped the QEMU GROUP off the files (not just their modes), that must be
-// repaired by the privileged helper's regroup step (`abox migrate` after a
-// relocation), not here.
+// This is the unprivileged every-boot path, so it only fixes FILE modes — it
+// does NOT chgrp (an unprivileged caller cannot) and it does NOT chmod the
+// instance dir itself: unlike a file's permission bits, a directory's setgid
+// bit cannot be safely reasserted by an unprivileged, non-group-member caller
+// (chmod unconditionally clears S_ISGID in that case — see prepareDir), so
+// doing so here would silently break group inheritance for every file created
+// in that dir afterward. The dir's setgid bit is established once, correctly,
+// by inheritance from its setgid parent at creation time (see prepareDir) and
+// never needs reasserting. If a restore-from-backup dropped the QEMU GROUP off
+// the files OR the dir's setgid bit, that must be repaired by the privileged
+// helper's regroup step (`abox migrate` after a relocation), not here.
 func (m *DiskManager) EnsureAccess(ctx context.Context, inst *config.Instance, paths *config.Paths) error {
 	if err := m.ensureStorageRoot(ctx); err != nil {
 		return err
-	}
-	// Re-assert the setgid mode on the instance dir (owned by the caller — libvirt
-	// chowns files, not dirs — so this always succeeds).
-	if err := os.Chmod(paths.DiskDir, storageDirMode); err != nil {
-		return fmt.Errorf("failed to set disk directory permissions: %w", err)
 	}
 	// Per-file modes are re-asserted only for files the caller still owns: a prior
 	// boot may have left a readonly source (base image, ISO) owned by the QEMU user
@@ -353,8 +358,7 @@ func (m *DiskManager) Import(ctx context.Context, src string, inst *config.Insta
 	}
 
 	// The imported disk is the writable CoW layer; give the QEMU group (inherited
-	// from the setgid dir) read (dynamic ownership grants owner-write at VM start)
-	// and deny others.
+	// from the setgid dir) read+write (see diskFileMode) and deny others.
 	if err := chmodNoFollow(paths.Disk, diskFileMode); err != nil {
 		return fmt.Errorf("failed to set disk permissions: %w", err)
 	}
