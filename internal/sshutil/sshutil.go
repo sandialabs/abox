@@ -66,6 +66,16 @@ const (
 	sshOptNoX11Trusted = "ForwardX11Trusted=no"
 )
 
+// SSHFSCommandOption returns an sshfs "ssh_command=" option value that applies
+// sshOptPubkeyAlgos to the underlying ssh. sshfs only forwards an allowlist of
+// ssh -o options; anything else (PubkeyAcceptedKeyTypes on sshfs 3.7.1 /
+// Ubuntu 22.04) is handed to FUSE, which rejects it as an unknown mount option.
+// sshfs splits ssh_command on whitespace and FUSE splits -o values on commas,
+// so the appended ssh option must contain neither.
+func SSHFSCommandOption() string {
+	return "ssh_command=ssh -o " + sshOptPubkeyAlgos
+}
+
 func CommonOptions(paths *config.Paths) []string {
 	return []string{
 		"-i", paths.SSHKey,

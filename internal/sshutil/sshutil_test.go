@@ -169,3 +169,10 @@ func TestRemotePath(t *testing.T) {
 		})
 	}
 }
+
+func TestSSHFSCommandOption(t *testing.T) {
+	want := "ssh_command=ssh -o PubkeyAcceptedKeyTypes=+ssh-ed25519"
+	if got := SSHFSCommandOption(); got != want {
+		t.Errorf("SSHFSCommandOption() = %q, want %q", got, want)
+	}
+}

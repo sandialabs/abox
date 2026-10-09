@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/instance"
 	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/mountutil"
@@ -133,28 +134,7 @@ func (o *Options) Run(instanceSpec, localPath string) error {
 		return fmt.Errorf("path %q is already mounted", absLocalPath)
 	}
 
-	// Build sshfs command
-	// Use TOFU model matching sshutil.CommonOptions
-	sshfsArgs := []string{
-		sshutil.RemotePath(sshUser, ip, remotePath),
-		absLocalPath,
-		"-o", "IdentityFile=" + paths.SSHKey,
-		"-o", "IdentitiesOnly=yes",
-		// Pre-8.5 keyword name; a permanent alias on newer OpenSSH. See the
-		// sshOptPubkeyAlgos comment in internal/sshutil for why not the
-		// PubkeyAcceptedAlgorithms spelling.
-		"-o", "PubkeyAcceptedKeyTypes=+ssh-ed25519",
-		"-o", "StrictHostKeyChecking=accept-new",
-		"-o", "UserKnownHostsFile=" + paths.KnownHosts,
-		"-o", "LogLevel=ERROR",
-	}
-
-	if o.ReadOnly {
-		sshfsArgs = append(sshfsArgs, "-o", "ro")
-	}
-	if o.AllowOther {
-		sshfsArgs = append(sshfsArgs, "-o", "allow_other")
-	}
+	sshfsArgs := buildSSHFSArgs(paths, sshUser, ip, remotePath, absLocalPath, o.ReadOnly, o.AllowOther)
 
 	if err := runSSHFS(paths.LogsDir, absLocalPath, sshfsArgs); err != nil {
 		return err
@@ -171,6 +151,32 @@ func (o *Options) Run(instanceSpec, localPath string) error {
 	logging.AuditInstance(instanceName, logging.ActionMount, "local_path", absLocalPath, "remote_path", remotePath)
 
 	return nil
+}
+
+// buildSSHFSArgs builds the sshfs argument list.
+// Uses the TOFU model matching sshutil.CommonOptions.
+func buildSSHFSArgs(paths *config.Paths, sshUser, ip, remotePath, localPath string, readOnly, allowOther bool) []string {
+	args := []string{
+		sshutil.RemotePath(sshUser, ip, remotePath),
+		localPath,
+		"-o", "IdentityFile=" + paths.SSHKey,
+		"-o", "IdentitiesOnly=yes",
+		// PubkeyAcceptedKeyTypes is not on sshfs's ssh-option allowlist, so it
+		// must go through ssh_command rather than a bare -o (which sshfs would
+		// pass to FUSE as an unknown mount option).
+		"-o", sshutil.SSHFSCommandOption(),
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "UserKnownHostsFile=" + paths.KnownHosts,
+		"-o", "LogLevel=ERROR",
+	}
+
+	if readOnly {
+		args = append(args, "-o", "ro")
+	}
+	if allowOther {
+		args = append(args, "-o", "allow_other")
+	}
+	return args
 }
 
 // runSSHFS launches sshfs detached, sending its output to logsDir/mount.log, and
