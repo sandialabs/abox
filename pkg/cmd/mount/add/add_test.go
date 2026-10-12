@@ -63,7 +63,7 @@ func TestBuildSSHFSArgs(t *testing.T) {
 	args := buildSSHFSArgs(paths, "ubuntu", "10.0.0.2", "/home/ubuntu", "/mnt/dev", true, true)
 
 	var opts []string
-	for i := 0; i < len(args)-1; i++ {
+	for i := range len(args) - 1 {
 		if args[i] == "-o" {
 			opts = append(opts, args[i+1])
 		}
