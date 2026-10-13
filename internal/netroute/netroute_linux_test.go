@@ -19,6 +19,16 @@ func TestParseLinuxRouted(t *testing.T) {
 		{"default before specific (ordering-independent)", "default via 192.168.1.1 dev eth0\n192.168.128.0/24 via 10.79.128.1 dev utun4\n", true},
 		{"empty output (no matching route)", "", false},
 		{"whitespace only", "   \n\n", false},
+		{"full-tunnel VPN /1 halves", "0.0.0.0/1 via 10.79.128.1 dev tun0 \n128.0.0.0/1 via 10.79.128.1 dev tun0 \ndefault via 192.168.1.1 dev eth0 \n", false},
+		{"broad split-include /16", "192.168.0.0/16 via 10.79.128.1 dev tun0 \n", false},
+		{"/23 supernet", "192.168.128.0/23 via 10.79.128.1 dev tun0 \n", false},
+		{"supernets plus specific /24", "default via 192.168.1.1 dev eth0\n0.0.0.0/1 via 10.79.128.1 dev tun0\n192.168.128.0/24 via 10.79.128.1 dev utun4\n", true},
+		{"/25 more-specific route", "192.168.128.0/25 via 10.79.128.1 dev tun0 \n", true},
+		{"bare-IP host route", "192.168.128.1 via 10.79.128.1 dev tun0 \n", true},
+		{"unreachable /24 (route-type prefix)", "unreachable 192.168.128.0/24 \n", true},
+		{"unreachable supernet", "unreachable 192.168.0.0/16 \n", false},
+		{"prohibit /24 (route-type prefix)", "prohibit 192.168.128.0/24 \n", true},
+		{"throw /24 falls through, not a conflict", "throw 192.168.128.0/24 \n", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
