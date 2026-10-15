@@ -161,7 +161,13 @@ Linux.
 - **Host-route-aware allocation.** Allocation skips both subnets other abox
   instances already claimed and any `/24` the host already routes elsewhere — a VPN
   split-include route, the host's own LAN, or a leftover bridge — so a fresh VM
-  lands on a subnet reachable from the host. The probe is best-effort
+  lands on a subnet reachable from the host. Only routes at `/24` or more
+  specific count: a full-tunnel VPN (`0.0.0.0/1` + `128.0.0.0/1`) or a broad
+  split-include like `192.168.0.0/16` does not consume the pool, since the
+  connected `/24` wins longest-prefix match. The tradeoff: while the instance
+  exists, VPN hosts inside its claimed `/24` are unreachable from the host —
+  if you need a range a broad VPN route covers, pick an explicit `--subnet`
+  clear of it. The probe is best-effort
   (`route -n get`) and fail-open, so it never blocks `create`. If you force a
   colliding subnet with `--subnet`, `abox create` warns but proceeds. A collision
   that slips through looks like: the VM boots and guest egress works (DNS/HTTP

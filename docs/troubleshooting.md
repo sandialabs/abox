@@ -281,7 +281,9 @@ or its network didn't come up.
    `--subnet` (or a VPN that connects after `create`) can still collide. Confirm
    and pick a clear subnet:
    ```bash
-   route -n get 192.168.128.1      # interface: utunN => a VPN owns this /24
+   route -n get 192.168.128.1      # a VPN owns this /24 iff mask: is 255.255.255.0
+                                   # or narrower (or absent: host route); broader
+                                   # masks (128.0.0.0, 255.255.0.0) are harmless
    netstat -rn | grep 192.168.128
    abox create dev --subnet 192.168.211.0/24   # or disconnect the VPN
    ```
