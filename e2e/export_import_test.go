@@ -20,6 +20,10 @@ func TestExportImport(t *testing.T) {
 	inst := env.newTestInstance()
 	inst.create()
 
+	// Captured before export: the archive carries this networking config, and a
+	// later import must NOT reuse it (the original instance still owns it).
+	archivedIP := inst.configValue("ip_address")
+
 	// Create a temp directory for the export
 	tempDir, err := os.MkdirTemp("", "abox-e2e-export-")
 	if err != nil {
@@ -59,19 +63,35 @@ func TestExportImport(t *testing.T) {
 			t.Errorf("Imported instance %s not found in list", importedInst.name)
 		}
 
-		// Start the imported instance to verify it works
+		// Regression: import must allocate fresh networking rather than reuse the
+		// archived subnet/IP — the original instance still owns those here, so a
+		// reuse would collide.
+		importedIP := importedInst.configValue("ip_address")
+		if importedIP == archivedIP {
+			t.Errorf("Imported instance reused the archived IP %s; import must allocate fresh networking", archivedIP)
+		}
+
+		// Start the imported instance to verify it works. waitForSSH probes via
+		// `abox ssh`, which targets the newly allocated IP — reachability proves the
+		// first start re-rendered the guest's static IP from regenerated cloud-init.
 		importedInst.start()
 		if !importedInst.waitForRunning(60 * time.Second) {
 			t.Fatal("Imported instance did not start")
 		}
 		if !importedInst.waitForSSH(120 * time.Second) {
-			t.Fatal("SSH did not become available on imported instance")
+			t.Fatal("SSH did not become available on imported instance at its newly allocated IP")
 		}
 
 		// Simple verification - run a command
 		sshResult := importedInst.ssh("echo", "imported-ok")
 		if !sshResult.Success() || !strings.Contains(sshResult.Stdout, "imported-ok") {
 			t.Error("Failed to run command on imported instance")
+		}
+
+		// The guest itself must hold the newly allocated address, not the archived one.
+		ipResult := importedInst.ssh("hostname", "-I")
+		if !ipResult.Success() || !strings.Contains(ipResult.Stdout, importedIP) {
+			t.Errorf("Imported guest should hold the newly allocated IP %s, got: %s", importedIP, ipResult.Stdout)
 		}
 
 		importedInst.forceStop()

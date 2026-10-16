@@ -136,6 +136,21 @@ func signalFallback(pidFile string) {
 	}
 }
 
+// AliveByPIDFile reports whether pidFile holds the PID of a live abox process.
+// Any read/parse error, dead PID, or non-abox PID counts as "not alive" — each
+// leads callers to the same action (treat the daemon as gone).
+func AliveByPIDFile(pidFile string) bool {
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	return procutil.IsAlive(pid) && IsAboxProcess(pid)
+}
+
 // KillDaemonByPIDFile terminates the daemon named by pidFile (SIGTERM, then
 // SIGKILL if needed), re-verifying the PID is an abox process before signalling.
 // It is a no-op if the file is missing/unparseable or the PID is not ours.

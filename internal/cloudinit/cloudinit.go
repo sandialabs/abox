@@ -271,7 +271,15 @@ func CreateISO(outputPath string, cfg *Config) error {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Generate instance ID if not provided
+	// Generate instance ID if not provided.
+	//
+	// The per-start timestamp is load-bearing: the ISO is regenerated on every
+	// `abox start`, so a fresh instance-id makes cloud-init treat each boot as a
+	// NEW instance and re-run per-instance config — in particular re-rendering
+	// the MAC-matched static-IP netplan from network-config. `abox config edit
+	// --subnet` and `abox import` (which allocates a fresh subnet/IP) rely on
+	// this to take effect at the next start. Don't stabilize this ID without
+	// adding another mechanism to re-apply network config in the guest.
 	if cfg.InstanceID == "" {
 		cfg.InstanceID = fmt.Sprintf("abox-%s-%d", cfg.Hostname, time.Now().Unix())
 	}
