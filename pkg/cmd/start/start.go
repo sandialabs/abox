@@ -97,7 +97,13 @@ func runStart(ctx context.Context, opts *Options, name string) error {
 		// (panic, OOM, kill -9). Recover any that died so the user doesn't
 		// have to abox stop && abox start to get filtering back. Each
 		// start* call is a no-op when its daemon is alive.
-		return recoverDaemons(w, be, name, inst, paths, opts.Brief)
+		if err := recoverDaemons(w, be, name, inst, paths, opts.Brief); err != nil {
+			return err
+		}
+		// User mounts/forwards can likewise die independently of the VM (sshfs
+		// or ssh killed); re-establish any that are gone. Warn-only.
+		reconcileUserResources(w, inst, paths)
+		return nil
 	}
 
 	if err := ensureNetwork(ctx, w, be, inst); err != nil {
@@ -113,6 +119,15 @@ func runStart(ctx context.Context, opts *Options, name string) error {
 	}
 
 	ip, ready := waitForReady(w, inst, paths)
+
+	// Re-establish recorded user mounts/forwards left stale by the previous
+	// stop. Only when the guest is reachable: sshfs/ssh against an unreachable
+	// guest would hang. All failures are warnings; the start itself succeeded.
+	if ready {
+		reconcileUserResources(w, inst, paths)
+	} else {
+		warnSkippedReconcile(w, paths)
+	}
 
 	if !opts.Brief {
 		ipInfo := " at " + ip

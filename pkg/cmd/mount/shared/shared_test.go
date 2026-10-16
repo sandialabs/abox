@@ -16,11 +16,13 @@ func TestMountRecordRoundTrip(t *testing.T) {
 		t.Fatalf("expected 0 mounts, got %d", len(mounts))
 	}
 
-	// Add two records.
-	if err := AddMountRecord(dir, "/mnt/a", "/home/dev"); err != nil {
+	// Add two records (the second with the sshfs flags set).
+	if err := AddMountRecord(dir, MountEntry{LocalPath: "/mnt/a", RemotePath: "/home/dev"}); err != nil {
 		t.Fatalf("AddMountRecord: %v", err)
 	}
-	if err := AddMountRecord(dir, "/mnt/b", "/var/log"); err != nil {
+	if err := AddMountRecord(dir, MountEntry{
+		LocalPath: "/mnt/b", RemotePath: "/var/log", ReadOnly: true, AllowOther: true,
+	}); err != nil {
 		t.Fatalf("AddMountRecord: %v", err)
 	}
 
@@ -36,6 +38,12 @@ func TestMountRecordRoundTrip(t *testing.T) {
 	}
 	if mounts[0].MountedAt.IsZero() {
 		t.Error("expected MountedAt to be set")
+	}
+	if mounts[0].ReadOnly || mounts[0].AllowOther {
+		t.Errorf("expected default flags to round-trip as false, got %+v", mounts[0])
+	}
+	if !mounts[1].ReadOnly || !mounts[1].AllowOther {
+		t.Errorf("expected ReadOnly/AllowOther to round-trip as true, got %+v", mounts[1])
 	}
 
 	// Remove one record.

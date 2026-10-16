@@ -145,6 +145,12 @@ Port forwards use SSH tunneling. Each forward runs as a background SSH process:
 
 The SSH tunnel runs in the background until removed or the instance stops.
 
+Recorded forwards are automatically re-established by `abox start`: a tunnel
+that died (for example with the VM on `abox stop`) is restarted — including
+reverse forwards, which re-open guest-to-host port exposure. Killing a tunnel
+process by hand only lasts until the next start; use `abox forward remove` to
+retire a forward permanently.
+
 ### Use Cases
 
 **Web Development:**
@@ -220,6 +226,13 @@ abox mount remove dev
 abox mount remove --all
 abox umount --all
 ```
+
+Recorded mounts are automatically re-established by `abox start`: a mount left
+stale by `abox stop` (the sshfs process dies with the VM) is cleaned up and
+remounted with its original flags — including `--allow-other` mounts, which
+re-expose the mount to other local users. A manual `fusermount -u` (or `umount`)
+only lasts until the next start; use `abox mount remove` to retire a mount
+permanently.
 
 ### Requirements
 

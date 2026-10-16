@@ -144,3 +144,71 @@ func TestMount(t *testing.T) {
 		}
 	})
 }
+
+// TestMountReconcileOnStart verifies that a mount left stale by `abox stop`
+// (the sshfs process dies with the VM, leaving a dead ENOTCONN FUSE endpoint)
+// is cleaned up and re-established by the next `abox start`.
+func TestMountReconcileOnStart(t *testing.T) {
+	skipIfBackendUnavailable(t)
+	skipIfNoConfiguredBaseImage(t)
+	skipIfNoSSHFS(t)
+	skipInShortMode(t)
+
+	env := newTestEnv(t)
+	inst := env.newTestInstance()
+	inst.create()
+	inst.start()
+
+	if !inst.waitForRunning(60 * time.Second) {
+		t.Fatal("Instance did not start")
+	}
+	if !inst.waitForSSH(120 * time.Second) {
+		t.Fatal("SSH did not become available")
+	}
+
+	tempDir, err := os.MkdirTemp("", "abox-e2e-mount-")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+	mountPoint := filepath.Join(tempDir, "stale-mount")
+
+	env.mustRun("mount", "add", inst.name, mountPoint)
+	// Best-effort cleanup so the temp dir can be removed even on failure.
+	defer env.run("unmount", "-f", mountPoint)
+
+	// Stop the VM: the sshfs tunnel dies with it and the mount point goes stale.
+	inst.stop()
+
+	// Start must detect the stale mount, force-unmount it, and remount.
+	inst.start()
+	if !inst.waitForSSH(120 * time.Second) {
+		t.Fatal("SSH did not become available after restart")
+	}
+
+	// The mount point must be readable again (a stale endpoint errors with
+	// "transport endpoint is not connected").
+	if _, err := os.ReadDir(mountPoint); err != nil {
+		t.Fatalf("Mount point not readable after restart: %v", err)
+	}
+
+	// A file created via the mount must be visible in the guest, proving the
+	// mount is live and not just a leftover directory.
+	testFile := filepath.Join(mountPoint, "reconcile-test-file.txt")
+	if err := os.WriteFile(testFile, []byte("reconciled"), 0o644); err != nil {
+		t.Fatalf("Failed to write file via remounted path: %v", err)
+	}
+	sshResult := inst.ssh("cat", "$HOME/reconcile-test-file.txt")
+	if !sshResult.Success() || !strings.Contains(sshResult.Stdout, "reconciled") {
+		t.Error("File created via remounted path should be visible via SSH")
+	}
+
+	// The record must still be present and healthy.
+	listResult := env.mustRun("mount", "list", inst.name)
+	if !strings.Contains(listResult.Stdout, mountPoint) {
+		t.Errorf("Mount should still be recorded after restart, got: %s", listResult.Stdout)
+	}
+	if !strings.Contains(listResult.Stdout, "mounted") {
+		t.Errorf("Mount should be reported as mounted after restart, got: %s", listResult.Stdout)
+	}
+}

@@ -1,6 +1,6 @@
 //go:build darwin
 
-package remove
+package mountutil
 
 import (
 	"fmt"
@@ -8,11 +8,11 @@ import (
 	"strings"
 )
 
-// doUnmount unmounts a macFUSE/SSHFS mount on macOS. The normal path uses
+// Unmount unmounts a macFUSE/SSHFS mount on macOS. The normal path uses
 // `umount`; with force it uses `diskutil unmount force`, which reliably detaches
 // a busy macFUSE volume. macOS has no lazy-unmount equivalent to Linux's
 // `fusermount -z`, so force maps to a hard unmount here.
-func doUnmount(path string, force bool) error {
+func Unmount(path string, force bool) error {
 	var cmd *exec.Cmd
 	if force {
 		cmd = exec.Command("diskutil", "unmount", "force", path)

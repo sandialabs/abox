@@ -8,6 +8,44 @@ import (
 	"time"
 )
 
+// TestForwardArg locks the forward-argument format: it is both what StartTunnel
+// passes to ssh (-L/-R) and the cmdline pattern FindLiveTunnelPID matches live
+// tunnels against, so a format change would break tunnel liveness detection.
+func TestForwardArg(t *testing.T) {
+	forward := ForwardEntry{HostPort: 8080, GuestPort: 80}
+	if got, want := ForwardArg(forward), "localhost:8080:localhost:80"; got != want {
+		t.Errorf("ForwardArg(forward) = %q, want %q", got, want)
+	}
+
+	reverse := ForwardEntry{HostPort: 8000, GuestPort: 9000, Reverse: true}
+	if got, want := ForwardArg(reverse), "localhost:9000:localhost:8000"; got != want {
+		t.Errorf("ForwardArg(reverse) = %q, want %q", got, want)
+	}
+}
+
+// TestMatchesAll locks the multi-pattern requirement behind FindLiveTunnelPID:
+// a candidate command line must contain BOTH the forward spec and the
+// instance's user@ip target. The spec alone can legitimately appear in another
+// instance's tunnel (or a user's own ssh), whose PID must not be adopted — once
+// recorded, `abox forward remove` would kill it.
+func TestMatchesAll(t *testing.T) {
+	spec := "localhost:8080:localhost:80"
+	cmdline := "ssh -o IdentitiesOnly=yes -L " + spec + " -N -f dev@192.168.77.2"
+
+	if !matchesAll(cmdline, []string{spec, "dev@192.168.77.2"}) {
+		t.Error("expected cmdline with matching spec and target to match")
+	}
+	if matchesAll(cmdline, []string{spec, "dev@192.168.88.2"}) {
+		t.Error("same spec with a different target must NOT match")
+	}
+	if matchesAll(cmdline, []string{"localhost:9090:localhost:90", "dev@192.168.77.2"}) {
+		t.Error("same target with a different spec must NOT match")
+	}
+	if !matchesAll(cmdline, []string{spec}) {
+		t.Error("single-pattern match should still work")
+	}
+}
+
 func TestGetForwardsFilePath(t *testing.T) {
 	got := GetForwardsFilePath("/some/instance/dir")
 	want := "/some/instance/dir/forwards.json"
