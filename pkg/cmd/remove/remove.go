@@ -204,6 +204,11 @@ func cleanupBackendResources(ctx context.Context, w io.Writer, _ *Options, be ba
 		if err := be.VM().Remove(ctx, name); err != nil {
 			logging.Warn("failed to delete domain", "error", err, "instance", name)
 		}
+	} else {
+		// Surface the skip: if the name resolved wrong (e.g. the config read
+		// inside the resolver failed and it fell back to the per-user scheme for
+		// a legacy instance), the domain leaks and this line is the user's cue.
+		fmt.Fprintln(w, "  VM not found, skipping...")
 	}
 
 	// Tear down egress enforcement (nwfilter + host iptables rules). Remove is

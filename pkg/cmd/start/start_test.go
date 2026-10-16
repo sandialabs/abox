@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -249,6 +250,67 @@ func TestRecoverDaemons_ApplyFilteredErrorWrapped(t *testing.T) {
 	err := recoverDaemons(&buf, be, "fcvm", testInstance(), &config.Paths{}, true)
 	if !errors.Is(err, applyErr) {
 		t.Errorf("expected the ApplyFiltered error to be wrapped and returned, got: %v", err)
+	}
+}
+
+// upgraderBackend marks the mock backend as using per-user resource names (the
+// backend.ResourceNameUpgrader capability), the gate recoverDaemons uses to
+// decide whether a legacy-named instance can have its egress re-asserted.
+type upgraderBackend struct{ *mock.Backend }
+
+func (u *upgraderBackend) UpgradeResourceNames(ctx context.Context, inst *config.Instance, paths *config.Paths) (bool, error) {
+	return false, nil
+}
+
+// TestRecoverDaemons_LegacyNamesSkipReassert: on a per-user-names backend, a
+// legacy-named RUNNING instance cannot pass the privilege helper's ownership
+// check, and the upgrade needs a stopped VM — so recoverDaemons must skip the
+// egress re-assert with stop/start guidance instead of failing the whole start.
+// A current-named instance on the same backend still re-asserts.
+func TestRecoverDaemons_LegacyNamesSkipReassert(t *testing.T) {
+	var applyCalled bool
+	stubDaemonStarts(t, func(w io.Writer, name string, be backend.Backend, brief bool) error {
+		applyCalled = true
+		return nil
+	})
+	be := &upgraderBackend{&mock.Backend{
+		EgressControllerFunc: func() backend.EgressController { return &mock.EgressController{} },
+	}}
+
+	var buf bytes.Buffer
+	// testInstance records the legacy bridge "abox-fcvm".
+	if err := recoverDaemons(&buf, be, "fcvm", testInstance(), &config.Paths{}, true); err != nil {
+		t.Fatalf("recoverDaemons must not fail for a legacy-named running instance: %v", err)
+	}
+	if applyCalled {
+		t.Error("ApplyFiltered must be skipped for a legacy-named instance (helper would refuse)")
+	}
+	if !strings.Contains(buf.String(), "legacy resource names") {
+		t.Errorf("expected a legacy-names warning with guidance, got: %q", buf.String())
+	}
+
+	inst := testInstance()
+	inst.Bridge = config.GenerateBridgeName(os.Getuid(), inst.Name)
+	if err := recoverDaemons(&buf, be, "fcvm", inst, &config.Paths{}, true); err != nil {
+		t.Fatalf("recoverDaemons: %v", err)
+	}
+	if !applyCalled {
+		t.Error("a current-named instance must still get its egress re-asserted")
+	}
+}
+
+// TestRecoverDaemons_RuntimeDirErrRefused: recovery re-binds daemon sockets, so
+// a recorded private-runtime-dir provisioning failure must surface, not spawn
+// daemons onto unusable paths.
+func TestRecoverDaemons_RuntimeDirErrRefused(t *testing.T) {
+	stubDaemonStarts(t, func(w io.Writer, name string, be backend.Backend, brief bool) error { return nil })
+	be := &mock.Backend{
+		EgressControllerFunc: func() backend.EgressController { return nil },
+	}
+	rdErr := errors.New("no private runtime directory")
+	var buf bytes.Buffer
+	if err := recoverDaemons(&buf, be, "fcvm", testInstance(), &config.Paths{RuntimeDirErr: rdErr}, true); !errors.Is(err, rdErr) {
+		t.Fatalf("recoverDaemons = %v, want the recorded runtime-dir error", err)
 	}
 }
 

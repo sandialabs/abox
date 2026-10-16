@@ -160,6 +160,60 @@ an existing network, so it leaves a legacy NAT instance on its NAT uplink.)
 
 Abox provides two complementary filtering mechanisms (DNS and HTTP proxy), both sharing the same allowlist. Use both for defense in depth — the HTTP proxy catches requests that bypass DNS filtering (e.g., DoH). For detailed architecture and operating modes, see [Filtering](filtering.md).
 
+## Multi-User Hosts
+
+Several resources abox manages are host-global and shared by every user of the
+machine: the libvirt object namespaces (qemu:///system), the bridge interface
+namespace, host iptables, and the /24 subnet space. abox keeps users from
+colliding — and from reaching each other's host state through abox's own
+privileged path — with three mechanisms:
+
+- **Per-user resource names.** The libvirt domain (`abox-<uid>-<name>`),
+  nwfilter (`abox-<uid>-<name>-traffic`), and bridge (`abx-<hash(uid/name)>`)
+  are derived from the owning uid, so two users' same-named instances never
+  share an object. Instances created by an older abox are upgraded
+  transparently on their next `abox start`.
+- **Helper-side ownership checks.** The privilege helper authorizes every
+  egress request by recomputing the caller's bridge from the socket peer uid
+  (see [Privilege Helper](privilege-helper.md)); one user's helper cannot
+  rewrite another user's iptables chains. Storage requests were already scoped
+  to the caller's own per-uid tree.
+- **Cross-user subnet checks.** Subnet allocation skips ranges claimed by any
+  network defined on the shared libvirtd (including stopped ones), and network
+  creation re-verifies after defining, backing out and re-allocating if two
+  users raced onto the same /24.
+
+**Residual risk — libvirt group:** libvirt itself has no per-user access
+control on qemu:///system without polkit ACLs. Any member of the `libvirt`
+group can `virsh destroy`/`undefine` any domain on the host, abox-created or
+not. The guarantees above close *accidental* collisions and abox's *privileged*
+paths; they cannot stop a hostile libvirt-group member. Deployments that need
+that separation must add polkit ACL rules. All users on a shared host should
+run the same abox version — a user on an older abox still creates shared-named
+objects until they upgrade.
+
+**Residual risk — legacy-named bridges:** a bridge still on the pre-multi-user
+name-only scheme cannot be ownership-verified, so the helper allows
+`Remove`/`Verify` on it for any user able to derive the name (audit-logged).
+Until a legacy instance's next `abox start` upgrades it, another local user can
+flush its egress rules (a denial of enforcement, not a redirect — installing
+rules on a legacy bridge is refused). The per-user namespace is prefix-disjoint
+(`abx-` vs `abox-`/`ab-`), so no legacy name — including hash-searched ones —
+can ever target an upgraded instance's bridge. Domain teardown under a legacy
+name (upgrade and `abox remove`) is disk-ownership-verified; legacy *network*
+deletion during `abox remove` is not (the definition is recreated by the
+owner's next start, so the exposure is a transient disconnect, not data loss).
+
+**Residual risk — VMware vmnet interfaces (experimental backend):** `vmnetN`
+interfaces are shared VMware infrastructure, not derivable from (uid,
+instance), and no root-trustable ownership registry exists (abox's vmnet
+registry is a user-writable file). The helper therefore allows egress
+operations on `vmnetN` names for any caller, with an audit record. On a shared
+multi-user host, one user can rewrite or flush another user's VMware-instance
+egress rules (including its DNS REDIRECT). The VMware backend is an explicit
+experimental opt-in (`ABOX_BACKEND=vmware`); do not use it on hosts with
+untrusted local users.
+
 ## Input Validation
 
 Abox validates all user-controlled inputs to prevent injection attacks:

@@ -195,12 +195,12 @@ or its network didn't come up.
 
 2. **Check if VM is running:**
    ```bash
-   virsh list --all | grep abox-dev
+   virsh list --all | grep abox   # domains are named abox-<uid>-<name>
    ```
 
 3. **Check network is active:**
    ```bash
-   virsh net-list | grep abox-dev
+   virsh net-list | grep abx-      # bridges are named abx-<hash(uid/name)>
    ```
 
 4. **Restart the instance:**
@@ -210,7 +210,7 @@ or its network didn't come up.
 
 5. **Check VM console for errors:**
    ```bash
-   virsh console abox-dev
+   virsh console abox-$(id -u)-dev
    # Press Enter to see login prompt
    # Ctrl+] to exit
    ```
@@ -270,8 +270,8 @@ or its network didn't come up.
 2. **Clean up orphaned networks:**
    ```bash
    virsh net-list --all
-   virsh net-destroy abox-dev
-   virsh net-undefine abox-dev
+   virsh net-destroy <bridge>     # the instance's bridge from its config.yaml
+   virsh net-undefine <bridge>
    ```
 
 3. **VPN / host route claims the VM subnet (macOS):** if the VM boots and guest
@@ -387,6 +387,23 @@ libvirt versions, which is why group membership is required.)
 `abox start` prints a warning naming the exact group when it detects this. (libvirt
 backend only; the macOS/vfkit backend does not support monitoring.)
 
+### No Runtime Directory (headless / non-systemd sessions)
+
+abox keeps its daemon sockets and PID files in the per-user runtime directory
+(`XDG_RUNTIME_DIR`, else `/run/user/<uid>`). When neither exists — common in
+containers, cron jobs, or non-systemd sessions — it falls back to a private
+per-user directory `$TMPDIR/abox-<uid>` (mode 0700). If another user squatted
+that name (a symlink, or a directory they own), abox refuses to start daemons
+there rather than sharing socket paths (path-only commands such as `abox list`
+keep working). Set `XDG_RUNTIME_DIR` to a directory you own:
+
+```bash
+export XDG_RUNTIME_DIR=$HOME/.run && mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+```
+
+(Removing the squatted entry also works, but under a sticky-bit `/tmp` only its
+owner or root can delete it.)
+
 ## Log Locations
 
 Instance data is stored at `~/.local/share/abox/instances/<name>/`.
@@ -475,8 +492,8 @@ log show --predicate 'process == "logger" && eventMessage BEGINSWITH "abox"' --i
 log stream --predicate 'process == "logger" && eventMessage BEGINSWITH "abox"' --info   # live (reliable)
 
 # Check for VM errors
-virsh dominfo abox-dev
-virsh dumpxml abox-dev
+virsh dominfo abox-$(id -u)-dev
+virsh dumpxml abox-$(id -u)-dev
 ```
 
 The abox audit log records: instance create, start, stop, remove, import, export,

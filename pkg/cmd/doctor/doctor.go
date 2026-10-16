@@ -268,6 +268,23 @@ func runHostChecks(w io.Writer, name string) (results []CheckResult, inst *confi
 		}
 	}
 
+	// Check: resource-name scheme. An instance created by an older abox derives
+	// its host-global object names (domain/bridge/nwfilter) from the instance name
+	// alone, so on a shared host it can collide with another user's same-named
+	// instance. `abox start` upgrades it transparently; this check just surfaces
+	// the pending upgrade. Only meaningful on backends that namespace per user
+	// (libvirt) — the single-user macOS backends never flag.
+	if _, upgrades := be.(backend.ResourceNameUpgrader); upgrades {
+		onCurrent := inst.UsesCurrentNames()
+		result = CheckResult{Name: CheckNameNames, Passed: onCurrent}
+		if !onCurrent {
+			result.Details = "instance uses the legacy shared-name scheme"
+			result.Hint = fmt.Sprintf("run 'abox start %s' to upgrade it to per-user names", name)
+		}
+		printResult(w, result)
+		results = append(results, result)
+	}
+
 	// Check 2: VM running
 	state := be.VM().State(name)
 	result = CheckResult{

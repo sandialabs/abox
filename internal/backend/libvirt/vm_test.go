@@ -36,7 +36,7 @@ func fullInstance() *config.Instance {
 		Memory:     4096,
 		Subnet:     "10.10.10.0/24",
 		Gateway:    "10.10.10.1",
-		Bridge:     config.GenerateBridgeName("dev"),
+		Bridge:     config.GenerateBridgeName(os.Getuid(), "dev"),
 		MACAddress: "52:54:00:ab:cd:ef",
 		IPAddress:  "10.10.10.50",
 		Disk:       "20G",
@@ -101,7 +101,7 @@ func TestVMCreateDefinesDomainXML(t *testing.T) {
 	}
 	// The stdin carries the generated domain XML.
 	for _, want := range []string{
-		"<name>abox-dev</name>",
+		"<name>" + config.DomainNameFor(os.Getuid(), "dev") + "</name>",
 		`<memory unit='MiB'>4096</memory>`,
 	} {
 		if !strings.Contains(call.Stdin, want) {
@@ -172,15 +172,18 @@ func TestVMLifecycleArgVectors(t *testing.T) {
 	m := &VMManager{}
 	ctx := context.Background()
 
+	// No instance config exists in the temp XDG dir, so domainName falls back to
+	// the per-user derivation -- the same name fullInstance's bridge resolves to.
+	domainDev := config.DomainNameFor(os.Getuid(), "dev")
 	tests := []struct {
 		name    string
 		call    func() error
 		subcmd  string
 		wantEnd []string // trailing positional(s) after the subcommand
 	}{
-		{"start", func() error { return m.Start(ctx, "dev") }, "start", []string{"abox-dev"}},
-		{"stop", func() error { return m.Stop(ctx, "dev") }, "shutdown", []string{"abox-dev"}},
-		{"forcestop", func() error { return m.ForceStop(ctx, "dev") }, "destroy", []string{"abox-dev"}},
+		{"start", func() error { return m.Start(ctx, "dev") }, "start", []string{domainDev}},
+		{"stop", func() error { return m.Stop(ctx, "dev") }, "shutdown", []string{domainDev}},
+		{"forcestop", func() error { return m.ForceStop(ctx, "dev") }, "destroy", []string{domainDev}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -219,7 +222,7 @@ func TestVMRemoveArgVector(t *testing.T) {
 	if undef == nil {
 		t.Fatalf("Remove did not issue undefine; calls=%+v", mock.Calls)
 	}
-	if !slices.Contains(undef.Args, "abox-dev") {
+	if !slices.Contains(undef.Args, config.DomainNameFor(os.Getuid(), "dev")) {
 		t.Errorf("undefine missing domain name: %v", undef.Args)
 	}
 	if !slices.Contains(undef.Args, "--remove-all-storage") {
@@ -233,9 +236,9 @@ func TestVMExistsParsing(t *testing.T) {
 		output string
 		want   bool
 	}{
-		{"present", "other\nabox-dev\n", true},
-		{"absent", "other\nabox-prod\n", false},
-		{"substring-no-match", "abox-dev-extra\n", false},
+		{"present", "other\n" + config.DomainNameFor(os.Getuid(), "dev") + "\n", true},
+		{"absent", "other\n" + config.DomainNameFor(os.Getuid(), "prod") + "\n", false},
+		{"substring-no-match", config.DomainNameFor(os.Getuid(), "dev") + "-extra\n", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

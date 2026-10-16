@@ -5,6 +5,7 @@ package libvirt
 import (
 	"context"
 	"errors"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -120,8 +121,11 @@ func (m *nwfilterMock) contains(sub string) bool {
 
 func testInstance() *config.Instance {
 	return &config.Instance{
-		Name:       "dev",
-		Bridge:     "abox-dev",
+		Name: "dev",
+		// The per-user bridge puts the instance on the current naming scheme, so
+		// these tests exercise the resolved per-user nwfilter name, not the
+		// legacy fallback.
+		Bridge:     config.GenerateBridgeName(os.Getuid(), "dev"),
 		MACAddress: "52:54:00:ab:cd:ef",
 		CPUs:       2,
 		DNS:        config.DNSConfig{Port: 34711},
@@ -129,10 +133,16 @@ func testInstance() *config.Instance {
 	}
 }
 
+// wantFilterName is the nwfilter name the test instance resolves to; used to seed
+// the virsh mock so its responses match what the controller looks up.
+func wantFilterName() string {
+	return testInstance().ResolvedFilterName()
+}
+
 // TestDefineHappyPath: Define generates+defines the nwfilter and installs the
 // host rules with the instance's bridge and policy.
 func TestDefineHappyPath(t *testing.T) {
-	mock := &nwfilterMock{filterName: filterName("dev"), filterExists: false}
+	mock := &nwfilterMock{filterName: wantFilterName(), filterExists: false}
 	prev := virsh.SetCommander(mock)
 	defer virsh.SetCommander(prev)
 
@@ -148,8 +158,8 @@ func TestDefineHappyPath(t *testing.T) {
 	if !f.applyCalled {
 		t.Fatal("Define must call enforcer.Apply")
 	}
-	if f.applyBridge != "abox-dev" {
-		t.Errorf("enforcer bridge = %q, want abox-dev", f.applyBridge)
+	if f.applyBridge != inst.Bridge {
+		t.Errorf("enforcer bridge = %q, want %q", f.applyBridge, inst.Bridge)
 	}
 	if f.applyPolicy != p {
 		t.Errorf("enforcer policy = %+v, want %+v", f.applyPolicy, p)
@@ -166,7 +176,7 @@ func TestDefineHappyPath(t *testing.T) {
 // TestDefineRollsBackNewlyDefined: when Apply fails and the filter was newly
 // defined, the newly-created filter is undefined and the error propagated.
 func TestDefineRollsBackNewlyDefined(t *testing.T) {
-	mock := &nwfilterMock{filterName: filterName("dev"), filterExists: false}
+	mock := &nwfilterMock{filterName: wantFilterName(), filterExists: false}
 	prev := virsh.SetCommander(mock)
 	defer virsh.SetCommander(prev)
 
@@ -189,7 +199,7 @@ func TestDefineRollsBackNewlyDefined(t *testing.T) {
 // TestDefineDoesNotUndefinePreExisting: when the filter already existed and Apply
 // fails, the pre-existing filter must NOT be undefined (newlyDefined guard).
 func TestDefineDoesNotUndefinePreExisting(t *testing.T) {
-	mock := &nwfilterMock{filterName: filterName("dev"), filterExists: true}
+	mock := &nwfilterMock{filterName: wantFilterName(), filterExists: true}
 	prev := virsh.SetCommander(mock)
 	defer virsh.SetCommander(prev)
 
@@ -208,7 +218,7 @@ func TestDefineDoesNotUndefinePreExisting(t *testing.T) {
 // TestDefineErrorsWhenNoProviderInjected: Enforcer error surfaces from Define.
 // With no provider injected the newly-defined filter is also rolled back.
 func TestDefineErrorsWhenNoProviderInjected(t *testing.T) {
-	mock := &nwfilterMock{filterName: filterName("dev"), filterExists: false}
+	mock := &nwfilterMock{filterName: wantFilterName(), filterExists: false}
 	prev := virsh.SetCommander(mock)
 	defer virsh.SetCommander(prev)
 
@@ -254,8 +264,8 @@ func TestVerifyEnforced(t *testing.T) {
 		if !f.verifyCalled {
 			t.Fatal("VerifyEnforced must call enforcer.Verify")
 		}
-		if f.verifyBridge != "abox-dev" {
-			t.Errorf("enforcer bridge = %q, want abox-dev", f.verifyBridge)
+		if f.verifyBridge != inst.Bridge {
+			t.Errorf("enforcer bridge = %q, want %q", f.verifyBridge, inst.Bridge)
 		}
 	})
 
@@ -306,7 +316,7 @@ func TestVerifyEnforced(t *testing.T) {
 // deletes the nwfilter, and the host-rule flush is ordered before the nwfilter
 // delete (the code's documented "flush host rules first" intent).
 func TestRemoveFlushesHostRulesThenDeletesFilter(t *testing.T) {
-	mock := &nwfilterMock{filterName: filterName("dev"), filterExists: true}
+	mock := &nwfilterMock{filterName: wantFilterName(), filterExists: true}
 	prev := virsh.SetCommander(mock)
 	defer virsh.SetCommander(prev)
 
@@ -322,8 +332,8 @@ func TestRemoveFlushesHostRulesThenDeletesFilter(t *testing.T) {
 	if !f.removeCalled {
 		t.Fatal("Remove must call enforcer.Remove to flush host rules")
 	}
-	if f.removeBridge != "abox-dev" {
-		t.Errorf("Remove bridge = %q, want abox-dev", f.removeBridge)
+	if f.removeBridge != inst.Bridge {
+		t.Errorf("Remove bridge = %q, want %q", f.removeBridge, inst.Bridge)
 	}
 	if !mock.contains("nwfilter-undefine") {
 		t.Errorf("Remove must delete the nwfilter; subcommands = %v", mock.subcommands())
@@ -339,7 +349,7 @@ func TestRemoveFlushesHostRulesThenDeletesFilter(t *testing.T) {
 // TestRemoveIdempotentWhenFilterMissing: Remove still flushes host rules and
 // returns nil when the nwfilter does not exist (no undefine attempted).
 func TestRemoveIdempotentWhenFilterMissing(t *testing.T) {
-	mock := &nwfilterMock{filterName: filterName("dev"), filterExists: false}
+	mock := &nwfilterMock{filterName: wantFilterName(), filterExists: false}
 	prev := virsh.SetCommander(mock)
 	defer virsh.SetCommander(prev)
 

@@ -67,11 +67,11 @@ flowchart TB
     CLI --> Resources
 
     subgraph Resources["Per-Instance Resources"]
-        network["Network: abox-&lt;name&gt; host-only bridge (isolated, no NAT/uplink)"]
-        vm["VM: abox-&lt;name&gt; libvirt domain"]
+        network["Network: abx-&lt;hash(uid/name)&gt; host-only bridge (isolated, no NAT/uplink)"]
+        vm["VM: abox-&lt;uid&gt;-&lt;name&gt; libvirt domain"]
         dns["DNS: dnsfilter on unique port per instance"]
         http["HTTP: httpfilter proxy on unique port per instance"]
-        nwfilter["nwfilter: abox-&lt;name&gt;-traffic (proxy only)"]
+        nwfilter["nwfilter: abox-&lt;uid&gt;-&lt;name&gt;-traffic (proxy only)"]
     end
 ```
 

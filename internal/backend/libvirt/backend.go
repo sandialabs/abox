@@ -28,9 +28,13 @@ func init() {
 	backend.Register(Name, Priority, New)
 	backend.RegisterOverrideDefault("libvirt.template", virsh.EmbeddedDomainTemplate,
 		`Libvirt domain XML template for defining VMs (Go text/template).
-Variables: {{.Name}}, {{.UUID}}, {{.Memory}}, {{.CPUs}}, {{.NetQueues}},
-{{.DiskPath}}, {{.CloudInitISO}}, {{.MACAddress}}, {{.Bridge}},
-{{.MonitorSocket}}, {{.MonitorSocketUID}}, {{.MonitorSocketGID}}`)
+Variables: {{.VMName}}, {{.Name}}, {{.UUID}}, {{.Memory}}, {{.CPUs}},
+{{.NetQueues}}, {{.DiskPath}}, {{.CloudInitISO}}, {{.MACAddress}}, {{.Bridge}},
+{{.MonitorSocket}}, {{.MonitorSocketUID}}, {{.MonitorSocketGID}}
+
+The <name> element MUST be {{.VMName}} (the per-user libvirt domain name) —
+NOT abox-{{.Name}}, which every lookup would then fail to resolve. {{.Name}}
+is the bare instance name, for labels and descriptions only.`)
 }
 
 // Backend implements the backend.Backend interface for libvirt.
@@ -160,14 +164,18 @@ func (b *Backend) DryRun(inst *config.Instance, paths *config.Paths, w io.Writer
 	return nil
 }
 
-// ResourceNames returns the standardized resource names for an instance.
-// Libvirt uses "abox-<name>" prefix for domains/networks. The nwfilter name is
-// owned by the egress controller (see filterName).
+// ResourceNames returns the standardized resource names for a NEW instance. The
+// libvirt namespaces are host-global (shared by every user of qemu:///system),
+// so names are per-user: domain "abox-<uid>-<name>", bridge "abx-<hash(uid/name)>".
+// Callers are create/import, which record the returned bridge in the instance
+// config; existing instances resolve their names from that record instead (see
+// names.go), because an instance created by an older abox may still live under
+// the legacy name-only scheme until its next start upgrades it.
 func (b *Backend) ResourceNames(instanceName string) backend.ResourceNames {
 	return backend.ResourceNames{
 		Instance: instanceName,
-		VM:       "abox-" + instanceName,
-		Network:  config.GenerateBridgeName(instanceName),
+		VM:       config.DomainNameFor(os.Getuid(), instanceName),
+		Network:  config.GenerateBridgeName(os.Getuid(), instanceName),
 	}
 }
 

@@ -1,4 +1,4 @@
-<filter name='abox-{{.Name}}-traffic' chain='root' priority='-500'>
+<filter name='{{.FilterName}}' chain='root' priority='-500'>
 {{if .UUID}}  <uuid>{{.UUID}}</uuid>
 {{end}}  <!-- L2 anti-spoofing: pin the guest to the MAC libvirt assigned to this
        interface. no-mac-spoofing drops frames whose source MAC differs from the

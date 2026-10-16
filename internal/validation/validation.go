@@ -23,9 +23,9 @@ var validInstanceNameRegex = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]{0,62}$`)
 var validMACAddressRegex = regexp.MustCompile(`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`)
 
 // ValidateInstanceName validates an instance name for safe use in:
-// - libvirt domain names (abox-<name>)
-// - bridge names (generated via config.GenerateBridgeName to ensure max 15 chars)
-// - nwfilter names (abox-<name>-traffic)
+// - libvirt domain names (abox-<uid>-<name>)
+// - bridge names (hashed via config.GenerateBridgeName to fit the 15-char limit)
+// - nwfilter names (abox-<uid>-<name>-traffic)
 // - file paths (~/.local/share/abox/instances/<name>/)
 // - iptables arguments
 //

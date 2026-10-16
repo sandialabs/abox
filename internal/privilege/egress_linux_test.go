@@ -224,15 +224,20 @@ func (f *fakeIptables) markFwdPresent(bridge string) {
 }
 
 const (
-	testBridge   = "abox-dev"
+	testInstance = "dev"
 	testGuestDNS = "53"
 	testDNSPort  = "34711"
 	testHTTPPort = "45123"
 	testGateway  = "10.20.30.1"
 )
 
+// testBridge is the bridge the test server (allowedUID 0, the zero value of
+// &EgressServer{}) owns for testInstance — requests carrying it pass the
+// ownership check the way a real caller's own bridge does.
+var testBridge = ownedBridgeName(0, testInstance)
+
 func testEgressReq() *rpc.EgressReq {
-	return &rpc.EgressReq{Bridge: testBridge, DnsPort: 34711, HttpPort: 45123, GuestDnsPort: 53, Gateway: testGateway}
+	return &rpc.EgressReq{Bridge: testBridge, Instance: testInstance, DnsPort: 34711, HttpPort: 45123, GuestDnsPort: 53, Gateway: testGateway}
 }
 
 // TestChainNameLimit guards the iptables 29-char chain-name limit and determinism.
@@ -511,7 +516,7 @@ func TestRemoveIdempotentNoJumpNoChain(t *testing.T) {
 const testVMNet = "vmnet7"
 
 func testVMNetReq() *rpc.EgressReq {
-	return &rpc.EgressReq{Bridge: testVMNet, DnsPort: 34711, HttpPort: 45123, GuestDnsPort: 53, Gateway: testGateway}
+	return &rpc.EgressReq{Bridge: testVMNet, Instance: testInstance, DnsPort: 34711, HttpPort: 45123, GuestDnsPort: 53, Gateway: testGateway}
 }
 
 // TestFwdChainNameDistinctAndBounded confirms the FORWARD chain name is distinct
@@ -969,5 +974,52 @@ func TestNATRuleIsAbox(t *testing.T) {
 				t.Errorf("natRuleIsAbox(%q) = %v, want %v", tt.line, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestServerOwnership_ForeignBridgeRefused: a request naming a bridge derived
+// under a DIFFERENT uid must be refused on every operation — this is the fix for
+// one user's root helper rewriting another user's host chains.
+func TestServerOwnership_ForeignBridgeRefused(t *testing.T) {
+	f := installFakeIptables(t)
+	s := &EgressServer{} // allowedUID 0
+	foreign := &rpc.EgressReq{Bridge: ownedBridgeName(1000, testInstance), Instance: testInstance,
+		DnsPort: 34711, HttpPort: 45123, GuestDnsPort: 53, Gateway: testGateway}
+
+	if _, err := s.Apply(context.Background(), foreign); err == nil {
+		t.Error("Apply on another uid's bridge must be refused")
+	}
+	if _, err := s.Remove(context.Background(), foreign); err == nil {
+		t.Error("Remove on another uid's bridge must be refused")
+	}
+	if _, err := s.Verify(context.Background(), foreign); err == nil {
+		t.Error("Verify on another uid's bridge must be refused")
+	}
+	if len(f.runCalls) != 0 {
+		t.Errorf("no iptables commands may run for a refused request; issued: %v", f.runCalls)
+	}
+}
+
+// TestServerOwnership_LegacyBridgePolicy: a legacy-named bridge (ownership
+// unverifiable) is refused for Apply but still tears down and verifies, so
+// pre-multi-user instances stay stoppable/removable and the start-time name
+// upgrade can flush their chains.
+func TestServerOwnership_LegacyBridgePolicy(t *testing.T) {
+	f := installFakeIptables(t)
+	s := &EgressServer{}
+	legacy := &rpc.EgressReq{Bridge: "abox-" + testInstance, Instance: testInstance,
+		DnsPort: 34711, HttpPort: 45123, GuestDnsPort: 53, Gateway: testGateway}
+
+	if _, err := s.Apply(context.Background(), legacy); err == nil {
+		t.Error("Apply on a legacy-named bridge must be refused")
+	}
+	if len(f.runCalls) != 0 {
+		t.Errorf("refused Apply must not run iptables; issued: %v", f.runCalls)
+	}
+	if _, err := s.Remove(context.Background(), legacy); err != nil {
+		t.Errorf("Remove on a legacy-named bridge must stay allowed: %v", err)
+	}
+	if _, err := s.Verify(context.Background(), legacy); err != nil {
+		t.Errorf("Verify on a legacy-named bridge must stay allowed: %v", err)
 	}
 }

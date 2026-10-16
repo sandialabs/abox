@@ -33,7 +33,7 @@ These measures are applied automatically when abox creates a VM. No user configu
 | `no-arp-spoofing` nwfilter | Drops ARP whose sender addresses the guest doesn't own (ARP cache-poisoning defense) |
 | STP disabled on bridge | Host-only bridge has no loop/uplink, so spanning-tree is removed as guest-facing (BPDU) attack surface |
 
-The per-instance `abox-<name>-traffic` filter remains a stateful, default-deny
+The per-instance `abox-<uid>-<name>-traffic` filter remains a stateful, default-deny
 allowlist (inbound: host→guest SSH only; outbound: DNS + HTTP proxy + gateway
 ICMP; IPv6 fully dropped). IP-source anti-spoofing is intentionally not layered
 on: guests are statically addressed (no DHCP lease for libvirt to learn the IP),

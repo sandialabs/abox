@@ -12,11 +12,6 @@ import (
 	"github.com/sandialabs/abox/internal/virsh"
 )
 
-// filterName returns the nwfilter name for an instance.
-func filterName(instanceName string) string {
-	return "abox-" + instanceName + "-traffic"
-}
-
 // EgressController implements backend.EgressController for libvirt.
 // It enforces the egress policy with two mechanisms:
 //   - an nwfilter (default-deny with holes for the DNS/HTTP filter endpoints)
@@ -39,7 +34,7 @@ type EgressController struct {
 // later, by Apply (which needs a running VM).
 func (e *EgressController) Define(ctx context.Context, inst *config.Instance, p backend.EgressPolicy) error {
 	// Get existing filter UUID if present, so we can update in-place.
-	existingUUID := virsh.GetNWFilterUUID(filterName(inst.Name))
+	existingUUID := virsh.GetNWFilterUUID(inst.ResolvedFilterName())
 
 	// The nwfilter is generated from the same policy that drives the host
 	// iptables rules below, so the two halves cannot drift.
@@ -59,13 +54,13 @@ func (e *EgressController) Define(ctx context.Context, inst *config.Instance, p 
 	enf, err := e.Enforcer()
 	if err != nil {
 		if newlyDefined {
-			_ = virsh.DeleteNWFilter(filterName(inst.Name))
+			_ = virsh.DeleteNWFilter(inst.ResolvedFilterName())
 		}
 		return err
 	}
 	if err := enf.Apply(ctx, inst.Bridge, p); err != nil {
 		if newlyDefined {
-			_ = virsh.DeleteNWFilter(filterName(inst.Name))
+			_ = virsh.DeleteNWFilter(inst.ResolvedFilterName())
 		}
 		return fmt.Errorf("failed to install host egress rules: %w", err)
 	}
@@ -76,7 +71,7 @@ func (e *EgressController) Define(ctx context.Context, inst *config.Instance, p 
 // Apply binds the nwfilter to the running VM's network interface, activating
 // L2 enforcement. The driver queue count must match the running VM's config.
 func (e *EgressController) Apply(ctx context.Context, inst *config.Instance) error {
-	return virsh.ApplyNWFilter(domainName(inst.Name), inst.Bridge, filterName(inst.Name), inst.MACAddress, inst.CPUs)
+	return virsh.ApplyNWFilter(inst.ResolvedVMName(), inst.Bridge, inst.ResolvedFilterName(), inst.MACAddress, inst.CPUs)
 }
 
 // Remove tears down enforcement (idempotent): it flushes the host-side iptables
@@ -99,7 +94,7 @@ func (e *EgressController) Remove(ctx context.Context, inst *config.Instance) er
 			inst.Name, "bridge", inst.Bridge, manualCleanup, err)
 	}
 
-	name := filterName(inst.Name)
+	name := inst.ResolvedFilterName()
 	if !virsh.NWFilterExists(name) {
 		return nil
 	}
@@ -111,7 +106,7 @@ func (e *EgressController) Remove(ctx context.Context, inst *config.Instance) er
 // privileged helper. It does NOT confirm the host iptables rules — see
 // VerifyEnforced for that.
 func (e *EgressController) Verify(ctx context.Context, inst *config.Instance) (bool, error) {
-	return virsh.NWFilterExists(filterName(inst.Name)), nil
+	return virsh.NWFilterExists(inst.ResolvedFilterName()), nil
 }
 
 // VerifyEnforced reports whether the privileged host-side rules (DNS REDIRECT +

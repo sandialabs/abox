@@ -15,6 +15,7 @@ import (
 	"github.com/sandialabs/abox/internal/backend"
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/fsutil"
+	"github.com/sandialabs/abox/internal/instance"
 	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/profiling"
 	"github.com/sandialabs/abox/internal/tui"
@@ -424,9 +425,12 @@ func copyDiskAndConfig(ctx context.Context, w io.Writer, tempDir string, manifes
 
 // createNetworkAndVM creates the libvirt network and VM definition.
 func createNetworkAndVM(ctx context.Context, w io.Writer, be backend.Backend, inst *config.Instance, paths *config.Paths, cleanup *cleanupState) error {
+	// Shared conflict-retry helper: an import racing another user's allocation
+	// onto the same /24 re-allocates and retries (import subnets are always
+	// auto-allocated, never pinned) instead of failing after the disk copy.
 	fmt.Fprintln(w, "Creating network...")
-	if err := be.Network().Create(ctx, inst); err != nil {
-		return fmt.Errorf("failed to create network: %w", err)
+	if err := instance.CreateNetworkWithRetry(ctx, w, be, inst, paths); err != nil {
+		return err
 	}
 	cleanup.networkCreated = true
 

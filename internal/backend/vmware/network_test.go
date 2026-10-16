@@ -27,7 +27,7 @@ func setupNetworkInstance(t *testing.T) *config.Instance {
 	inst := testInstance()
 	inst.Subnet = "10.10.10.0/24"
 	inst.Gateway = "10.10.10.1"
-	inst.Bridge = config.GenerateBridgeName(inst.Name)
+	inst.Bridge = config.LegacyBridgeName(inst.Name)
 	p, err := config.GetPaths(inst.Name)
 	if err != nil {
 		t.Fatalf("GetPaths: %v", err)
@@ -107,7 +107,7 @@ func TestNetworkCreate_ErrorsWhenConfigNotPersistable(t *testing.T) {
 	inst := testInstance()
 	inst.Subnet = "10.10.10.0/24"
 	inst.Gateway = "10.10.10.1"
-	inst.Bridge = config.GenerateBridgeName(inst.Name)
+	inst.Bridge = config.LegacyBridgeName(inst.Name)
 	// Deliberately DO NOT save the instance config to disk.
 
 	restore := vmrun.SetRunCommandForTest(func(_ context.Context, _ string, _ ...string) ([]byte, error) {

@@ -68,6 +68,16 @@ func runServe(ctx context.Context, _ *Options, name string) error {
 		return fmt.Errorf("monitoring is not enabled for instance %q", name)
 	}
 
+	// About to bind the RPC socket under the private runtime dir: refuse up
+	// front when that dir couldn't be provisioned or a socket path overflows the
+	// platform's sun_path limit (same gate as filterbase.SetupDaemon).
+	if paths.RuntimeDirErr != nil {
+		return paths.RuntimeDirErr
+	}
+	if err := config.ValidateSocketPaths(paths); err != nil {
+		return err
+	}
+
 	// Create server
 	server := monitor.NewServer(paths.MonitorSocket, paths.MonitorRPCSocket, paths.MonitorLog)
 

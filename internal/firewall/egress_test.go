@@ -46,6 +46,7 @@ func testPolicy() backend.EgressPolicy {
 		DNSPort:      34711,
 		HTTPPort:     45123,
 		GuestDNSPort: 53,
+		Instance:     "dev",
 	}
 }
 
@@ -63,6 +64,11 @@ func TestEgressEnforcerApply(t *testing.T) {
 	if got.Bridge != "abox-dev" || got.DnsPort != 34711 || got.HttpPort != 45123 ||
 		got.GuestDnsPort != 53 {
 		t.Errorf("unexpected Apply request: %+v", got)
+	}
+	// The instance name must reach the wire: the helper authorizes the bridge by
+	// recomputing it from (peer uid, instance).
+	if got.Instance != "dev" {
+		t.Errorf("Apply request instance = %q, want %q", got.Instance, "dev")
 	}
 }
 

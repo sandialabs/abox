@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,85 +13,118 @@ import (
 )
 
 func TestGenerateBridgeName(t *testing.T) {
-	tests := []struct {
-		name     string
-		instance string
-		want     string
-		wantLen  int // expected length, 0 means any
-	}{
-		{
-			name:     "short name",
-			instance: "dev",
-			want:     "abox-dev",
-		},
-		{
-			name:     "exactly 15 chars",
-			instance: "myinstance",
-			want:     "abox-myinstance", // 15 chars exactly
-		},
-		{
-			name:     "one over limit needs hash",
-			instance: "myinstance2",
-			wantLen:  15, // hashed: ab-<12 hex chars>
-		},
-		{
-			name:     "very long name needs hash",
-			instance: "verylonginstancename",
-			wantLen:  15,
-		},
-		{
-			name:     "maximum allowed instance name",
-			instance: "a12345678901234567890123456789012345678901234567890123456789012", // 63 chars
-			wantLen:  15,
-		},
+	// Every (uid, name) hashes to "abx-<11 hex>" = 15 chars regardless of name
+	// length, staying within the Linux IFNAMSIZ limit and passing
+	// privilege.ValidateBridgeName (which the privilege helper applies). The
+	// prefix must stay disjoint from the legacy "abox-"/"ab-" namespace so the
+	// helper's legacy teardown leniency can never target a per-user bridge.
+	instances := []string{
+		"dev",
+		"myinstance",
+		"verylonginstancename",
+		"a12345678901234567890123456789012345678901234567890123456789012", // 63 chars
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := GenerateBridgeName(tt.instance)
-
-			// Check exact value if specified
-			if tt.want != "" && got != tt.want {
-				t.Errorf("GenerateBridgeName(%q) = %q, want %q", tt.instance, got, tt.want)
+	for _, instance := range instances {
+		t.Run(instance, func(t *testing.T) {
+			got := GenerateBridgeName(1000, instance)
+			if len(got) != 15 {
+				t.Errorf("GenerateBridgeName(1000, %q) = %q (len=%d), want len=15", instance, got, len(got))
 			}
-
-			// Check length constraint
-			if len(got) > 15 {
-				t.Errorf("GenerateBridgeName(%q) = %q (len=%d), exceeds 15 char limit",
-					tt.instance, got, len(got))
+			if !strings.HasPrefix(got, "abx-") {
+				t.Errorf("GenerateBridgeName(1000, %q) = %q, want %q prefix", instance, got, "abx-")
 			}
-
-			// Check expected length if specified
-			if tt.wantLen > 0 && len(got) != tt.wantLen {
-				t.Errorf("GenerateBridgeName(%q) = %q (len=%d), want len=%d",
-					tt.instance, got, len(got), tt.wantLen)
+			if strings.HasPrefix(LegacyBridgeName(instance), "abx-") {
+				t.Errorf("LegacyBridgeName(%q) collides with the per-user abx- namespace", instance)
+			}
+			if err := privilege.ValidateBridgeName(got); err != nil {
+				t.Errorf("GenerateBridgeName(1000, %q) = %q, fails ValidateBridgeName: %v", instance, got, err)
 			}
 		})
 	}
 }
 
 func TestGenerateBridgeName_Deterministic(t *testing.T) {
-	// Same input should always produce same output
-	name := "verylonginstancename"
-	first := GenerateBridgeName(name)
-	second := GenerateBridgeName(name)
-
-	if first != second {
-		t.Errorf("GenerateBridgeName not deterministic: %q != %q", first, second)
+	// Same (uid, name) always produces the same output.
+	if GenerateBridgeName(1000, "verylonginstancename") != GenerateBridgeName(1000, "verylonginstancename") {
+		t.Error("GenerateBridgeName not deterministic")
 	}
 }
 
 func TestGenerateBridgeName_UniqueHashes(t *testing.T) {
-	// Different long names should produce different hashes
-	name1 := "verylonginstance1"
-	name2 := "verylonginstance2"
+	// Different names produce different bridges.
+	if GenerateBridgeName(1000, "inst1") == GenerateBridgeName(1000, "inst2") {
+		t.Error("different names produced same bridge")
+	}
+	// Same name under DIFFERENT uids produces different bridges — the core
+	// cross-user collision fix.
+	if GenerateBridgeName(1000, "dev") == GenerateBridgeName(2000, "dev") {
+		t.Error("same instance name under different uids produced same bridge (collision not prevented)")
+	}
+}
 
-	bridge1 := GenerateBridgeName(name1)
-	bridge2 := GenerateBridgeName(name2)
+func TestLegacyBridgeName(t *testing.T) {
+	// The legacy derivation preserves the old name-only scheme, used to recognize
+	// and tear down objects created by older abox versions (and by the macOS
+	// backends, which keep it).
+	if got := LegacyBridgeName("dev"); got != "abox-dev" {
+		t.Errorf("LegacyBridgeName(%q) = %q, want %q", "dev", got, "abox-dev")
+	}
+	long := LegacyBridgeName("verylonginstancename")
+	if len(long) != 15 || !strings.HasPrefix(long, "ab-") {
+		t.Errorf("LegacyBridgeName(long) = %q, want 15-char ab- hash", long)
+	}
+}
 
-	if bridge1 == bridge2 {
-		t.Errorf("Different names produced same bridge: %q and %q both -> %q",
-			name1, name2, bridge1)
+func TestResolvedNames(t *testing.T) {
+	uid := os.Getuid()
+
+	// An instance whose recorded bridge matches the current (uid, name)
+	// derivation is on the per-user scheme and resolves per-user names.
+	current := &Instance{Name: "dev", Bridge: GenerateBridgeName(uid, "dev")}
+	if !current.UsesCurrentNames() {
+		t.Error("instance with uid-derived bridge should use current names")
+	}
+	if got, want := current.ResolvedVMName(), DomainNameFor(uid, "dev"); got != want {
+		t.Errorf("ResolvedVMName() = %q, want %q", got, want)
+	}
+	if got, want := current.ResolvedFilterName(), FilterNameFor(uid, "dev"); got != want {
+		t.Errorf("ResolvedFilterName() = %q, want %q", got, want)
+	}
+
+	// A legacy instance (name-only bridge, created by an older abox) keeps
+	// resolving the legacy names until its next start upgrades it.
+	legacy := &Instance{Name: "dev", Bridge: "abox-dev"}
+	if legacy.UsesCurrentNames() {
+		t.Error("instance with legacy bridge should not use current names")
+	}
+	if got := legacy.ResolvedVMName(); got != "abox-dev" {
+		t.Errorf("legacy ResolvedVMName() = %q, want %q", got, "abox-dev")
+	}
+	if got := legacy.ResolvedFilterName(); got != "abox-dev-traffic" {
+		t.Errorf("legacy ResolvedFilterName() = %q, want %q", got, "abox-dev-traffic")
+	}
+
+	// A bridge recorded under a DIFFERENT uid (copied instance dir) is not
+	// "current" either — the copy must be re-created under the new owner's names
+	// rather than silently driving the original owner's objects.
+	foreign := &Instance{Name: "dev", Bridge: GenerateBridgeName(uid+1, "dev")}
+	if foreign.UsesCurrentNames() {
+		t.Error("bridge recorded under another uid must not count as current")
+	}
+}
+
+func TestDomainAndFilterNameFor(t *testing.T) {
+	if got := DomainNameFor(1000, "dev"); got != "abox-1000-dev" {
+		t.Errorf("DomainNameFor = %q, want abox-1000-dev", got)
+	}
+	if got := FilterNameFor(1000, "dev"); got != "abox-1000-dev-traffic" {
+		t.Errorf("FilterNameFor = %q, want abox-1000-dev-traffic", got)
+	}
+	if got := LegacyDomainName("dev"); got != "abox-dev" {
+		t.Errorf("LegacyDomainName = %q, want abox-dev", got)
+	}
+	if got := LegacyFilterName("dev"); got != "abox-dev-traffic" {
+		t.Errorf("LegacyFilterName = %q, want abox-dev-traffic", got)
 	}
 }
 
@@ -345,6 +379,10 @@ func TestUsedInstanceSubnets_EmptyDir(t *testing.T) {
 }
 
 func TestGetPaths_PathTraversal(t *testing.T) {
+	// Pin TMPDIR: with the mocked (empty) filesystem the runtime dir "doesn't
+	// exist", so GetPaths provisions the per-uid fallback on the REAL filesystem
+	// (deliberately outside the fsys seam) — keep that inside the test sandbox.
+	t.Setenv("TMPDIR", t.TempDir())
 	mock := NewMockFileSystem()
 	prev := SetFileSystem(mock)
 	defer SetFileSystem(prev)
@@ -964,4 +1002,126 @@ func containsHelper(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// TestPrivateRuntimeDir_FallbackCreatesPerUIDDir: with no usable runtime dir,
+// the fallback is a per-uid 0700 directory under the system temp dir — never
+// the shared temp dir itself, where two users' same-named instances would
+// collide on socket filenames.
+func TestPrivateRuntimeDir_FallbackCreatesPerUIDDir(t *testing.T) {
+	skipOnWindows(t)
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	// Point XDG at a nonexistent dir so RuntimeDir() fails and the fallback runs.
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(tmp, "no-such-dir"))
+
+	dir, err := PrivateRuntimeDir()
+	if err != nil {
+		t.Fatalf("PrivateRuntimeDir: %v", err)
+	}
+	want := filepath.Join(tmp, fmt.Sprintf("abox-%d", os.Getuid()))
+	if dir != want {
+		t.Fatalf("PrivateRuntimeDir = %q, want %q", dir, want)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("Stat fallback dir: %v", err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Errorf("fallback dir mode = %v, want 0700 directory", info.Mode())
+	}
+}
+
+// TestPrivateRuntimeDir_RefusesSquattedFallback: a pre-existing symlink or
+// overly-permissive directory at the predictable fallback name must be a hard
+// error, not silently used (the squat would hand sockets to another user).
+func TestPrivateRuntimeDir_RefusesSquattedFallback(t *testing.T) {
+	skipOnWindows(t)
+
+	t.Run("symlink", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("TMPDIR", tmp)
+		t.Setenv("XDG_RUNTIME_DIR", filepath.Join(tmp, "no-such-dir"))
+		target := filepath.Join(tmp, "elsewhere")
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(tmp, fmt.Sprintf("abox-%d", os.Getuid()))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := PrivateRuntimeDir(); err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("PrivateRuntimeDir = %v, want symlink refusal", err)
+		}
+	})
+
+	t.Run("group-other-accessible", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("TMPDIR", tmp)
+		t.Setenv("XDG_RUNTIME_DIR", filepath.Join(tmp, "no-such-dir"))
+		squat := filepath.Join(tmp, fmt.Sprintf("abox-%d", os.Getuid()))
+		if err := os.Mkdir(squat, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Mkdir applies umask; force the permissive mode explicitly.
+		if err := os.Chmod(squat, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := PrivateRuntimeDir(); err == nil || !strings.Contains(err.Error(), "accessible to other users") {
+			t.Fatalf("PrivateRuntimeDir = %v, want permission refusal", err)
+		}
+	})
+}
+
+// TestGetPaths_SquattedFallbackDegrades: a squatted per-uid fallback must not
+// fail GetPaths — path-only consumers (list, remove's cleanup, status) keep
+// working on still-computed paths — while the error is recorded in
+// RuntimeDirErr for the socket-binding consumers to enforce.
+func TestGetPaths_SquattedFallbackDegrades(t *testing.T) {
+	skipOnWindows(t)
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(tmp, "no-such-dir"))
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	squat := filepath.Join(tmp, fmt.Sprintf("abox-%d", os.Getuid()))
+	if err := os.Mkdir(squat, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(squat, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	paths, err := GetPaths("dev")
+	if err != nil {
+		t.Fatalf("GetPaths must degrade, not fail, on a squatted fallback: %v", err)
+	}
+	if paths.RuntimeDirErr == nil {
+		t.Fatal("GetPaths().RuntimeDirErr = nil, want the squat error recorded")
+	}
+	if !strings.Contains(paths.RuntimeDirErr.Error(), "accessible to other users") {
+		t.Errorf("RuntimeDirErr = %v, want the squat refusal", paths.RuntimeDirErr)
+	}
+	if paths.DNSSocket == "" || paths.Config == "" {
+		t.Errorf("degraded Paths must still be fully computed; DNSSocket=%q Config=%q", paths.DNSSocket, paths.Config)
+	}
+}
+
+// TestPrivateRuntimeDir_PrefersRuntimeDir: when the per-user runtime dir
+// exists, it is used directly and no fallback dir is created.
+func TestPrivateRuntimeDir_PrefersRuntimeDir(t *testing.T) {
+	skipOnWindows(t)
+	tmp := t.TempDir()
+	runtime := filepath.Join(tmp, "runtime")
+	if err := os.Mkdir(runtime, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtime)
+	t.Setenv("TMPDIR", filepath.Join(tmp, "tmp-unused"))
+
+	dir, err := PrivateRuntimeDir()
+	if err != nil {
+		t.Fatalf("PrivateRuntimeDir: %v", err)
+	}
+	if dir != runtime {
+		t.Errorf("PrivateRuntimeDir = %q, want the runtime dir %q", dir, runtime)
+	}
 }

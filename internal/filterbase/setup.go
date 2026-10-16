@@ -30,6 +30,18 @@ func SetupDaemon(name string, stderr io.Writer) (*DaemonSetup, error) {
 		return nil, err
 	}
 
+	// The daemon is about to bind its API socket under the private runtime dir:
+	// refuse up front when that dir couldn't be provisioned (recorded, not fatal,
+	// by GetPaths), and when a socket path would overflow the platform's sun_path
+	// limit — a path can grow past create-time validation (e.g. the runtime dir
+	// moved), and net.Listen's "invalid argument" names neither cause nor fix.
+	if paths.RuntimeDirErr != nil {
+		return nil, paths.RuntimeDirErr
+	}
+	if err := config.ValidateSocketPaths(paths); err != nil {
+		return nil, err
+	}
+
 	filter := allowlist.NewFilter()
 	loader := allowlist.NewLoader(paths.Allowlist, filter)
 

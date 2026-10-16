@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"testing"
 
 	"github.com/sandialabs/abox/internal/backend"
@@ -36,7 +37,7 @@ func saveRunningInstance(t *testing.T, name string, ec backend.EgressController)
 		Memory:    2048,
 		Subnet:    "10.10.10.0/24",
 		Gateway:   "10.10.10.1",
-		Bridge:    config.GenerateBridgeName(name),
+		Bridge:    config.GenerateBridgeName(os.Getuid(), name),
 		IPAddress: "10.10.10.50",
 		Disk:      "20G",
 	}

@@ -161,6 +161,7 @@ const (
 	CheckProxyEnv     CheckID = "proxyenv"
 	CheckDNSConfig    CheckID = "dnsconfig"
 	CheckHTTPUpstream CheckID = "httpupstream"
+	CheckNames        CheckID = "names"
 )
 
 // User-visible check names. These appear in CLI output and TUI.
@@ -181,6 +182,7 @@ const (
 	CheckNameProxyEnv     = "Proxy environment variables"
 	CheckNameDNSConfig    = "DNS configuration"
 	CheckNameHTTPUpstream = "HTTP upstream reachable"
+	CheckNameNames        = "Resource names (multi-user safe)"
 )
 
 // checkNameToID maps result names to check IDs.
@@ -201,6 +203,7 @@ var checkNameToID = map[string]CheckID{
 	CheckNameProxyEnv:     CheckProxyEnv,
 	CheckNameDNSConfig:    CheckDNSConfig,
 	CheckNameHTTPUpstream: CheckHTTPUpstream,
+	CheckNameNames:        CheckNames,
 }
 
 // CheckIDFromName returns the CheckID for a given check result name.

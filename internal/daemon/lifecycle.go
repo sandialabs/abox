@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/procutil"
 	"github.com/sandialabs/abox/internal/rpc"
+	"github.com/sandialabs/abox/internal/sysutil"
 )
 
 // rpcShutdownFunc is the signature for RPC shutdown methods (with variadic grpc.CallOption).
@@ -145,74 +147,112 @@ func KillDaemonByPIDFile(pidFile string) {
 	signalFallback(pidFile)
 }
 
+// resolveRuntimePair resolves a daemon's socket and PID file AS A UNIT: the
+// primary (private-dir) pair when either member exists, else the pre-private-dir
+// legacy pair (shared system temp dir — see config.LegacyRuntimePath) when an
+// owned member exists there, so daemons started by an older abox stay stoppable
+// across the upgrade. Pair-wise resolution matters: resolving each file
+// independently could mix locations (e.g. a stale primary PID file plus a live
+// legacy socket), signalling nothing while deleting a running daemon's socket.
+// The ownership check matters because the legacy location is SHARED: another
+// user's same-named instance may own that socket/PID file there, and acting on
+// it (shutdown RPC, signals, cleanup — trivial for root) is exactly the
+// cross-user clobbering the private dir exists to prevent. Legacy members that
+// are absent or foreign-owned come back "" (callers skip those legs). Mirrors
+// vfkit's resolvePIDFile precedent (read-fallback only; writers always use the
+// Paths fields).
+func resolveRuntimePair(socketPath, pidFile string) (string, string) {
+	if _, err := os.Stat(socketPath); err == nil {
+		return socketPath, pidFile
+	}
+	if _, err := os.Stat(pidFile); err == nil {
+		return socketPath, pidFile
+	}
+	legacySocket := LegacyOwnedRuntimeFile(filepath.Base(socketPath))
+	legacyPID := LegacyOwnedRuntimeFile(filepath.Base(pidFile))
+	if legacySocket == "" && legacyPID == "" {
+		return socketPath, pidFile
+	}
+	return legacySocket, legacyPID
+}
+
+// LegacyOwnedRuntimeFile returns the legacy (shared temp dir) location of a
+// runtime file when it exists AND is owned by the current user, else "".
+func LegacyOwnedRuntimeFile(basename string) string {
+	legacy := config.LegacyRuntimePath(basename)
+	info, err := os.Lstat(legacy)
+	if err != nil {
+		return ""
+	}
+	if uid, _, ok := sysutil.FileOwner(info); ok && uid == os.Getuid() {
+		return legacy
+	}
+	return ""
+}
+
+// stopDaemon stops one daemon: RPC shutdown over its socket when possible,
+// SIGTERM/SIGKILL via its PID file otherwise, then removes both files. The
+// socket and PID paths get the pair-wise legacy read-fallback
+// (resolveRuntimePair) — UNLESS the private runtime dir failed verification
+// (runtimeDirErr from Paths.RuntimeDirErr): then everything inside it is
+// attacker-controllable (a planted PID file would steer signalFallback at a
+// process of the attacker's choosing), so the primary paths are never read and
+// only the ownership-checked legacy location is acted on.
+func stopDaemon(daemonName, socketPath, pidFile string, runtimeDirErr error, shutdown func(*grpc.ClientConn) rpcShutdownFunc) {
+	if runtimeDirErr != nil {
+		logging.Warn("private runtime directory unusable; stopping via owned legacy paths only",
+			"daemon", daemonName, "error", runtimeDirErr)
+		socketPath = LegacyOwnedRuntimeFile(filepath.Base(socketPath))
+		pidFile = LegacyOwnedRuntimeFile(filepath.Base(pidFile))
+		if socketPath == "" && pidFile == "" {
+			return
+		}
+	} else {
+		socketPath, pidFile = resolveRuntimePair(socketPath, pidFile)
+	}
+
+	rpcShutdownSucceeded := false
+	if socketPath != "" {
+		if client, err := rpc.UnixDial(socketPath); err == nil {
+			rpcShutdownSucceeded = stopDaemonViaRPC(socketPath, shutdown(client))
+			_ = client.Close()
+		}
+	}
+	if !rpcShutdownSucceeded && pidFile != "" {
+		signalFallback(pidFile)
+	}
+	_ = cleanupDaemonFiles(daemonName, pidFile, socketPath)
+}
+
 // StopDNSFilter stops the DNS filter process for an instance.
 func StopDNSFilter(name string) {
 	paths, err := config.GetPaths(name)
 	if err != nil {
+		logging.Warn("cannot resolve paths to stop DNS filter; daemon may be left running", "instance", name, "error", err)
 		return
 	}
-
-	rpcShutdownSucceeded := false
-
-	// Try RPC shutdown first (preferred method)
-	if client, err := rpc.UnixDial(paths.DNSSocket); err == nil {
-		dnsClient := rpc.NewDNSFilterClient(client)
-		rpcShutdownSucceeded = stopDaemonViaRPC(paths.DNSSocket, dnsClient.Shutdown)
-		_ = client.Close()
-	}
-
-	// If RPC shutdown failed, try SIGTERM/SIGKILL fallback
-	if !rpcShutdownSucceeded {
-		signalFallback(paths.DNSPIDFile)
-	}
-
-	_ = cleanupDaemonFiles("dnsfilter", paths.DNSPIDFile, paths.DNSSocket)
+	stopDaemon("dnsfilter", paths.DNSSocket, paths.DNSPIDFile, paths.RuntimeDirErr,
+		func(c *grpc.ClientConn) rpcShutdownFunc { return rpc.NewDNSFilterClient(c).Shutdown })
 }
 
 // StopHTTPFilter stops the HTTP filter process for an instance.
 func StopHTTPFilter(name string) {
 	paths, err := config.GetPaths(name)
 	if err != nil {
+		logging.Warn("cannot resolve paths to stop HTTP filter; daemon may be left running", "instance", name, "error", err)
 		return
 	}
-
-	rpcShutdownSucceeded := false
-
-	// Try RPC shutdown first (preferred method)
-	if client, err := rpc.UnixDial(paths.HTTPSocket); err == nil {
-		httpClient := rpc.NewHTTPFilterClient(client)
-		rpcShutdownSucceeded = stopDaemonViaRPC(paths.HTTPSocket, httpClient.Shutdown)
-		_ = client.Close()
-	}
-
-	// If RPC shutdown failed, try SIGTERM/SIGKILL fallback
-	if !rpcShutdownSucceeded {
-		signalFallback(paths.HTTPPIDFile)
-	}
-
-	_ = cleanupDaemonFiles("httpfilter", paths.HTTPPIDFile, paths.HTTPSocket)
+	stopDaemon("httpfilter", paths.HTTPSocket, paths.HTTPPIDFile, paths.RuntimeDirErr,
+		func(c *grpc.ClientConn) rpcShutdownFunc { return rpc.NewHTTPFilterClient(c).Shutdown })
 }
 
 // StopMonitorDaemon stops the monitor daemon process for an instance.
 func StopMonitorDaemon(name string) {
 	paths, err := config.GetPaths(name)
 	if err != nil {
+		logging.Warn("cannot resolve paths to stop monitor daemon; daemon may be left running", "instance", name, "error", err)
 		return
 	}
-
-	rpcShutdownSucceeded := false
-
-	// Try RPC shutdown first (preferred method)
-	if client, err := rpc.UnixDial(paths.MonitorRPCSocket); err == nil {
-		monitorClient := rpc.NewMonitorClient(client)
-		rpcShutdownSucceeded = stopDaemonViaRPC(paths.MonitorRPCSocket, monitorClient.Shutdown)
-		_ = client.Close()
-	}
-
-	// If RPC shutdown failed, try SIGTERM/SIGKILL fallback
-	if !rpcShutdownSucceeded {
-		signalFallback(paths.MonitorPIDFile)
-	}
-
-	_ = cleanupDaemonFiles("monitor", paths.MonitorPIDFile, paths.MonitorRPCSocket)
+	stopDaemon("monitor", paths.MonitorRPCSocket, paths.MonitorPIDFile, paths.RuntimeDirErr,
+		func(c *grpc.ClientConn) rpcShutdownFunc { return rpc.NewMonitorClient(c).Shutdown })
 }

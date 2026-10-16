@@ -2,6 +2,7 @@ package virsh
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -445,5 +446,99 @@ func TestGetNWFilterUUID_WithMock(t *testing.T) {
 				t.Errorf("GetNWFilterUUID() = %q, want %q", result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestListNetworkSubnets_WithMock(t *testing.T) {
+	const netA = `<network><name>ab-aaaa</name><bridge name='ab-aaaa'/>` +
+		`<ip address='10.10.10.1' netmask='255.255.255.0'><dhcp/></ip></network>`
+	// prefix form (libvirt accepts prefix='24' instead of a netmask), plus an
+	// IPv6 <ip> FIRST to prove all <ip> elements are scanned, not just one.
+	const netB = `<network><name>ab-bbbb</name><bridge name='ab-bbbb'/>` +
+		`<ip family='ipv6' address='fd00::1' prefix='64'/>` +
+		`<ip address='10.10.20.1' prefix='24'><dhcp/></ip></network>`
+	// A network with no <ip> (isolated) must be skipped, not error.
+	const netNoIP = `<network><name>isolated</name></network>`
+
+	mock := &MockCommander{
+		RunFunc: func(name string, args ...string) (string, error) {
+			if len(args) < 3 {
+				return "", nil
+			}
+			switch args[2] {
+			case "net-list":
+				return "ab-aaaa\nab-bbbb\nisolated\n", nil
+			case "net-dumpxml":
+				switch args[3] {
+				case "ab-aaaa":
+					return netA, nil
+				case "ab-bbbb":
+					return netB, nil
+				case "isolated":
+					return netNoIP, nil
+				}
+			}
+			return "", nil
+		},
+	}
+	prev := SetCommander(mock)
+	defer SetCommander(prev)
+
+	got := ListNetworkSubnets()
+	var cidrs []string
+	for _, n := range got {
+		cidrs = append(cidrs, n.String())
+	}
+	for _, want := range []string{"10.10.10.0/24", "10.10.20.0/24"} {
+		if !slices.Contains(cidrs, want) {
+			t.Errorf("ListNetworkSubnets() missing %q; got %v", want, cidrs)
+		}
+	}
+	if len(got) != 2 {
+		t.Errorf("ListNetworkSubnets() = %v, want exactly the two IPv4 subnets", cidrs)
+	}
+
+	// The excluding variant drops the named network's subnets (used by the
+	// post-define double-book check to not conflict with itself).
+	exGot := ListNetworkSubnetsExcluding("ab-aaaa")
+	if len(exGot) != 1 || exGot[0].String() != "10.10.20.0/24" {
+		t.Errorf("ListNetworkSubnetsExcluding(ab-aaaa) = %v, want only 10.10.20.0/24", exGot)
+	}
+}
+
+func TestListNetworkSubnets_FailOpen(t *testing.T) {
+	mock := &MockCommander{
+		RunFunc: func(string, ...string) (string, error) { return "", errors.New("virsh unavailable") },
+	}
+	prev := SetCommander(mock)
+	defer SetCommander(prev)
+
+	if got := ListNetworkSubnets(); got != nil {
+		t.Errorf("ListNetworkSubnets() on error = %v, want nil (fail-open)", got)
+	}
+}
+
+// TestUndefineDomain_KeepsStorage: UndefineDomain must issue a plain undefine —
+// never --remove-all-storage — because the name upgrade renames a domain whose
+// disk the next start reuses.
+func TestUndefineDomain_KeepsStorage(t *testing.T) {
+	var gotArgs []string
+	mock := &MockCommander{
+		RunFunc: func(name string, args ...string) (string, error) {
+			gotArgs = args
+			return "", nil
+		},
+	}
+	prev := SetCommander(mock)
+	defer SetCommander(prev)
+
+	if err := UndefineDomain("abox-dev"); err != nil {
+		t.Fatalf("UndefineDomain: %v", err)
+	}
+	if !slices.Contains(gotArgs, "undefine") || !slices.Contains(gotArgs, "abox-dev") {
+		t.Errorf("UndefineDomain args = %v, want undefine abox-dev", gotArgs)
+	}
+	if slices.Contains(gotArgs, "--remove-all-storage") {
+		t.Errorf("UndefineDomain must not remove storage; args = %v", gotArgs)
 	}
 }

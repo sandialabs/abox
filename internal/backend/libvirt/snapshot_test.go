@@ -5,8 +5,11 @@ package libvirt
 import (
 	"context"
 	"fmt"
+	"os"
 	"slices"
 	"testing"
+
+	"github.com/sandialabs/abox/internal/config"
 )
 
 func TestSnapshotCreateArgVector(t *testing.T) {
@@ -22,8 +25,9 @@ func TestSnapshotCreateArgVector(t *testing.T) {
 	// Positionals: snapshot-create-as <domain> <name>, then --description <desc>.
 	idx := slices.Index(call.Args, "snapshot-create-as")
 	rest := call.Args[idx+1:]
-	if len(rest) < 2 || rest[0] != "abox-dev" || rest[1] != "snap1" {
-		t.Errorf("snapshot-create-as positionals = %v, want [abox-dev snap1 ...]", rest)
+	domainDev := config.DomainNameFor(os.Getuid(), "dev")
+	if len(rest) < 2 || rest[0] != domainDev || rest[1] != "snap1" {
+		t.Errorf("snapshot-create-as positionals = %v, want [%s snap1 ...]", rest, domainDev)
 	}
 	if !slices.Contains(call.Args, "--description") || !slices.Contains(call.Args, "my description") {
 		t.Errorf("snapshot-create-as missing description flag: %v", call.Args)
@@ -90,8 +94,9 @@ func TestSnapshotRevertAndDeleteArgVectors(t *testing.T) {
 				t.Fatalf("%s did not issue %s; calls=%+v", tt.name, tt.subcmd, mock.Calls)
 			}
 			idx := slices.Index(call.Args, tt.subcmd)
-			if got := call.Args[idx+1:]; !slices.Equal(got, []string{"abox-dev", "snap1"}) {
-				t.Errorf("%s positionals = %v, want [abox-dev snap1]", tt.name, got)
+			domainDev := config.DomainNameFor(os.Getuid(), "dev")
+			if got := call.Args[idx+1:]; !slices.Equal(got, []string{domainDev, "snap1"}) {
+				t.Errorf("%s positionals = %v, want [%s snap1]", tt.name, got, domainDev)
 			}
 		})
 	}

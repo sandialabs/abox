@@ -760,7 +760,8 @@ func TestDomainXMLWithOptions_CustomTemplate(t *testing.T) {
 	}
 
 	customTemplate := `<domain type="kvm">
-  <name>custom-{{.Name}}</name>
+  <name>{{.VMName}}</name>
+  <description>custom-{{.Name}}</description>
   <memory unit="MiB">{{.Memory}}</memory>
   <vcpu>{{.CPUs}}</vcpu>
 </domain>`
@@ -776,6 +777,37 @@ func TestDomainXMLWithOptions_CustomTemplate(t *testing.T) {
 	}
 	if !strings.Contains(xml, "4096") {
 		t.Error("XML should contain memory value from custom template")
+	}
+	if !strings.Contains(xml, "<name>"+inst.ResolvedVMName()+"</name>") {
+		t.Errorf("XML should carry the resolved domain name; got:\n%s", xml)
+	}
+}
+
+// TestDomainXMLWithOptions_CustomTemplateWrongName: a custom template whose
+// <name> is not the resolved domain name (e.g. one written against the
+// pre-multi-user abox-{{.Name}} scheme) must be rejected — defining it would
+// create a domain every subsequent lookup fails to resolve.
+func TestDomainXMLWithOptions_CustomTemplateWrongName(t *testing.T) {
+	inst := &config.Instance{
+		Name:       "dev",
+		CPUs:       2,
+		Memory:     4096,
+		Bridge:     "abox-dev",
+		MACAddress: "52:54:00:ab:cd:ef",
+	}
+	paths := &config.Paths{Disk: "/var/lib/libvirt/images/abox/dev.qcow2"}
+
+	customTemplate := `<domain type="kvm">
+  <name>custom-{{.Name}}</name>
+  <memory unit="MiB">{{.Memory}}</memory>
+</domain>`
+
+	_, err := DomainXMLWithOptions(inst, paths, DomainXMLOptions{CustomTemplate: customTemplate})
+	if err == nil {
+		t.Fatal("DomainXMLWithOptions() should reject a custom template with a wrong <name>")
+	}
+	if !strings.Contains(err.Error(), "{{.VMName}}") {
+		t.Errorf("error should point at {{.VMName}}: %v", err)
 	}
 }
 

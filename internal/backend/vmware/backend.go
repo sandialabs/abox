@@ -157,7 +157,7 @@ func (b *Backend) ResourceNames(instanceName string) backend.ResourceNames {
 	return backend.ResourceNames{
 		Instance: instanceName,
 		VM:       "abox-" + instanceName,
-		Network:  config.GenerateBridgeName(instanceName),
+		Network:  config.LegacyBridgeName(instanceName),
 	}
 }
 

@@ -569,16 +569,17 @@ func allocateSubnet(opts *Options, be backend.Backend) (string, string, error) {
 // buildInstanceConfig constructs the instance configuration struct.
 func buildInstanceConfig(opts *Options, name string, paths *config.Paths, be backend.Backend, gateway, subnet string) *config.Instance {
 	return &config.Instance{
-		Version:    config.CurrentInstanceVersion,
-		Name:       name,
-		Backend:    be.Name(),
-		StorageDir: be.StorageDir(),
-		CPUs:       opts.CPUs,
-		Memory:     opts.Memory,
-		Base:       opts.Base,
-		Subnet:     subnet,
-		Gateway:    gateway,
-		Bridge:     be.ResourceNames(name).Network,
+		Version:      config.CurrentInstanceVersion,
+		Name:         name,
+		Backend:      be.Name(),
+		StorageDir:   be.StorageDir(),
+		CPUs:         opts.CPUs,
+		Memory:       opts.Memory,
+		Base:         opts.Base,
+		Subnet:       subnet,
+		SubnetPinned: opts.Subnet != "",
+		Gateway:      gateway,
+		Bridge:       be.ResourceNames(name).Network,
 		DNS: config.DNSConfig{
 			Port:     0, // auto-allocated by dnsfilter
 			Upstream: opts.Upstream,
@@ -646,10 +647,11 @@ func createInstanceResources(
 	}
 	cs.allowlistGen = true
 
-	// Create network
+	// Create network (shared conflict-retry helper; inst.SubnetPinned carries
+	// the explicit --subnet choice, which is never re-allocated)
 	fmt.Fprintln(w, "  Creating network...")
-	if err := be.Network().Create(ctx, inst); err != nil {
-		return fmt.Errorf("failed to create network: %w", err)
+	if err := instance.CreateNetworkWithRetry(ctx, w, be, inst, paths); err != nil {
+		return err
 	}
 	cs.networkDef = true
 
