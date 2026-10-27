@@ -250,7 +250,8 @@ func newMigFixture(t *testing.T) *migFixture {
 	})
 
 	// Default seams: real relocation (tool="env"), real legacy check, no-op stop,
-	// and success stubs for rebase/regroup/save that record their invocation order.
+	// and success stubs for the post-move steps (rebase, regroup, check, save —
+	// the migrateOne sequence) that record their invocation order.
 	// Return a fresh copy each call so a re-run reflects on-disk state (config still
 	// legacy until save succeeds), matching production Load which reads from disk and
 	// never shares the pointer migrateOne mutates.
@@ -306,8 +307,11 @@ func TestMigrateOneHappyPath(t *testing.T) {
 		t.Fatalf("copied base missing/incorrect: data=%q err=%v", data, err)
 	}
 
-	// Post-move steps ran in order.
-	if want := []string{"rebase", "check", "regroup", "save"}; !slices.Equal(fx.calls, want) {
+	// Post-move steps ran in order. Regroup must precede check — the check opens
+	// the backing chain unprivileged and a pre-existing base at the new location
+	// may be owned by the QEMU runtime user; see the ordering comment above
+	// migRegroup in migrateOne.
+	if want := []string{"rebase", "regroup", "check", "save"}; !slices.Equal(fx.calls, want) {
 		t.Fatalf("call order = %v, want %v", fx.calls, want)
 	}
 	// Two audit records: disk-relocated then complete.
@@ -382,7 +386,7 @@ func TestMigrateOneRebaseFailsThenRecovers(t *testing.T) {
 	if len(fx.audits) != 1 || auditStatus(fx.audits[0]) != "disk-relocated" {
 		t.Fatalf("expected one disk-relocated audit before failure, got %v", fx.audits)
 	}
-	// check/grant/save must NOT have run.
+	// regroup/check/save must NOT have run.
 	if want := []string{"rebase"}; !slices.Equal(fx.calls, want) {
 		t.Fatalf("call order = %v, want %v", fx.calls, want)
 	}
@@ -395,7 +399,7 @@ func TestMigrateOneRebaseFailsThenRecovers(t *testing.T) {
 	if err := migrateOne(&bytes.Buffer{}, nil, "dev"); err != nil {
 		t.Fatalf("re-run migrateOne: %v", err)
 	}
-	if want := []string{"rebase", "check", "regroup", "save"}; !slices.Equal(fx.calls, want) {
+	if want := []string{"rebase", "regroup", "check", "save"}; !slices.Equal(fx.calls, want) {
 		t.Fatalf("re-run call order = %v, want %v", fx.calls, want)
 	}
 	if fx.inst.StorageDir != fx.storageDir || config.IsLegacyStorage(fx.inst, fx.newPaths) {
@@ -406,7 +410,7 @@ func TestMigrateOneRebaseFailsThenRecovers(t *testing.T) {
 func TestMigrateOneSaveFailsThenRecovers(t *testing.T) {
 	fx := newMigFixture(t)
 
-	// Rebase+grant succeed; save fails.
+	// Rebase+regroup+check succeed; save fails.
 	migSave = func(*config.Instance, *config.Paths) error {
 		fx.calls = append(fx.calls, "save")
 		return errors.New("write failed")
@@ -415,8 +419,8 @@ func TestMigrateOneSaveFailsThenRecovers(t *testing.T) {
 	err := migrateOne(&bytes.Buffer{}, nil, "dev")
 	assertRerunHint(t, err)
 
-	// rebase+grant ran, save attempted and failed.
-	if want := []string{"rebase", "check", "regroup", "save"}; !slices.Equal(fx.calls, want) {
+	// rebase+regroup+check ran, save attempted and failed.
+	if want := []string{"rebase", "regroup", "check", "save"}; !slices.Equal(fx.calls, want) {
 		t.Fatalf("call order = %v, want %v", fx.calls, want)
 	}
 	// disk-relocated audit written; no complete audit.
@@ -434,7 +438,7 @@ func TestMigrateOneSaveFailsThenRecovers(t *testing.T) {
 	if err := migrateOne(&bytes.Buffer{}, nil, "dev"); err != nil {
 		t.Fatalf("re-run migrateOne: %v", err)
 	}
-	if want := []string{"rebase", "check", "regroup", "save"}; !slices.Equal(fx.calls, want) {
+	if want := []string{"rebase", "regroup", "check", "save"}; !slices.Equal(fx.calls, want) {
 		t.Fatalf("re-run call order = %v, want %v", fx.calls, want)
 	}
 	if fx.inst.StorageDir != fx.storageDir || config.IsLegacyStorage(fx.inst, fx.newPaths) {
@@ -444,8 +448,10 @@ func TestMigrateOneSaveFailsThenRecovers(t *testing.T) {
 
 // TestMigrateOneRebaseCheckFailsIsIncomplete proves that a rebase whose backing
 // chain does not validate (e.g. the relocated base is truncated/corrupt) is
-// reported as an incomplete migration rather than "complete": grant/save must
-// not run, and the disk-relocated audit is the only record written.
+// reported as an incomplete migration rather than "complete": save must not
+// run, and the disk-relocated audit is the only record written. Regroup DOES
+// run (before the check — see the ordering comment in migrateOne), which is
+// harmless: it is idempotent and confined to the caller's own subtree.
 func TestMigrateOneRebaseCheckFailsIsIncomplete(t *testing.T) {
 	fx := newMigFixture(t)
 
@@ -459,8 +465,8 @@ func TestMigrateOneRebaseCheckFailsIsIncomplete(t *testing.T) {
 	err := migrateOne(&bytes.Buffer{}, nil, "dev")
 	assertRerunHint(t, err)
 
-	// rebase+check ran; regroup/save did NOT.
-	if want := []string{"rebase", "check"}; !slices.Equal(fx.calls, want) {
+	// rebase+regroup+check ran; save did NOT.
+	if want := []string{"rebase", "regroup", "check"}; !slices.Equal(fx.calls, want) {
 		t.Fatalf("call order = %v, want %v", fx.calls, want)
 	}
 	// Only the disk-relocated audit; no "complete".
@@ -471,6 +477,101 @@ func TestMigrateOneRebaseCheckFailsIsIncomplete(t *testing.T) {
 	// not repointed at the per-user root).
 	if fx.inst.StorageDir != config.LibvirtImagesDir {
 		t.Errorf("StorageDir = %q, want unchanged (%q) when migration is incomplete", fx.inst.StorageDir, config.LibvirtImagesDir)
+	}
+}
+
+// TestMigrateOneRegroupFailsThenRecovers proves that a failed regroup (the
+// privileged helper step; it runs before the chain validation — see the
+// ordering comment in migrateOne) stops the migration — check/save must not
+// run, the re-run hint is given, the config still records legacy storage —
+// and that a re-run with the helper back completes it, exercising the exact
+// recovery flow the hint promises.
+func TestMigrateOneRegroupFailsThenRecovers(t *testing.T) {
+	fx := newMigFixture(t)
+
+	migRegroup = func(backend.StorageEnforcer, string) error {
+		fx.calls = append(fx.calls, "regroup")
+		return errors.New("helper unavailable")
+	}
+
+	err := migrateOne(&bytes.Buffer{}, nil, "dev")
+	assertRerunHint(t, err)
+
+	// rebase+regroup ran; check/save did NOT.
+	if want := []string{"rebase", "regroup"}; !slices.Equal(fx.calls, want) {
+		t.Fatalf("call order = %v, want %v", fx.calls, want)
+	}
+	// Only the disk-relocated audit; no "complete".
+	if len(fx.audits) != 1 || auditStatus(fx.audits[0]) != "disk-relocated" {
+		t.Fatalf("expected one disk-relocated audit, got %v", fx.audits)
+	}
+	// Config must still record legacy storage (save never ran).
+	if fx.inst.StorageDir != config.LibvirtImagesDir {
+		t.Errorf("StorageDir = %q, want unchanged (%q) when migration is incomplete", fx.inst.StorageDir, config.LibvirtImagesDir)
+	}
+
+	// Re-run with regroup restored to success: idempotent recovery completes
+	// (relocateDisk re-asserts ownership on the already-moved disk).
+	fx.calls = nil
+	fx.audits = nil
+	migRegroup = func(backend.StorageEnforcer, string) error { fx.calls = append(fx.calls, "regroup"); return nil }
+
+	if err := migrateOne(&bytes.Buffer{}, nil, "dev"); err != nil {
+		t.Fatalf("re-run migrateOne: %v", err)
+	}
+	if want := []string{"rebase", "regroup", "check", "save"}; !slices.Equal(fx.calls, want) {
+		t.Fatalf("re-run call order = %v, want %v", fx.calls, want)
+	}
+	if fx.inst.StorageDir != fx.storageDir || config.IsLegacyStorage(fx.inst, fx.newPaths) {
+		t.Error("re-run should leave config migrated")
+	}
+}
+
+// TestMigrateOneRegroupRepairsUnreadableBaseBeforeCheck is an effect-level
+// regression test for the field failure the regroup-before-check ordering
+// fixes: unlike the ordering tests above, the check seam here actually
+// open(2)s every link of the chain and the regroup stub actually repairs the
+// base, so it fails if regroup's EFFECT no longer precedes the check — even
+// if the recorded call order still looks right. Mode 0000 stands in for
+// "owned by the QEMU user" (os.Stat succeeds, the unprivileged open gets
+// EACCES); the stub's chmod stands in for the helper's root-run chown+mode
+// repair. See the ordering comment in migrateOne.
+func TestMigrateOneRegroupRepairsUnreadableBaseBeforeCheck(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode 0000 does not make the base unreadable")
+	}
+	fx := newMigFixture(t)
+
+	// A base already present at the new location, unreadable by the caller —
+	// as libvirt dynamic_ownership leaves it after a migrated instance boots.
+	if err := os.MkdirAll(fx.newPaths.BaseImages, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	newBase := filepath.Join(fx.newPaths.BaseImages, "ubuntu.qcow2")
+	if err := os.WriteFile(newBase, []byte("base"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	// Open every link of the chain, as qemu-img info --backing-chain does.
+	migCheck = func(_ context.Context, disk string) error {
+		for _, p := range []string{disk, newBase} {
+			f, err := os.Open(p)
+			if err != nil {
+				return err
+			}
+			f.Close()
+		}
+		return nil
+	}
+	migRegroup = func(backend.StorageEnforcer, string) error {
+		return os.Chmod(newBase, 0o640)
+	}
+
+	if err := migrateOne(&bytes.Buffer{}, nil, "dev"); err != nil {
+		t.Fatalf("migrateOne with pre-existing unreadable base: %v", err)
+	}
+	if fx.inst.StorageDir != fx.storageDir || config.IsLegacyStorage(fx.inst, fx.newPaths) {
+		t.Error("migration should have completed")
 	}
 }
 

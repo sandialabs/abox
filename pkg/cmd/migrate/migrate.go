@@ -252,10 +252,11 @@ func migrateOne(w io.Writer, f *factory.Factory, name string) error {
 	// successful completion writes a second "complete" record below.
 	migAudit(name, "migrate", "status", "disk-relocated", "from", config.LibvirtImagesDir, "to", filepath.Dir(newPaths.DiskDir))
 
-	// Rebase the disk's backing pointer onto the relocated base (unprivileged now
-	// that the files are user-owned), re-group the relocated files to the QEMU
-	// group (the privileged helper step — the relocation chowned them to the
-	// caller's primary group, losing the QEMU group), then point the instance
+	// Rebase the disk's backing pointer onto the relocated base (unprivileged —
+	// rebase -u opens only the top image, which the relocation chowned to the
+	// caller), re-group the relocated files to the QEMU group (the privileged
+	// helper step — the relocation chowned them to the caller's primary group,
+	// losing the QEMU group), validate the rebased chain, then point the instance
 	// config at the per-user storage.
 	//
 	// If any of these post-move steps fails, the disk is already relocated but the
@@ -266,14 +267,22 @@ func migrateOne(w io.Writer, f *factory.Factory, name string) error {
 	if err := migRebase(context.Background(), newPaths.Disk, newBase); err != nil {
 		return incompleteMigration(name, fmt.Errorf("failed to rebase disk: %w", err))
 	}
+	// Re-group BEFORE validating the chain. The validation below opens every link
+	// in the backing chain unprivileged, but a base image already present at the
+	// new location may be owned by the QEMU runtime user: with dynamic_ownership,
+	// libvirt chowns a VM's disk sources at start and never chowns read-only
+	// sources (the base) back on shutdown (see chmodIfOwned in
+	// internal/backend/libvirt/disk.go). The root-run regroup restores
+	// caller:qemu-group ownership, making such a base readable by the caller
+	// again before the check opens it.
+	if err := migRegroup(target.enforcer, target.storageDir); err != nil {
+		return incompleteMigration(name, fmt.Errorf("failed to re-group relocated files for the QEMU user: %w", err))
+	}
 	// Rebase is unsafe (-u): it rewrites only the backing pointer without opening
 	// the new backing file. Validate the resulting chain actually opens so a
 	// truncated/corrupt base is caught here rather than at boot.
 	if err := migCheck(context.Background(), newPaths.Disk); err != nil {
 		return incompleteMigration(name, fmt.Errorf("rebased disk failed validation: %w", err))
-	}
-	if err := migRegroup(target.enforcer, target.storageDir); err != nil {
-		return incompleteMigration(name, fmt.Errorf("failed to re-group relocated files for the QEMU user: %w", err))
 	}
 
 	// Point the instance at its per-user storage root so Load resolves there.
