@@ -104,13 +104,18 @@ XDG_CONFIG_HOME
   Base directory for configuration files.
   Default: ~/.config
 
-  Note: abox currently stores all config in XDG_DATA_HOME with instance data.
+  Holds the optional global config, $XDG_CONFIG_HOME/abox/config.yaml:
+    version: 1
+    subnet_pool: 10.10.0.0/16      # pool for new instance subnets
+    storage_dir: /scratch/me/abox  # root for new instances' disk images
+
+  Instance config is stored in XDG_DATA_HOME with instance data.
 
 DEFAULT VALUES
   Data directory:     ~/.local/share/abox/
   Instance directory: ~/.local/share/abox/instances/<name>/
   Base images:        ~/.local/share/abox/base/
-  Libvirt images:     /var/lib/libvirt/images/abox/
+  Libvirt images:     /var/lib/libvirt/images/abox/<uid>/ (or storage_dir)
 
 SEE ALSO
   abox help commands         Command reference

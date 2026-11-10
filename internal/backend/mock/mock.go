@@ -464,3 +464,23 @@ func (m *EgressController) VerifyEnforced(ctx context.Context, inst *config.Inst
 	}
 	return false, nil
 }
+
+// StorageEnforcerCall records one EnsureStorageRoot call.
+type StorageEnforcerCall struct {
+	Path    string
+	Regroup bool
+}
+
+// StorageEnforcer is a test double for backend.StorageEnforcer that records
+// each EnsureStorageRoot call so tests can assert which roots were provisioned
+// (and in what order) without the privilege helper. A non-nil Err makes every
+// call fail.
+type StorageEnforcer struct {
+	Calls []StorageEnforcerCall
+	Err   error
+}
+
+func (e *StorageEnforcer) EnsureStorageRoot(_ context.Context, path string, regroup bool) error {
+	e.Calls = append(e.Calls, StorageEnforcerCall{Path: path, Regroup: regroup})
+	return e.Err
+}

@@ -23,7 +23,7 @@ The helper exposes a minimal `Egress` gRPC service — 6 RPCs total:
 
 | RPC | Purpose |
 |-----|---------|
-| `EnsureStorageRoot` | provision the caller's per-user disk storage root AND its `instances`/`base` subdirectories (each owned by the caller, setgid to the QEMU group), idempotent. The helper derives the caller from the socket peer uid and creates only `<parent>/<uid>` (and the two subdirs under it) — never an arbitrary path. With `regroup` set (used by `abox migrate`) it also re-groups the caller's own subtree to the QEMU group after files were relocated. |
+| `EnsureStorageRoot` | provision the caller's per-user disk storage root AND its `instances`/`base` subdirectories (each owned by the caller, setgid to the QEMU group), idempotent. The helper derives the caller from the socket peer uid and creates only `<parent>/<uid>` (and the two subdirs under it) — never an arbitrary path — or, for a [custom storage location](#custom-storage-location), group-shares a directory the caller already owns. With `regroup` set (used by `abox migrate`, default root only) it also re-groups the caller's own subtree to the QEMU group after files were relocated. |
 | `Apply`    | install the DNS REDIRECT (nat table) + INPUT accepts for a bridge (idempotent) |
 | `Remove`   | flush abox's egress rules for a bridge — scoped to abox's own ports so unrelated rules survive (idempotent) |
 | `Verify`   | report whether the host-side DNS redirect + accepts are in force |
@@ -70,6 +70,49 @@ regardless of `dynamic_ownership`: libvirt's own pre-start accessibility check
 gid:Y): Permission denied" on failure) runs against the file's owner/mode
 *before* `dynamic_ownership` chowns it to the QEMU runtime user, so at that
 point only the group bits apply — and the writable layer needs W_OK.
+
+## Custom storage location
+
+By default disks live under `/var/lib/libvirt/images/abox/<uid>`. To put them
+elsewhere (e.g. a larger `/scratch` volume), set `storage_dir` in your global
+config, `~/.config/abox/config.yaml` (honors `XDG_CONFIG_HOME`):
+
+```yaml
+version: 1
+storage_dir: /scratch/me/abox
+```
+
+No admin configuration is needed. The setting applies to instances created
+afterwards; existing instances keep the `storage_dir` recorded in their own
+`config.yaml`. `abox migrate` always targets the default root.
+
+abox creates the directory as you if it is missing, then asks the helper to
+group-share it. For a path other than the default root, `EnsureStorageRoot`:
+
+- accepts only an absolute, clean path outside `/var/lib/libvirt/images/abox`
+  (and never `/`), and refuses `regroup`;
+- opens the directory `O_NOFOLLOW|O_DIRECTORY` and requires it to be **owned by
+  the caller** (the socket peer uid) — it never changes the owner and never
+  touches a directory you don't own;
+- sets its group to the QEMU group and mode `2750`, and provisions
+  `instances`/`base` the same way (relative to the opened directory, refusing
+  symlinks or directories owned by anyone else);
+- checks that the QEMU process can traverse every parent directory (search
+  permission for others, or for the QEMU group; directories with a POSIX ACL
+  are accepted as-is) and fails with the blocking directory otherwise, e.g.
+  `chmod o+x /scratch/me`.
+
+This grants you nothing you couldn't do yourself as a member of the QEMU
+group: files created beneath inherit the group but never the setgid bit (the
+kernel strips it for non-members), and QEMU only reads the disks named in your
+own VM definitions.
+
+The directory must be on a local filesystem that supports POSIX ownership and
+setgid directories (ext4, xfs, …). On SELinux hosts where libvirt's automatic
+relabeling is disabled, an admin must label it, e.g.
+`semanage fcontext -a -t virt_image_t '/scratch/me/abox(/.*)?' && restorecon -R /scratch/me/abox`.
+On Ubuntu, AppArmor's `virt-aa-helper` adds each domain's disk paths to its
+profile automatically.
 
 > **UFW removed.** Earlier versions used `ufw allow in on <bridge>` to open the
 > bridge. The helper now installs scoped iptables INPUT accepts for exactly the

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -526,6 +527,33 @@ func ValidatePEMCertificate(certPEM string) error {
 			}
 			rest = bytes.TrimSpace(rest)
 		}
+	}
+	return nil
+}
+
+// PathWithin reports whether path is dir itself or lies beneath it. Both are
+// compared as given, so callers pass cleaned paths.
+func PathWithin(path, dir string) bool {
+	return path == dir || strings.HasPrefix(path, dir+string(filepath.Separator))
+}
+
+// ValidateStorageRoot checks a user-chosen disk storage root: absolute, already
+// clean (no "..", no trailing separator), not the filesystem root, and outside
+// reserved — the shared tree whose layout abox manages itself. It is the one
+// rule shared by the client (global storage_dir) and the privilege helper
+// (EnsureStorageRoot for a caller-owned root), so the two cannot drift.
+func ValidateStorageRoot(path, reserved string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("storage root must be an absolute path (got %q)", path)
+	}
+	if filepath.Clean(path) != path {
+		return fmt.Errorf("storage root must be a clean path (got %q, want %q)", path, filepath.Clean(path))
+	}
+	if path == string(filepath.Separator) {
+		return errors.New("storage root must not be the filesystem root")
+	}
+	if PathWithin(path, reserved) {
+		return fmt.Errorf("storage root must not be inside %s (got %q)", reserved, path)
 	}
 	return nil
 }

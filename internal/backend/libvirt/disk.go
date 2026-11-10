@@ -60,19 +60,33 @@ type DiskManager struct {
 	storageProvider backend.StorageEnforcerProvider
 }
 
-// ensureStorageRoot provisions the caller's per-user storage root via the
-// privilege helper (idempotent). No-op when no provider is injected (e.g. unit
-// tests using a temp storage dir), which keeps the disk paths unit-testable
-// without a helper.
-func (m *DiskManager) ensureStorageRoot(ctx context.Context) error {
+// ensureStorageRoot provisions the instance's storage root via the privilege
+// helper (idempotent). The root is the instance's persisted storage_dir — so an
+// existing instance keeps working after the user changes their configured
+// storage_dir — falling back to the default per-user root. No-op when no
+// provider is injected (e.g. unit tests using a temp storage dir), which keeps
+// the disk paths unit-testable without a helper.
+func (m *DiskManager) ensureStorageRoot(ctx context.Context, inst *config.Instance) error {
 	if m.storageProvider == nil {
 		return nil
+	}
+	root := config.LibvirtStorageDir()
+	if inst != nil && inst.StorageDir != "" {
+		root = inst.StorageDir
+	}
+	if root != config.LibvirtStorageDir() {
+		// A user-configured root must exist and be owned by the caller before
+		// the helper will group-share it with the QEMU process; create it as
+		// the calling user. Its mode is converged by the helper.
+		if err := os.MkdirAll(root, 0o750); err != nil {
+			return fmt.Errorf("failed to create storage root %s: %w", root, err)
+		}
 	}
 	enforcer, err := m.storageProvider()
 	if err != nil {
 		return fmt.Errorf("failed to obtain storage provider: %w", err)
 	}
-	if err := enforcer.EnsureStorageRoot(ctx, config.LibvirtStorageDir(), false); err != nil {
+	if err := enforcer.EnsureStorageRoot(ctx, root, false); err != nil {
 		return fmt.Errorf("failed to prepare storage root: %w", err)
 	}
 	return nil
@@ -168,7 +182,7 @@ func chmodIfOwned(path string, mode os.FileMode) error {
 
 // Create creates a new disk image from a base image using copy-on-write.
 func (m *DiskManager) Create(ctx context.Context, inst *config.Instance, paths *config.Paths) error {
-	if err := m.ensureStorageRoot(ctx); err != nil {
+	if err := m.ensureStorageRoot(ctx, inst); err != nil {
 		return err
 	}
 	// Ensure disk directory exists (setgid; group inherited from the root so the
@@ -221,7 +235,7 @@ func (m *DiskManager) Delete(ctx context.Context, paths *config.Paths) error {
 // EnsureBaseImage ensures the base image exists in the backend image store.
 // If the image is only in user cache, it copies it to the storage location.
 func (m *DiskManager) EnsureBaseImage(ctx context.Context, inst *config.Instance, paths *config.Paths) error {
-	if err := m.ensureStorageRoot(ctx); err != nil {
+	if err := m.ensureStorageRoot(ctx, inst); err != nil {
 		return err
 	}
 	storedBaseImage := filepath.Join(paths.BaseImages, inst.Base+".qcow2")
@@ -291,7 +305,7 @@ func (m *DiskManager) EnsureBaseImage(ctx context.Context, inst *config.Instance
 // the files OR the dir's setgid bit, that must be repaired by the privileged
 // helper's regroup step (`abox migrate` after a relocation), not here.
 func (m *DiskManager) EnsureAccess(ctx context.Context, inst *config.Instance, paths *config.Paths) error {
-	if err := m.ensureStorageRoot(ctx); err != nil {
+	if err := m.ensureStorageRoot(ctx, inst); err != nil {
 		return err
 	}
 	// Per-file modes are re-asserted only for files the caller still owns: a prior
@@ -320,7 +334,7 @@ func (m *DiskManager) EnsureAccess(ctx context.Context, inst *config.Instance, p
 // Creates the disk directory, copies the disk, and for snapshot imports,
 // rebases the disk to the local base image.
 func (m *DiskManager) Import(ctx context.Context, src string, inst *config.Instance, paths *config.Paths, snapshot bool) error {
-	if err := m.ensureStorageRoot(ctx); err != nil {
+	if err := m.ensureStorageRoot(ctx, inst); err != nil {
 		return err
 	}
 	// Ensure disk directory exists (setgid; group inherited from the root).

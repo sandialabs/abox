@@ -7,10 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
 
+	"github.com/sandialabs/abox/internal/backend"
+	"github.com/sandialabs/abox/internal/backend/mock"
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/qemuimg"
 )
@@ -651,5 +654,31 @@ func TestDiskExportFlattenInvokesConvert(t *testing.T) {
 	}
 	if !sawConvert {
 		t.Errorf("flatten Export should invoke qemu-img convert; calls=%v", calls)
+	}
+}
+
+// TestEnsureStorageRootUsesInstanceStorageDir verifies the helper is asked to
+// provision the instance's own persisted storage_dir (so changing the global
+// setting never strands an existing instance), that a custom root is created
+// as the calling user first, and that an unset storage_dir falls back to the
+// default per-user root.
+func TestEnsureStorageRootUsesInstanceStorageDir(t *testing.T) {
+	rec := &mock.StorageEnforcer{}
+	m := &DiskManager{storageProvider: func() (backend.StorageEnforcer, error) { return rec, nil }}
+
+	custom := filepath.Join(t.TempDir(), "scratch", "abox")
+	if err := m.ensureStorageRoot(context.Background(), &config.Instance{StorageDir: custom}); err != nil {
+		t.Fatalf("ensureStorageRoot(custom): %v", err)
+	}
+	if info, err := os.Stat(custom); err != nil || !info.IsDir() {
+		t.Errorf("custom root not created as the caller: %v", err)
+	}
+	if err := m.ensureStorageRoot(context.Background(), &config.Instance{}); err != nil {
+		t.Fatalf("ensureStorageRoot(default): %v", err)
+	}
+
+	want := []mock.StorageEnforcerCall{{Path: custom}, {Path: config.LibvirtStorageDir()}}
+	if !slices.Equal(rec.Calls, want) {
+		t.Errorf("EnsureStorageRoot calls = %+v, want %+v", rec.Calls, want)
 	}
 }

@@ -73,6 +73,14 @@ func TestIsLegacyStorage(t *testing.T) {
 			want:       false,
 		},
 		{
+			// A user-configured storage_dir (global config) lives outside the
+			// shared libvirt tree entirely.
+			name:       "user-configured storage_dir is not legacy",
+			storageDir: "/scratch/user/abox",
+			disk:       "/scratch/user/abox/instances/dev/disk.qcow2",
+			want:       false,
+		},
+		{
 			// Disk under the per-user subtree (empty storage_dir) is also not legacy.
 			name:       "disk under per-user subtree is not legacy",
 			storageDir: "",
