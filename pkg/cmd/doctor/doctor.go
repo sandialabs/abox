@@ -329,7 +329,7 @@ func runHostChecks(w io.Writer, name string) (results []CheckResult, inst *confi
 	// Check 6: Legacy disk location. Instances created before disk storage was
 	// de-privileged keep their image under the root-owned LibvirtImagesDir, which
 	// abox can no longer manage unprivileged (qemu-img/RemoveAll run as the user).
-	result = CheckResult{Name: "Disk location", Passed: true}
+	result = CheckResult{Name: "Disk location", Passed: true, Details: paths.DiskDir}
 	if config.IsLegacyStorage(inst, paths) {
 		result.Passed = false
 		result.Details = "disk is in the legacy root-owned location " + config.LibvirtImagesDir

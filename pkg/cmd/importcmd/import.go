@@ -133,7 +133,7 @@ func runImport(ctx context.Context, opts *Options, archivePath, newName string) 
 		if err != nil {
 			return fmt.Errorf("failed to get backend: %w", err)
 		}
-		paths, err := config.GetPathsWithStorage(name, be.StorageDir())
+		paths, err := config.GetPathsForNewInstance(name, be.StorageDir())
 		if err != nil {
 			return err
 		}
@@ -154,7 +154,7 @@ func runImport(ctx context.Context, opts *Options, archivePath, newName string) 
 // through that base at boot, so the base must exist either already-promoted in the
 // backend store (paths.BaseImages) or in the user cache (paths.UserBaseImages,
 // where `abox base pull` installs it and from which EnsureBaseImage promotes it).
-// paths MUST be resolved via GetPathsWithStorage(name, be.StorageDir()) so
+// paths MUST be resolved via GetPathsForNewInstance(name, be.StorageDir()) so
 // paths.BaseImages points at the store the rebase actually reads.
 func verifySnapshotBaseImage(paths *config.Paths, base string) error {
 	imageName := config.UserBaseImageName(base)
@@ -333,7 +333,7 @@ func allocateResources(opts *Options, name string, manifest *export.Manifest, w 
 		return nil, nil, nil, nil, fmt.Errorf("failed to get backend: %w", err)
 	}
 
-	paths, err := config.GetPathsWithStorage(name, be.StorageDir())
+	paths, err := config.GetPathsForNewInstance(name, be.StorageDir())
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -383,7 +383,7 @@ func allocateResources(opts *Options, name string, manifest *export.Manifest, w 
 		Disk:       manifest.Instance.Disk,
 		MACAddress: be.GenerateMAC(),
 		IPAddress:  config.DeriveHostIP(gateway),
-		StorageDir: be.StorageDir(),
+		StorageDir: paths.StorageDir,
 	}
 
 	return inst, paths, cleanup, be, nil

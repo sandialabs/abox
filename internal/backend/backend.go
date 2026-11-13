@@ -444,17 +444,19 @@ type PfProviderSetter interface{ SetPfProvider(PfEnforcerProvider) }
 // per-user storage root, owned by the caller and setgid to the QEMU runtime
 // group. All per-instance disk operations then run unprivileged.
 type StorageEnforcer interface {
-	// EnsureStorageRoot idempotently provisions the caller's per-user disk
-	// storage root at path (under /var/lib/libvirt/images/abox), so images
-	// created there are reachable and readable by the VM process via group
-	// membership. Idempotent.
+	// EnsureStorageRoot idempotently provisions the caller's disk storage root
+	// at path — either the default per-user root under
+	// /var/lib/libvirt/images/abox, or a user-configured storage_dir the caller
+	// already owns (which is group-shared, never chowned) — so images created
+	// there are reachable and readable by the VM process via group membership.
 	//
 	// When regroup is true, the helper ALSO walks the caller's own subtree and
 	// restores the QEMU group + modes on every entry — used by `abox migrate`
 	// after relocating files chowned them to the caller's primary group (losing
 	// the QEMU group). The regroup walk is always confined to the caller's own
 	// per-uid subtree (derived from the socket peer credentials, never from
-	// path). Per-instance create/import pass regroup=false.
+	// path), and is refused for a user-configured root. Per-instance
+	// create/import pass regroup=false.
 	EnsureStorageRoot(ctx context.Context, path string, regroup bool) error
 }
 

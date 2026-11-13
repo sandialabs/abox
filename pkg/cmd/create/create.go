@@ -318,8 +318,8 @@ func runCreate(ctx context.Context, opts *Options, box *boxfile.Boxfile, boxDir,
 		return fmt.Errorf("security monitoring (Tetragon) is only supported on amd64 guests, not %s; set monitor.enabled: false", monitorGuestArch)
 	}
 
-	// Get paths using the backend's storage directory
-	paths, err := config.GetPathsWithStorage(name, be.StorageDir())
+	// Get paths under the configured storage_dir, else the backend's default
+	paths, err := config.GetPathsForNewInstance(name, be.StorageDir())
 	if err != nil {
 		return err
 	}
@@ -572,7 +572,7 @@ func buildInstanceConfig(opts *Options, name string, paths *config.Paths, be bac
 		Version:    config.CurrentInstanceVersion,
 		Name:       name,
 		Backend:    be.Name(),
-		StorageDir: be.StorageDir(),
+		StorageDir: paths.StorageDir,
 		CPUs:       opts.CPUs,
 		Memory:     opts.Memory,
 		Base:       opts.Base,

@@ -12,29 +12,11 @@ import (
 	"testing"
 
 	"github.com/sandialabs/abox/internal/backend"
+	"github.com/sandialabs/abox/internal/backend/mock"
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 	"github.com/sandialabs/abox/pkg/cmdutil"
 )
-
-// fakeEnforcer is a test double for backend.StorageEnforcer that records each
-// EnsureStorageRoot call (path + regroup flag) so tests can assert the migrate
-// ordering (provision before relocate, regroup after) without the privilege
-// helper. An optional err makes a call fail.
-type fakeEnforcer struct {
-	calls []enforcerCall
-	err   error
-}
-
-type enforcerCall struct {
-	path    string
-	regroup bool
-}
-
-func (f *fakeEnforcer) EnsureStorageRoot(_ context.Context, path string, regroup bool) error {
-	f.calls = append(f.calls, enforcerCall{path: path, regroup: regroup})
-	return f.err
-}
 
 // requireTools skips when the coreutils the escalate ops shell out to are absent.
 // Passing tool="env" turns RunEscalated's `exec.Command(tool, args...)` into a
@@ -186,10 +168,10 @@ type migFixture struct {
 	inst       *config.Instance
 	oldPaths   *config.Paths
 	newPaths   *config.Paths
-	storageDir string        // destination per-user storage root (temp)
-	enforcer   *fakeEnforcer // records EnsureStorageRoot calls
-	calls      []string      // ordered names of the post-move seams invoked
-	audits     [][]any       // AuditInstance keysAndValues per call
+	storageDir string                // destination per-user storage root (temp)
+	enforcer   *mock.StorageEnforcer // records EnsureStorageRoot calls
+	calls      []string              // ordered names of the post-move seams invoked
+	audits     [][]any               // AuditInstance keysAndValues per call
 }
 
 // newMigFixture sets up temp dirs with a legacy base image and disk directory,
@@ -209,7 +191,7 @@ func newMigFixture(t *testing.T) *migFixture {
 	fx := &migFixture{
 		inst:       &config.Instance{Name: "dev", Base: "ubuntu", StorageDir: config.LibvirtImagesDir},
 		storageDir: newRoot,
-		enforcer:   &fakeEnforcer{},
+		enforcer:   &mock.StorageEnforcer{},
 		oldPaths: &config.Paths{
 			BaseImages: filepath.Join(oldRoot, "base"),
 			DiskDir:    filepath.Join(oldRoot, "instances", "dev"),
@@ -336,10 +318,10 @@ func TestMigrateOneHappyPath(t *testing.T) {
 	// relocation (regroup=false); the post-move regroup goes through the migRegroup
 	// seam (recorded as "regroup" in fx.calls above). So the enforcer itself sees
 	// exactly the one provision call here.
-	if len(fx.enforcer.calls) != 1 {
-		t.Fatalf("enforcer calls = %d, want 1 (provision before relocation)", len(fx.enforcer.calls))
+	if len(fx.enforcer.Calls) != 1 {
+		t.Fatalf("enforcer calls = %d, want 1 (provision before relocation)", len(fx.enforcer.Calls))
 	}
-	if got := fx.enforcer.calls[0]; got.path != fx.storageDir || got.regroup {
+	if got := fx.enforcer.Calls[0]; got.Path != fx.storageDir || got.Regroup {
 		t.Errorf("enforcer call = %+v, want provision {path:%q regroup:false}", got, fx.storageDir)
 	}
 }
@@ -355,13 +337,13 @@ func TestMigrateOneRequestsRegroup(t *testing.T) {
 	if err := migrateOne(&bytes.Buffer{}, nil, "dev"); err != nil {
 		t.Fatalf("migrateOne: %v", err)
 	}
-	if len(fx.enforcer.calls) != 2 {
-		t.Fatalf("enforcer calls = %+v, want 2 (provision + regroup)", fx.enforcer.calls)
+	if len(fx.enforcer.Calls) != 2 {
+		t.Fatalf("enforcer calls = %+v, want 2 (provision + regroup)", fx.enforcer.Calls)
 	}
-	if got := fx.enforcer.calls[0]; got.path != fx.storageDir || got.regroup {
+	if got := fx.enforcer.Calls[0]; got.Path != fx.storageDir || got.Regroup {
 		t.Errorf("first call = %+v, want provision {regroup:false}", got)
 	}
-	if got := fx.enforcer.calls[1]; got.path != fx.storageDir || !got.regroup {
+	if got := fx.enforcer.Calls[1]; got.Path != fx.storageDir || !got.Regroup {
 		t.Errorf("second call = %+v, want regroup {regroup:true}", got)
 	}
 }

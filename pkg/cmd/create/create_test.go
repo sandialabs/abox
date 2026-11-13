@@ -58,6 +58,7 @@ func registerMockBackend(t *testing.T, name string, be *mock.Backend) {
 func isolateDataHome(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 }
 
