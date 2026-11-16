@@ -6,8 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/sandialabs/abox/internal/daemon"
@@ -240,20 +238,7 @@ func checkAlreadyRunning(w io.Writer, daemonType, pidFile, socketPath string) bo
 // Any read/parse error, dead PID, or non-abox PID is treated as "not alive"
 // since each leads to the same caller action: clean up and start fresh.
 func isDaemonAlive(pidFile string) bool {
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		return false
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		return false
-	}
-	return isProcessRunning(pid) && daemon.IsAboxProcess(pid)
-}
-
-// isProcessRunning checks if a process with the given PID is still running.
-func isProcessRunning(pid int) bool {
-	return procutil.IsAlive(pid)
+	return daemon.AliveByPIDFile(pidFile)
 }
 
 // verifySocketPermissions checks that the socket has restrictive permissions.

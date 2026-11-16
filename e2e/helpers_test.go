@@ -402,6 +402,25 @@ func (ti *testInstance) filterMode() string {
 	return ""
 }
 
+// configValue returns the value of a top-level scalar key from the instance's
+// `abox config view` YAML output (e.g. "subnet", "ip_address", "gateway").
+// Indented (nested) lines are skipped so e.g. dns.port can never shadow a
+// top-level key. Fails the test if the key is missing.
+func (ti *testInstance) configValue(key string) string {
+	ti.t.Helper()
+	result := ti.env.mustRun("config", "view", ti.name)
+	for _, line := range strings.Split(result.Stdout, "\n") {
+		if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
+			continue
+		}
+		if v, ok := strings.CutPrefix(line, key+":"); ok {
+			return strings.Trim(strings.TrimSpace(v), `"'`)
+		}
+	}
+	ti.t.Fatalf("key %q not found in config view output:\n%s", key, result.Stdout)
+	return ""
+}
+
 // setFilterMode sets the filter mode (active or passive).
 func (ti *testInstance) setFilterMode(mode string) {
 	ti.t.Helper()
