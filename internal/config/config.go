@@ -88,14 +88,85 @@ const (
 // Each command runs to completion before the next starts.
 var lockFile File
 
-// GenerateBridgeName creates a valid Linux bridge name (max 15 chars).
-// Short names use "abox-<name>", long names use "ab-<hash>".
-func GenerateBridgeName(instanceName string) string {
+// GenerateBridgeName creates a valid Linux bridge name (max 15 chars, the Linux
+// IFNAMSIZ limit) that is unique per (uid, instance name). Bridge devices live in
+// the host-wide interface namespace and key the host egress iptables chains
+// (which hash the bridge name), so folding the uid into the hash keeps two users'
+// same-named instances from colliding on a shared host. The result is always
+// "abx-" + 11 hex chars = 15 chars and passes privilege.ValidateBridgeName. The
+// "abx-" prefix is deliberately disjoint from every legacy derivation ("abox-",
+// "ab-"): the privilege helper gives legacy-named bridges a weaker, teardown-only
+// authorization, and a shared namespace would let an offline hash search mint a
+// legacy name that collides with another user's CURRENT bridge. The helper
+// authorizes egress operations by recomputing this derivation from the socket
+// peer uid — keep the two in sync (see the sync test in internal/privilege).
+func GenerateBridgeName(uid int, instanceName string) string {
+	h := sha256.Sum256(fmt.Appendf(nil, "%d/%s", uid, instanceName))
+	return "abx-" + fmt.Sprintf("%x", h[:6])[:11] // 4 + 11 = 15 chars
+}
+
+// LegacyBridgeName reproduces the pre-multi-user bridge derivation (name-only):
+// short names "abox-<name>", long names "ab-<hash(name)>". Used to recognize and
+// tear down objects created by older abox versions, and by the single-user macOS
+// backends which keep the name-only scheme. Do not use for new libvirt instances.
+func LegacyBridgeName(instanceName string) string {
 	if len("abox-"+instanceName) <= 15 {
 		return "abox-" + instanceName
 	}
 	h := sha256.Sum256([]byte(instanceName))
 	return fmt.Sprintf("ab-%x", h[:6]) // 3 + 12 = 15 chars
+}
+
+// DomainNameFor returns the per-user libvirt domain name for an instance. The
+// libvirt domain namespace (qemu:///system) is shared by every user of the host,
+// so the owning uid is folded into the name to keep two users' same-named
+// instances distinct — and human-readable in `virsh list`.
+func DomainNameFor(uid int, instanceName string) string {
+	return fmt.Sprintf("abox-%d-%s", uid, instanceName)
+}
+
+// FilterNameFor returns the per-user libvirt nwfilter name for an instance
+// (shared host-global namespace, like DomainNameFor).
+func FilterNameFor(uid int, instanceName string) string {
+	return fmt.Sprintf("abox-%d-%s-traffic", uid, instanceName)
+}
+
+// LegacyDomainName and LegacyFilterName reproduce the pre-multi-user name-only
+// derivations, used to operate on (and tear down) objects created by older abox
+// versions, and by the single-user macOS backends.
+func LegacyDomainName(instanceName string) string { return "abox-" + instanceName }
+
+// LegacyFilterName returns the pre-multi-user nwfilter name (see LegacyDomainName).
+func LegacyFilterName(instanceName string) string { return "abox-" + instanceName + "-traffic" }
+
+// UsesCurrentNames reports whether this instance's host-global object names use
+// the per-user scheme. There is no persisted flag: the recorded bridge IS the
+// record of what was last created. An instance whose bridge matches the current
+// (uid, name) derivation was created (or auto-upgraded) under the per-user
+// scheme; anything else — a legacy name-only bridge, or a bridge recorded under
+// a different uid (copied instance dir) — still has objects under the OLD names,
+// which the Resolved* accessors keep targeting until `abox start` upgrades it.
+func (i *Instance) UsesCurrentNames() bool {
+	return i.Bridge == GenerateBridgeName(os.Getuid(), i.Name)
+}
+
+// ResolvedVMName returns the libvirt domain name this instance's objects live
+// under: the per-user name when the instance is on the current scheme, else the
+// legacy name-only derivation (see UsesCurrentNames).
+func (i *Instance) ResolvedVMName() string {
+	if i.UsesCurrentNames() {
+		return DomainNameFor(os.Getuid(), i.Name)
+	}
+	return LegacyDomainName(i.Name)
+}
+
+// ResolvedFilterName returns the libvirt nwfilter name this instance's objects
+// live under (see ResolvedVMName).
+func (i *Instance) ResolvedFilterName() string {
+	if i.UsesCurrentNames() {
+		return FilterNameFor(os.Getuid(), i.Name)
+	}
+	return LegacyFilterName(i.Name)
 }
 
 // AcquireLock acquires an exclusive lock on the abox data directory.
@@ -310,18 +381,19 @@ type Instance struct {
 	CPUs          int            `yaml:"cpus"`
 	Memory        int            `yaml:"memory"` // MB
 	Base          string         `yaml:"base"`
-	Subnet        string         `yaml:"subnet"`            // e.g., "10.10.10.0/24"
-	Gateway       string         `yaml:"gateway"`           // e.g., "10.10.10.1"
-	Bridge        string         `yaml:"bridge"`            // e.g., "abox-dev"
-	DNS           DNSConfig      `yaml:"dns"`               // DNS filtering configuration
-	HTTP          HTTPConfig     `yaml:"http,omitempty"`    // HTTP proxy filtering configuration
-	Monitor       MonitorConfig  `yaml:"monitor,omitempty"` // Tetragon monitoring configuration
-	Provision     []string       `yaml:"provision"`         // provision script paths
-	SSHKey        string         `yaml:"ssh_key"`           // path to SSH private key
-	User          string         `yaml:"user"`              // SSH username (default: ubuntu)
-	Disk          string         `yaml:"disk"`              // e.g., "20G"
-	MACAddress    string         `yaml:"mac_address"`       // VM MAC address
-	IPAddress     string         `yaml:"ip_address"`        // assigned IP (DHCP or static)
+	Subnet        string         `yaml:"subnet"`                  // e.g., "10.10.10.0/24"
+	SubnetPinned  bool           `yaml:"subnet_pinned,omitempty"` // subnet was user-chosen (--subnet / abox.yaml); never auto re-allocated
+	Gateway       string         `yaml:"gateway"`                 // e.g., "10.10.10.1"
+	Bridge        string         `yaml:"bridge"`                  // e.g., "abox-dev"
+	DNS           DNSConfig      `yaml:"dns"`                     // DNS filtering configuration
+	HTTP          HTTPConfig     `yaml:"http,omitempty"`          // HTTP proxy filtering configuration
+	Monitor       MonitorConfig  `yaml:"monitor,omitempty"`       // Tetragon monitoring configuration
+	Provision     []string       `yaml:"provision"`               // provision script paths
+	SSHKey        string         `yaml:"ssh_key"`                 // path to SSH private key
+	User          string         `yaml:"user"`                    // SSH username (default: ubuntu)
+	Disk          string         `yaml:"disk"`                    // e.g., "20G"
+	MACAddress    string         `yaml:"mac_address"`             // VM MAC address
+	IPAddress     string         `yaml:"ip_address"`              // assigned IP (DHCP or static)
 }
 
 // DefaultUserForBase returns the default SSH user for a given base image name.
@@ -387,6 +459,15 @@ type Paths struct {
 	MonitorRPCSocket string // monitor daemon RPC socket path
 	MonitorPIDFile   string // monitor daemon PID file
 	VMNetSocket      string // <Instance>/run/vmnet.sock (macOS vfkit: vmnet-helper's bound datagram socket)
+
+	// RuntimeDirErr records a failure to provision the private runtime directory
+	// the six runtime-dir fields above (DNS/HTTP/monitor sockets + PID files)
+	// point into — e.g. another user squatted the per-uid temp fallback. The
+	// paths are still computed so path-only consumers (list, remove's cleanup,
+	// status) keep working; anything that BINDS one of those sockets, spawns a
+	// daemon, or READS a PID file to signal it must check this first — files
+	// inside an unverified dir are attacker-controllable (see daemon.stopDaemon).
+	RuntimeDirErr error
 
 	// Logs directory (new structure)
 	LogsDir            string // ~/.local/share/abox/instances/<name>/logs/
@@ -458,8 +539,18 @@ func GetPathsWithStorage(name, storageDir string) (*Paths, error) {
 		return nil, errors.New("invalid instance name: path traversal detected")
 	}
 
-	// Runtime socket in XDG_RUNTIME_DIR (fall back to system temp for sockets)
-	runtimeDir := RuntimeDirOr(os.TempDir())
+	// Runtime sockets/PID files live in a per-user private directory
+	// (XDG_RUNTIME_DIR, or a verified per-uid 0700 dir under the system temp
+	// dir). Never the shared temp dir itself: two users' same-named instances
+	// would collide on the socket/PID filenames there, and daemon stale-socket
+	// cleanup would remove the other user's live socket. A provisioning failure
+	// is NOT fatal here — paths are still computed and the error is recorded in
+	// RuntimeDirErr for the socket-binding consumers to enforce, so a squatted
+	// fallback dir can't take down every path-only command (list, remove, ...).
+	runtimeDir, runtimeDirErr := privateRuntimeDirLenient()
+	if runtimeDirErr != nil {
+		runtimeDirErr = fmt.Errorf("no private runtime directory for instance sockets: %w", runtimeDirErr)
+	}
 	socketPath := filepath.Join(runtimeDir, fmt.Sprintf("abox-%s-dns.sock", name))
 
 	// Disk images stored in backend-accessible location
@@ -493,6 +584,7 @@ func GetPathsWithStorage(name, storageDir string) (*Paths, error) {
 		MonitorRPCSocket: filepath.Join(runtimeDir, fmt.Sprintf("abox-%s-monitor.sock", name)),
 		MonitorPIDFile:   filepath.Join(runtimeDir, fmt.Sprintf("abox-%s-monitor.pid", name)),
 		VMNetSocket:      filepath.Join(cleanInstanceDir, "run", "vmnet.sock"),
+		RuntimeDirErr:    runtimeDirErr,
 
 		// Logs directory (new structure)
 		LogsDir:            logsDir,
@@ -624,6 +716,49 @@ func RuntimeDirOr(fallback string) string {
 	return dir
 }
 
+// LegacyRuntimePath returns where a runtime file (socket/PID basename) lived
+// before sockets moved from the SHARED system temp dir into the per-uid private
+// fallback: the per-user runtime dir when present (same as today — no
+// difference), else the shared temp dir itself. Read-fallback only, for
+// managing daemons started by an older abox (mirrors vfkit's resolvePIDFile
+// precedent); writers must always use the Paths fields.
+func LegacyRuntimePath(basename string) string {
+	return filepath.Join(RuntimeDirOr(os.TempDir()), basename)
+}
+
+// PrivateRuntimeDir returns a per-user, owner-only directory for abox's runtime
+// sockets and PID files (the dns/http/monitor daemons). It prefers the per-user
+// runtime directory (XDG_RUNTIME_DIR, else /run/user/<uid>). Where none exists,
+// it falls back to privateRuntimeFallback (per-OS, see privateruntime_unix.go /
+// privateruntime_other.go): on unix a verified per-uid 0700 subdirectory of the
+// system temp directory — NEVER the shared temp directory itself: there, two
+// users' same-named instances would collide on the socket/PID filenames, and
+// daemon stale-socket cleanup would delete the other user's live socket. A
+// fallback that fails verification is a hard error rather than a silent
+// downgrade to shared paths.
+func PrivateRuntimeDir() (string, error) {
+	dir, err := privateRuntimeDirLenient()
+	if err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// privateRuntimeDirLenient is PrivateRuntimeDir, except that on failure it
+// still returns the directory it attempted alongside the error. GetPaths uses
+// it to keep computing socket paths (so path-only consumers like `abox list`
+// keep working when the fallback dir is squatted) while recording the error
+// for the socket-binding consumers to enforce (Paths.RuntimeDirErr).
+func privateRuntimeDirLenient() (string, error) {
+	// The per-user runtime dir (systemd-provisioned 0700) is trusted as-is,
+	// matching the previous behavior of these socket paths; the strict squat
+	// verification in the unix fallback is for the shared temp dir only.
+	if dir, err := RuntimeDir(); err == nil {
+		return dir, nil
+	}
+	return privateRuntimeFallback()
+}
+
 // SecureRuntimeDir returns the platform's per-user secure runtime directory for
 // hosting the privilege-helper socket, after asserting it is safe to use.
 //
@@ -658,7 +793,10 @@ func SecureRuntimeDir() (string, error) {
 // assertSecureRuntimeDir verifies dir exists, is a directory, is owned by the
 // invoking UID, and is not group/other-writable. It is the shared guard used by
 // the helper socket spawn and external-socket validation paths so a
-// world-writable directory (e.g. /tmp) is refused with a clear error.
+// world-writable directory (e.g. /tmp) is refused with a clear error. It stats
+// through the fsys test seam (unlike assertPrivateFallbackDir, which must
+// Lstat the real filesystem — see privateruntime_unix.go); the shared
+// ownership/permission core is assertOwnedPrivateDir.
 func assertSecureRuntimeDir(dir string) error {
 	info, err := fsys.Stat(dir)
 	if err != nil {
@@ -667,23 +805,33 @@ func assertSecureRuntimeDir(dir string) error {
 		}
 		return fmt.Errorf("stat secure runtime directory %s: %w", dir, err)
 	}
+	// 0o022: reject group/other WRITABLE — only the owner may be able to create
+	// the helper socket there (read bits are fine for this directory).
+	return assertOwnedPrivateDir(info, 0o022,
+		fmt.Sprintf("secure runtime directory %s", dir),
+		"refusing to use it for the privilege helper socket")
+}
+
+// assertOwnedPrivateDir is the shared trust core of assertSecureRuntimeDir and
+// assertPrivateFallbackDir: the already-stat'ed entry must be a directory, have
+// no permission bits from mask, and be owned by the invoking user. Each caller
+// keeps its own stat discipline (fsys seam vs real-filesystem Lstat + symlink
+// rejection) and passes its own label/remediation; the checks themselves must
+// not diverge. FileOwner reports ok=false where ownership cannot be determined;
+// that fails closed rather than trusting an unowned directory.
+func assertOwnedPrivateDir(info os.FileInfo, mask os.FileMode, label, remediation string) error {
 	if !info.IsDir() {
-		return fmt.Errorf("secure runtime directory %s is not a directory", dir)
+		return fmt.Errorf("%s is not a directory; %s", label, remediation)
 	}
-	// Reject group- or other-writable directories: only the owner may be able to
-	// create the helper socket there.
-	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("secure runtime directory %s is group/other-writable (mode %o); refusing to use it for the privilege helper socket", dir, info.Mode().Perm())
+	if info.Mode().Perm()&mask != 0 {
+		return fmt.Errorf("%s is accessible to other users (mode %o); %s", label, info.Mode().Perm(), remediation)
 	}
-	// Ownership check: the directory must belong to the invoking user. FileOwner
-	// reports ok=false where ownership cannot be determined; treat that as a
-	// failure (fail closed) rather than trusting an unowned directory.
 	uidOwner, _, ok := sysutil.FileOwner(info)
 	if !ok {
-		return fmt.Errorf("cannot determine owner of secure runtime directory %s (ownership checks unsupported on this platform)", dir)
+		return fmt.Errorf("cannot determine owner of %s (ownership checks unsupported on this platform)", label)
 	}
 	if uidOwner != os.Getuid() {
-		return fmt.Errorf("secure runtime directory %s is not owned by the current user (uid %d)", dir, os.Getuid())
+		return fmt.Errorf("%s is owned by uid %d, not the current user (uid %d); %s", label, uidOwner, os.Getuid(), remediation)
 	}
 	return nil
 }
@@ -1016,6 +1164,45 @@ func SetRouteProbe(f func(gatewayIP string) bool) { routeProbe = f }
 // has installed a real prober.
 func RouteConflicts(gatewayIP string) bool { return routeProbe(gatewayIP) }
 
+// definedSubnetsProbe returns the IPv4 CIDRs already claimed by networks DEFINED
+// on the shared host backend (e.g. all libvirt networks, across every user).
+// Unlike UsedInstanceSubnets (which sees only the calling user's own instance
+// configs) and the route probe (which sees only active networks), this covers
+// another user's defined-but-stopped network — the remaining cross-user
+// double-book window. CIDRs come back at their real prefix length so a candidate
+// inside a WIDER network is caught too. Defaults to a no-op so unit tests never
+// shell out; the real binary wires a virsh-backed prober via
+// SetDefinedSubnetsProbe in main. Must fail-open (nil on error) so a flaky probe
+// never blocks allocation.
+var definedSubnetsProbe = func() []*net.IPNet { return nil }
+
+// SetDefinedSubnetsProbe installs the host-defined-network subnet prober used by
+// subnet allocation to skip ranges already claimed by any user's defined network
+// on the shared backend. Called once from the abox binary's main; no-op under test.
+func SetDefinedSubnetsProbe(f func() []*net.IPNet) { definedSubnetsProbe = f }
+
+// DefinedSubnets returns the subnets claimed by networks defined on the shared
+// host backend (fail-open: nil when no prober is wired or probing fails). Exposed
+// so network create can re-check for a cross-user double-book after defining.
+func DefinedSubnets() []*net.IPNet { return definedSubnetsProbe() }
+
+// SubnetOverlapsDefined reports whether the candidate CIDR overlaps any of the
+// given networks. Containment in BOTH directions (rather than an equality test
+// on the CIDR string) is what catches a candidate nested in a WIDER network —
+// e.g. a host network on 10.10.0.0/16 covers every /24 in the default pool — and
+// a NARROWER network nested in the candidate — e.g. a host 10.10.10.128/25
+// inside a /24 candidate. (For CIDRs, any overlap means one contains the
+// other's base address, so the two containment tests are exhaustive.)
+func SubnetOverlapsDefined(subnet string, nets []*net.IPNet) bool {
+	_, candidate, err := net.ParseCIDR(subnet)
+	if err != nil {
+		return false
+	}
+	return slices.ContainsFunc(nets, func(n *net.IPNet) bool {
+		return n != nil && (n.Contains(candidate.IP) || candidate.Contains(n.IP))
+	})
+}
+
 // AllocateSubnet finds the next available subnet for a new instance.
 // If pool is empty, it uses the global config pool or the default "10.10.0.0/16".
 func AllocateSubnet(pool string) (subnet, gateway string, thirdOctet int, err error) {
@@ -1046,15 +1233,24 @@ func AllocateSubnet(pool string) (subnet, gateway string, thirdOctet int, err er
 		return "", "", 0, err
 	}
 
+	// Ranges claimed by networks DEFINED on the shared host (all users' networks,
+	// including stopped ones) so two users can't double-book a /24 that the route
+	// probe would miss while the other's network is down. Fail-open (nil).
+	definedNets := definedSubnetsProbe()
+
 	// Try third octets starting from 10. Skip subnets already claimed by another
-	// instance (checked first, so claimed subnets cost zero route probes) and, via
-	// the fail-open host-route probe, any /24 the host already routes elsewhere
-	// (e.g. a VPN split-include) so the guest stays reachable from the host.
+	// instance (checked first, so claimed subnets cost zero probes), any /24 that
+	// overlaps a network already defined on the host, and, via the fail-open
+	// host-route probe, any /24 the host already routes elsewhere (e.g. a VPN
+	// split-include) so the guest stays reachable from the host.
 	for i := 10; i < 255; i++ {
 		candidateSubnet := fmt.Sprintf("%d.%d.%d.0/24", poolIP[0], poolIP[1], i)
 		candidateGateway := fmt.Sprintf("%d.%d.%d.1", poolIP[0], poolIP[1], i)
 
-		if !usedSubnets[candidateSubnet] && !routeProbe(candidateGateway) {
+		if usedSubnets[candidateSubnet] || SubnetOverlapsDefined(candidateSubnet, definedNets) {
+			continue
+		}
+		if !routeProbe(candidateGateway) {
 			return candidateSubnet, candidateGateway, i, nil
 		}
 	}

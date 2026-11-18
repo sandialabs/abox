@@ -30,6 +30,20 @@ The helper exposes a minimal `Egress` gRPC service — 6 RPCs total:
 | `Ping`     | health check (no auth required) |
 | `Shutdown` | graceful helper shutdown |
 
+Egress operations are **ownership-checked**: host iptables is global, so the
+helper refuses to touch a bridge the caller does not own. Each request carries
+the instance name; the helper recomputes the caller's bridge from its socket
+peer uid (SO_PEERCRED — never from request contents) plus that name and
+requires an exact match, the same "allowlist of one" model `EnsureStorageRoot`
+uses for storage paths. A bridge still on the legacy pre-multi-user name-only
+scheme cannot be ownership-verified: it is allowed for `Remove`/`Verify` only
+(audit-logged), so old instances stay stoppable until `abox start` upgrades
+them to per-user names, and refused for `Apply`. VMware `vmnetN` interfaces
+(shared VMware infrastructure, experimental backend) are allowed with an audit
+record. Because the request field is new, **abox and abox-helper must be
+upgraded together**: an old abox sends no instance name, which a new helper
+refuses with a version-mismatch error.
+
 ## Disk storage ownership
 
 The per-user storage root is created **once** by the privileged helper

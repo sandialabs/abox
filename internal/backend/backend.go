@@ -13,6 +13,7 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -304,6 +305,11 @@ type EgressPolicy struct {
 	HTTPPort     int    // httpfilter proxy port
 	GuestDNSPort int    // guest-facing DNS port that is redirected to DNSPort (normally 53)
 	Gateway      string // bridge gateway IPv4; host-side accepts are pinned to this dest
+	// Instance is the bare instance name the enforced bridge was derived from.
+	// The privilege helper authorizes each egress request by recomputing the
+	// caller-owned bridge from its socket peer uid plus this name — host iptables
+	// is global, so without it one user could rewrite another user's rules.
+	Instance string
 }
 
 // standardDNSPort is the guest-facing DNS port (what the guest sends to) that is
@@ -318,6 +324,7 @@ func BuildEgressPolicy(inst *config.Instance) EgressPolicy {
 		HTTPPort:     inst.HTTP.Port,
 		GuestDNSPort: standardDNSPort,
 		Gateway:      inst.Gateway,
+		Instance:     inst.Name,
 	}
 }
 
@@ -414,6 +421,24 @@ type EgressEnforcerProvider func() (EgressEnforcer, error)
 type EgressProviderSetter interface {
 	SetEgressProvider(EgressEnforcerProvider)
 }
+
+// ResourceNameUpgrader is an optional backend capability: moving an instance
+// created under the legacy shared naming scheme (host-global object names derived
+// from the instance name alone) to the current per-user scheme, so two users'
+// same-named instances stop colliding on a shared host. The libvirt backend
+// implements it; the single-user macOS backends do not. Callers (start)
+// type-assert and invoke it while the VM is stopped; it reports whether an
+// upgrade was performed.
+type ResourceNameUpgrader interface {
+	UpgradeResourceNames(ctx context.Context, inst *config.Instance, paths *config.Paths) (bool, error)
+}
+
+// ErrSubnetConflict reports that a just-defined network turned out to overlap a
+// subnet claimed by another network defined on the shared host backend — the
+// probe→define race two users' concurrent creates can hit. The definer removes
+// its own network before returning this; callers (create) re-allocate a subnet
+// and retry.
+var ErrSubnetConflict = errors.New("subnet already claimed by another defined network")
 
 // PfEnforcer is the privileged pfctl surface used by the macOS egress controller.
 // It mirrors EgressEnforcer's role (the privileged host-side half, in

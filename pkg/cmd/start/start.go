@@ -100,7 +100,23 @@ func runStart(ctx context.Context, opts *Options, name string) error {
 		return recoverDaemons(w, be, name, inst, paths, opts.Brief)
 	}
 
-	if err := ensureNetwork(ctx, w, be, inst); err != nil {
+	// Instances created by an older abox still have host-global object names
+	// derived from the instance name alone, which collide with another user's
+	// same-named instance on a shared host. Renaming needs no privileges and only
+	// requires a stopped VM — exactly the state here — so upgrade transparently:
+	// tear down the old-named objects and record the per-user bridge; the normal
+	// start below recreates everything under the per-user names.
+	if up, ok := be.(backend.ResourceNameUpgrader); ok {
+		upgraded, err := upgradeResourceNamesLocked(ctx, up, inst, paths)
+		if err != nil {
+			return fmt.Errorf("failed to upgrade %q to per-user resource names: %w", name, err)
+		}
+		if upgraded && !opts.Brief {
+			fmt.Fprintf(w, "Upgraded %q to per-user resource names.\n", name)
+		}
+	}
+
+	if err := ensureNetwork(ctx, w, be, inst, paths); err != nil {
 		return err
 	}
 
@@ -130,6 +146,20 @@ func runStart(ctx context.Context, opts *Options, name string) error {
 	return nil
 }
 
+// upgradeResourceNamesLocked runs the resource-name upgrade under the data-dir
+// lock: it tears down shared libvirt state and commits a config.Save, the same
+// mutate-shared-state-then-save sequence create/remove/ensureNetwork serialize
+// with this lock — unserialized, two concurrent starts of the same legacy
+// instance could interleave (one tearing down what the other is mid-verifying)
+// and the commit could clobber a concurrent subnet re-allocation save.
+func upgradeResourceNamesLocked(ctx context.Context, up backend.ResourceNameUpgrader, inst *config.Instance, paths *config.Paths) (bool, error) {
+	if err := config.AcquireLock(); err != nil {
+		return false, fmt.Errorf("failed to acquire lock: %w", err)
+	}
+	defer func() { _ = config.ReleaseLock() }()
+	return up.UpgradeResourceNames(ctx, inst, paths)
+}
+
 // ensureNetwork ensures the instance's network exists and is active.
 //
 // The exists-check-then-create span holds config.AcquireLock, mirroring create and
@@ -140,16 +170,23 @@ func runStart(ctx context.Context, opts *Options, name string) error {
 // registry entry can exist while the vmnet itself was removed out-of-band), so
 // without the lock two concurrent starts — or a start racing create/remove — could
 // interleave and clobber a peer instance's network config.
-func ensureNetwork(ctx context.Context, w io.Writer, be backend.Backend, inst *config.Instance) error {
+func ensureNetwork(ctx context.Context, w io.Writer, be backend.Backend, inst *config.Instance, paths *config.Paths) error {
 	if err := config.AcquireLock(); err != nil {
 		return fmt.Errorf("failed to acquire lock: %w", err)
 	}
 	defer func() { _ = config.ReleaseLock() }()
 
 	if !be.Network().Exists(inst.Bridge) {
+		// Shared conflict-retry helper: start can hit ErrSubnetConflict when
+		// another user's network claimed the recorded subnet while this
+		// instance's network was undefined (e.g. across the resource-name
+		// upgrade). Re-homing an auto-allocated subnet is safe at start time —
+		// everything guest-facing downstream (cloud-init ISO, domain XML,
+		// waitForReady) is regenerated from the instance config on every start,
+		// and ensureNetwork runs before all of it.
 		fmt.Fprintln(w, "Creating network...")
-		if err := be.Network().Create(ctx, inst); err != nil {
-			return fmt.Errorf("failed to create network: %w", err)
+		if err := instance.CreateNetworkWithRetry(ctx, w, be, inst, paths); err != nil {
+			return err
 		}
 	}
 	if !be.Network().IsActive(inst.Bridge) {
@@ -187,6 +224,10 @@ var (
 // re-assert it here via ApplyFiltered (Define+Apply are idempotent and no-op
 // when the rule set is already in force).
 func recoverDaemons(w io.Writer, be backend.Backend, name string, inst *config.Instance, paths *config.Paths, brief bool) error {
+	// Same gate as startFilters: recovery re-binds the same sockets.
+	if paths.RuntimeDirErr != nil {
+		return paths.RuntimeDirErr
+	}
 	if err := startDNSFilterFn(w, name, paths, inst.DNS.LogLevel); err != nil {
 		return fmt.Errorf("failed to recover DNS filter: %w", err)
 	}
@@ -199,8 +240,19 @@ func recoverDaemons(w io.Writer, be backend.Backend, name string, inst *config.I
 		}
 	}
 	// Re-assert host egress rules (only for backends that enforce egress).
+	// On a backend with per-user resource names (the ResourceNameUpgrader gate,
+	// mirroring runStart's upgrade block), a legacy-named instance can't: the
+	// privilege helper refuses to install rules on a bridge whose ownership it
+	// cannot verify, and the name upgrade that would fix that needs a stopped VM
+	// — which this one, by definition, isn't. Skip with guidance rather than
+	// failing the whole start: the daemons above are recovered either way, and
+	// existing rules are left untouched. (The single-user macOS/vmware backends
+	// keep legacy names deliberately and are not gated.)
 	if be.EgressController() != nil {
-		if err := applyFilteredFn(w, name, be, brief); err != nil {
+		if _, perUser := be.(backend.ResourceNameUpgrader); perUser && !inst.UsesCurrentNames() {
+			fmt.Fprintf(w, "WARNING: %q still uses legacy resource names; host egress rules were not re-asserted.\n"+
+				"Run `abox stop %s && abox start %s` to upgrade it and restore enforcement.\n", name, name, name)
+		} else if err := applyFilteredFn(w, name, be, brief); err != nil {
 			return fmt.Errorf("failed to re-assert egress enforcement: %w", err)
 		}
 	}
@@ -212,6 +264,12 @@ func recoverDaemons(w io.Writer, be backend.Backend, name string, inst *config.I
 
 // startFilters starts DNS and HTTP filter daemons and sets up their resources.
 func startFilters(ctx context.Context, w io.Writer, f *factory.Factory, be backend.Backend, name string, inst *config.Instance, paths *config.Paths) error {
+	// The daemons below bind sockets under the private runtime dir; a
+	// provisioning failure (e.g. a squatted per-uid temp fallback) is recorded
+	// rather than failing GetPaths, and enforced here where it actually matters.
+	if paths.RuntimeDirErr != nil {
+		return paths.RuntimeDirErr
+	}
 	// Start dnsfilter daemon
 	fmt.Fprintln(w, "Starting DNS filter...")
 	if err := startDNSFilter(w, name, paths, inst.DNS.LogLevel); err != nil {

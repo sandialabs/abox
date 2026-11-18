@@ -4,10 +4,13 @@ package libvirt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/sandialabs/abox/internal/backend"
 )
 
 func TestNetworkCreateDefinesNetworkXML(t *testing.T) {
@@ -157,5 +160,69 @@ func TestNetworkExistsErrorIsFalse(t *testing.T) {
 	m := &NetworkManager{}
 	if m.Exists("abox-dev") {
 		t.Error("Exists should be false on virsh error")
+	}
+}
+
+// TestNetworkCreate_BacksOutOnSubnetConflict: when the post-define probe finds
+// ANOTHER defined network overlapping the just-defined subnet (two users raced
+// probe->define on the same /24), Create undefines its own network and returns
+// backend.ErrSubnetConflict so the caller can re-allocate.
+func TestNetworkCreate_BacksOutOnSubnetConflict(t *testing.T) {
+	inst := fullInstance() // subnet 10.10.10.0/24
+	const otherNet = `<network><name>ab-other</name><bridge name='ab-other'/>` +
+		`<ip address='10.10.10.1' netmask='255.255.255.0'/></network>`
+	mock := installMock(t, func(name string, args ...string) (string, error) {
+		if len(args) < 3 {
+			return "", nil
+		}
+		switch args[2] {
+		case "net-list":
+			// After our define, the shared libvirtd shows our network AND another
+			// user's network on the same /24.
+			return inst.Bridge + "\nab-other\n", nil
+		case "net-dumpxml":
+			if args[3] == "ab-other" {
+				return otherNet, nil
+			}
+		}
+		return "", nil
+	}, nil)
+
+	m := &NetworkManager{}
+	err := m.Create(context.Background(), inst)
+	if !errors.Is(err, backend.ErrSubnetConflict) {
+		t.Fatalf("Create error = %v, want backend.ErrSubnetConflict", err)
+	}
+	// Our own just-defined network must be backed out.
+	if findCall(mock.Calls, "net-undefine") == nil {
+		t.Errorf("Create must undefine its own network on conflict; calls=%+v", mock.Calls)
+	}
+}
+
+// TestNetworkCreate_IgnoresOwnSubnet: the post-define probe must not treat the
+// network Create just defined as a conflict with itself.
+func TestNetworkCreate_IgnoresOwnSubnet(t *testing.T) {
+	inst := fullInstance()
+	ownNet := `<network><name>` + inst.Bridge + `</name><bridge name='` + inst.Bridge + `'/>` +
+		`<ip address='10.10.10.1' netmask='255.255.255.0'/></network>`
+	mock := installMock(t, func(name string, args ...string) (string, error) {
+		if len(args) < 3 {
+			return "", nil
+		}
+		switch args[2] {
+		case "net-list":
+			return inst.Bridge + "\n", nil
+		case "net-dumpxml":
+			return ownNet, nil
+		}
+		return "", nil
+	}, nil)
+
+	m := &NetworkManager{}
+	if err := m.Create(context.Background(), inst); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if findCall(mock.Calls, "net-undefine") != nil {
+		t.Errorf("Create must not back out over its own subnet; calls=%+v", mock.Calls)
 	}
 }

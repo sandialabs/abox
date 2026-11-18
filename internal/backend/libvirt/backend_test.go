@@ -3,6 +3,7 @@
 package libvirt
 
 import (
+	"os"
 	"testing"
 
 	"github.com/sandialabs/abox/internal/config"
@@ -10,63 +11,29 @@ import (
 
 func TestResourceNames(t *testing.T) {
 	b := &Backend{}
+	uid := os.Getuid()
 
-	tests := []struct {
-		name         string
-		instanceName string
-		wantInstance string
-		wantVM       string
-		wantNetwork  string
-	}{
-		{
-			name:         "simple",
-			instanceName: "dev",
-			wantInstance: "dev",
-			wantVM:       "abox-dev",
-			wantNetwork:  config.GenerateBridgeName("dev"),
-		},
-		{
-			name:         "with-hyphen",
-			instanceName: "my-instance",
-			wantInstance: "my-instance",
-			wantVM:       "abox-my-instance",
-			wantNetwork:  config.GenerateBridgeName("my-instance"),
-		},
-		{
-			name:         "with-underscore",
-			instanceName: "my_instance",
-			wantInstance: "my_instance",
-			wantVM:       "abox-my_instance",
-			wantNetwork:  config.GenerateBridgeName("my_instance"),
-		},
-		{
-			name:         "with-numbers",
-			instanceName: "dev123",
-			wantInstance: "dev123",
-			wantVM:       "abox-dev123",
-			wantNetwork:  config.GenerateBridgeName("dev123"),
-		},
-		{
-			name:         "long-name",
-			instanceName: "very-long-instance-name-for-testing",
-			wantInstance: "very-long-instance-name-for-testing",
-			wantVM:       "abox-very-long-instance-name-for-testing",
-			wantNetwork:  config.GenerateBridgeName("very-long-instance-name-for-testing"),
-		},
-	}
+	// ResourceNames describes a NEW instance: per-user domain and bridge, so two
+	// users' same-named instances never collide on the shared libvirtd/interface
+	// namespaces.
+	for _, instanceName := range []string{
+		"dev",
+		"my-instance",
+		"my_instance",
+		"dev123",
+		"very-long-instance-name-for-testing",
+	} {
+		t.Run(instanceName, func(t *testing.T) {
+			names := b.ResourceNames(instanceName)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			names := b.ResourceNames(tt.instanceName)
-
-			if names.Instance != tt.wantInstance {
-				t.Errorf("ResourceNames(%q).Instance = %q, want %q", tt.instanceName, names.Instance, tt.wantInstance)
+			if names.Instance != instanceName {
+				t.Errorf("ResourceNames(%q).Instance = %q, want %q", instanceName, names.Instance, instanceName)
 			}
-			if names.VM != tt.wantVM {
-				t.Errorf("ResourceNames(%q).VM = %q, want %q", tt.instanceName, names.VM, tt.wantVM)
+			if want := config.DomainNameFor(uid, instanceName); names.VM != want {
+				t.Errorf("ResourceNames(%q).VM = %q, want %q", instanceName, names.VM, want)
 			}
-			if names.Network != tt.wantNetwork {
-				t.Errorf("ResourceNames(%q).Network = %q, want %q", tt.instanceName, names.Network, tt.wantNetwork)
+			if want := config.GenerateBridgeName(uid, instanceName); names.Network != want {
+				t.Errorf("ResourceNames(%q).Network = %q, want %q", instanceName, names.Network, want)
 			}
 		})
 	}

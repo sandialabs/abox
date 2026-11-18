@@ -19,3 +19,22 @@ func skipOnWindows(t *testing.T) {
 		t.Skip("test fixtures assume POSIX path semantics; not applicable on Windows")
 	}
 }
+
+// TestPrivateRuntimeDir_NonUnixFallback pins the Windows behavior: the fallback
+// is the per-user %TEMP% as-is — no unix verification (Go reports a fixed 0777
+// mode for Windows directories and uids are not applicable), so PrivateRuntimeDir
+// (and therefore GetPaths) must never hard-fail there. CI runs this package on
+// windows-latest; this test is the explicit gate, TestGetPaths_PathTraversal the
+// implicit one.
+func TestPrivateRuntimeDir_NonUnixFallback(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("pins the !unix fallback; meaningful only on Windows")
+	}
+	dir, err := PrivateRuntimeDir()
+	if err != nil {
+		t.Fatalf("PrivateRuntimeDir on Windows: %v", err)
+	}
+	if dir == "" {
+		t.Fatal("PrivateRuntimeDir on Windows returned an empty directory")
+	}
+}

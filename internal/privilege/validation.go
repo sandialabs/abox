@@ -16,12 +16,14 @@ var safeBridgeChars = regexp.MustCompile(`^[a-zA-Z0-9\-]+$`)
 var safeVMNetName = regexp.MustCompile(`^vmnet[0-9]+$`)
 
 // ValidateBridgeName validates a bridge interface name.
-// Must start with "abox-" or "ab-" prefix (ab- is used for hashed names
-// when instance names are too long for the 15-char Linux bridge limit), or be a
-// VMware vmnet interface name ("vmnetN") used by the VMware backend.
+// Must start with "abx-" (the per-user hashed derivation), "abox-" or "ab-"
+// (the legacy name-only derivations: plain, and hashed for instance names too
+// long for the 15-char Linux bridge limit), or be a VMware vmnet interface name
+// ("vmnetN") used by the VMware backend. The prefixes are deliberately disjoint
+// so the helper can tell per-user bridges from legacy ones by name alone.
 func ValidateBridgeName(name string) error {
-	if !strings.HasPrefix(name, "abox-") && !strings.HasPrefix(name, "ab-") && !safeVMNetName.MatchString(name) {
-		return fmt.Errorf("bridge name must start with 'abox-' or 'ab-', or be a 'vmnetN' name: %s", name)
+	if !strings.HasPrefix(name, "abx-") && !strings.HasPrefix(name, "abox-") && !strings.HasPrefix(name, "ab-") && !safeVMNetName.MatchString(name) {
+		return fmt.Errorf("bridge name must start with 'abx-', 'abox-' or 'ab-', or be a 'vmnetN' name: %s", name)
 	}
 
 	// Linux bridge names are limited to IFNAMSIZ (16 bytes including null terminator = 15 chars)

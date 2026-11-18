@@ -450,6 +450,9 @@ func dropArgs(verb, chain string) []string {
 // contents rebuilt cleanly; on any failure all rules for the bridge are flushed so
 // no partial state is left behind.
 func (s *EgressServer) Apply(ctx context.Context, req *rpc.EgressReq) (*rpc.Empty, error) {
+	if err := authorizeBridge(s.allowedUID, req, egressApply); err != nil {
+		return nil, err
+	}
 	r, err := resolveRules(req, false)
 	if err != nil {
 		return nil, err
@@ -624,6 +627,11 @@ func (s *EgressServer) buildFwdChain(r *ruleParams) error {
 // Verify reports whether the complete egress rule set described by the request
 // is currently in force for the bridge (drift detection for doctor).
 func (s *EgressServer) Verify(ctx context.Context, req *rpc.EgressReq) (*rpc.BoolMsg, error) {
+	// Verify gets the same legacy leniency as Remove: it only reads rule state,
+	// and doctor must stay able to inspect a legacy-named (pre-multi-user) instance.
+	if err := authorizeBridge(s.allowedUID, req, egressVerify); err != nil {
+		return nil, err
+	}
 	r, err := resolveRules(req, false)
 	if err != nil {
 		return nil, err
@@ -683,6 +691,9 @@ func (s *EgressServer) addNATRedirect(r *ruleParams, proto string) error {
 // Remove flushes the host-side egress rules for a bridge (idempotent). The
 // request's ports scope the flush to abox's own rules.
 func (s *EgressServer) Remove(ctx context.Context, req *rpc.EgressReq) (*rpc.Empty, error) {
+	if err := authorizeBridge(s.allowedUID, req, egressRemove); err != nil {
+		return nil, err
+	}
 	// Lenient: a teardown of an instance that never fully started may carry
 	// zero/low ports; flush whatever abox installed rather than failing.
 	r, err := resolveRules(req, true)

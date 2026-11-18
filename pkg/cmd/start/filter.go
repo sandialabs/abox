@@ -58,6 +58,12 @@ func startFilter(w io.Writer, name string, filterType FilterType, paths FilterPa
 		return nil
 	}
 
+	// A daemon started by an older abox may still be running with its files at
+	// the legacy shared-tmp location — invisible to the check above and holding
+	// the instance's port, so the fresh spawn below would fail to bind. Stop it
+	// so the respawn takes over at the private-dir paths.
+	reclaimLegacyDaemon(w, string(filterType), paths.PIDFile, paths.Socket)
+
 	// The PID file says no daemon is alive, but on macOS a real daemon can still
 	// be running with a purged/stale PID file and holding its port. Reclaim any
 	// such orphan so the fresh spawn below can bind. No-op off darwin.
@@ -105,6 +111,10 @@ func startDaemon(w io.Writer, name string, daemonType string, paths DaemonPaths)
 	if checkAlreadyRunning(w, daemonType, paths.PIDFile, paths.Socket) {
 		return nil
 	}
+
+	// Stop a daemon left running at the legacy shared-tmp paths by an older
+	// abox (see startFilter).
+	reclaimLegacyDaemon(w, daemonType, paths.PIDFile, paths.Socket)
 
 	// Reclaim an orphaned daemon holding this instance's socket/port after a
 	// $TMPDIR purge left its PID file stale (macOS only; no-op elsewhere).
@@ -195,6 +205,34 @@ func startDaemonProcess(opts daemonOptions) error {
 	}
 
 	return fmt.Errorf("%s daemon started but socket not ready", opts.daemonType)
+}
+
+// reclaimLegacyDaemon stops a still-running daemon whose socket/PID files live
+// at the pre-private-dir legacy location (shared system temp dir), so a fresh
+// spawn at the new paths can bind the instance's ports. The legacy location is
+// consulted DIRECTLY (not through a primary-first resolver, which a stale
+// primary file could shadow), and only files owned by the current user count,
+// so another user's same-named daemon is never touched. No-op when the legacy
+// location IS the primary one (a present runtime dir) or holds nothing.
+func reclaimLegacyDaemon(w io.Writer, daemonType, pidFile, socketPath string) {
+	legacyPID := daemon.LegacyOwnedRuntimeFile(filepath.Base(pidFile))
+	legacySocket := daemon.LegacyOwnedRuntimeFile(filepath.Base(socketPath))
+	if legacyPID == pidFile || legacySocket == socketPath {
+		return // legacy and primary coincide: nothing pre-upgrade to reclaim
+	}
+	if legacyPID == "" && legacySocket == "" {
+		return
+	}
+	fmt.Fprintf(w, "  stopping %s daemon left by a previous abox version...\n", daemonType)
+	logging.Warn("stopping daemon running at legacy runtime paths; it will be respawned at the per-user paths",
+		"type", daemonType, "pid_file", legacyPID)
+	if legacyPID != "" {
+		daemon.KillDaemonByPIDFile(legacyPID)
+		_ = os.Remove(legacyPID)
+	}
+	if legacySocket != "" {
+		_ = os.Remove(legacySocket)
+	}
 }
 
 // checkAlreadyRunning reports whether a daemon is already alive based on its

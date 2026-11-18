@@ -34,6 +34,9 @@ func TestValidateBridgeName(t *testing.T) {
 		{"16 chars too long", "abox-12345678901", true},
 		{"ab prefix at limit", "ab-123456789012", false},
 		{"ab prefix over limit", "ab-1234567890123", true},
+		{"valid abx prefix", "abx-1a2b3c4d5e6", false},
+		{"abx prefix at limit", "abx-12345678901", false},
+		{"abx prefix over limit", "abx-123456789012", true},
 	}
 
 	for _, tt := range tests {

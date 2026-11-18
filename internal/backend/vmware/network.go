@@ -266,15 +266,17 @@ func (m *NetworkManager) IsActive(name string) bool {
 	return m.Exists(name)
 }
 
-// instanceForBridge reverse-maps a bridge name (config.GenerateBridgeName output,
+// instanceForBridge reverse-maps a bridge name (config.LegacyBridgeName output,
 // "abox-<name>" or "ab-<hash>") to the instance name that owns it, by matching
 // the bridge each registered instance would generate. This is the simplest
-// correct approach given GenerateBridgeName hashes long names (so a bridge is not
+// correct approach given LegacyBridgeName hashes long names (so a bridge is not
 // always literally reversible to a name): we recompute the bridge for each
-// instance the registry knows about and compare.
+// instance the registry knows about and compare. The vmware backend keeps the
+// name-only derivation (it targets single-user hosts), so LegacyBridgeName — not
+// the per-user GenerateBridgeName — is what its bridges were built from.
 func instanceForBridge(regPath, bridge string) (string, bool) {
 	for _, instance := range vmrun.AllocatedInstances(regPath) {
-		if config.GenerateBridgeName(instance) == bridge {
+		if config.LegacyBridgeName(instance) == bridge {
 			return instance, true
 		}
 	}
@@ -289,7 +291,7 @@ func instanceForBridgeErr(regPath, bridge string) (string, bool, error) {
 		return "", false, err
 	}
 	for _, instance := range instances {
-		if config.GenerateBridgeName(instance) == bridge {
+		if config.LegacyBridgeName(instance) == bridge {
 			return instance, true, nil
 		}
 	}

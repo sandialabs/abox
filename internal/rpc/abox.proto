@@ -102,6 +102,12 @@ message EgressReq {
   int32 http_port = 3;       // httpfilter listen port (INPUT accept)
   int32 guest_dns_port = 4;  // guest-facing DNS port REDIRECTed to dns_port (normally 53)
   string gateway = 7;        // bridge gateway IPv4; pins the HTTP/ICMP INPUT accepts to -d <gateway>
+  // Bare instance name the bridge was derived from. The helper authorizes the
+  // request by recomputing the caller-owned bridge from the socket peer uid plus
+  // this name and comparing it to `bridge` — iptables chains are host-global, so
+  // without this check one user's helper could rewrite another user's rules. The
+  // uid comes from SO_PEERCRED, never from the request.
+  string instance = 8;
 }
 
 // Pf-specific messages. The subnet is the single source of truth for what the

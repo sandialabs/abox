@@ -187,6 +187,12 @@ func assertBuildEgressPolicy(t *testing.T) {
 	if p.Gateway != inst.Gateway {
 		t.Errorf("BuildEgressPolicy().Gateway = %q, want %q", p.Gateway, inst.Gateway)
 	}
+	// The privilege helper authorizes every egress request by recomputing the
+	// caller's bridge from (peer uid, policy.Instance) — a dropped or mis-sourced
+	// Instance locks every backend out of its own bridges.
+	if p.Instance != inst.Name {
+		t.Errorf("BuildEgressPolicy().Instance = %q, want %q", p.Instance, inst.Name)
+	}
 }
 
 // assertOptionalInterfaces asserts the optional-interface discovery is

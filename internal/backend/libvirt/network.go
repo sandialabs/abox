@@ -6,7 +6,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/sandialabs/abox/internal/backend"
 	"github.com/sandialabs/abox/internal/config"
+	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/virsh"
 )
 
@@ -14,6 +16,14 @@ import (
 type NetworkManager struct{}
 
 // Create defines a new network in libvirt.
+//
+// After defining, it re-probes the subnets of every OTHER network defined on the
+// shared libvirtd and backs out with backend.ErrSubnetConflict if one overlaps:
+// subnet allocation and net-define are not atomic, so two users' concurrent
+// creates can both probe a /24 as free and both define it (the per-user data-dir
+// lock cannot serialize across users). Define-then-verify shrinks that race to
+// the span between the two defines; callers retry allocation on the sentinel.
+// The probe is fail-open (an empty result verifies clean), matching allocation.
 func (m *NetworkManager) Create(ctx context.Context, inst *config.Instance) error {
 	xml, err := virsh.NetworkXML(inst)
 	if err != nil {
@@ -22,6 +32,14 @@ func (m *NetworkManager) Create(ctx context.Context, inst *config.Instance) erro
 
 	if err := virsh.DefineNetwork(xml); err != nil {
 		return fmt.Errorf("failed to define network: %w", err)
+	}
+
+	if config.SubnetOverlapsDefined(inst.Subnet, virsh.ListNetworkSubnetsExcluding(inst.Bridge)) {
+		if derr := virsh.DeleteNetwork(inst.Bridge); derr != nil {
+			logging.Warn("failed to remove just-defined network after subnet conflict",
+				"network", inst.Bridge, "error", derr)
+		}
+		return fmt.Errorf("subnet %s for network %s: %w", inst.Subnet, inst.Bridge, backend.ErrSubnetConflict)
 	}
 
 	return nil

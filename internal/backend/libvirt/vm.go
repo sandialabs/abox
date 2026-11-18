@@ -5,19 +5,20 @@ package libvirt
 import (
 	"context"
 	"fmt"
+	"os"
+	"slices"
 
 	"github.com/sandialabs/abox/internal/backend"
 	"github.com/sandialabs/abox/internal/config"
+	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/virsh"
 )
 
 // VMManager implements backend.VMManager for libvirt.
+// Methods that receive only a bare instance name resolve the libvirt domain name
+// through domainName in names.go, which re-reads the instance config on every
+// call (no caching — the YAML read is noise next to the virsh exec it precedes).
 type VMManager struct{}
-
-// domainName returns the libvirt domain name for an instance.
-func domainName(instanceName string) string {
-	return "abox-" + instanceName
-}
 
 // Create defines a new VM in libvirt.
 func (m *VMManager) Create(ctx context.Context, inst *config.Instance, paths *config.Paths, opts backend.VMCreateOptions) error {
@@ -56,8 +57,49 @@ func (m *VMManager) ForceStop(ctx context.Context, name string) error {
 }
 
 // Remove removes a VM definition and its storage.
+//
+// Legacy (pre-multi-user) names are shared across users, so before destroying a
+// domain found under one — with --remove-all-storage, which makes a wrong match
+// unrecoverable — verify one of its disks is this instance's disk, the same
+// ownership gate UpgradeResourceNames applies. Fail closed on a probe error; a
+// confirmed-foreign domain is left alone (nothing of ours lives under it) and
+// the caller's instance-data removal proceeds. The name resolution and the gate
+// deliberately come from ONE config load (not domainName plus a second load):
+// two loads could disagree under a concurrent save, resolving the shared legacy
+// name while skipping the gate that protects it.
 func (m *VMManager) Remove(ctx context.Context, name string) error {
-	return virsh.DeleteDomain(domainName(name))
+	inst, paths, err := config.Load(name)
+	if err != nil {
+		// Same fallback discipline as domainName: without a config that proves
+		// the legacy scheme, never target the shared legacy name — the per-user
+		// derivation is ours or absent.
+		domain := config.DomainNameFor(os.Getuid(), name)
+		logging.Warn("could not load instance config to resolve domain name for removal; assuming per-user scheme",
+			"instance", name, "domain", domain, "error", err)
+		return virsh.DeleteDomain(domain)
+	}
+	domain := inst.ResolvedVMName()
+	if !inst.UsesCurrentNames() {
+		// Fail closed through BOTH probes: a transient listing error must not
+		// read as "absent" and skip the ownership gate — the fall-through below
+		// destroys storage.
+		exists, derr := virsh.DomainDefined(domain)
+		if derr != nil {
+			return fmt.Errorf("cannot verify legacy-named domain %s exists before removal: %w", domain, derr)
+		}
+		if exists {
+			disks, derr := virsh.DomainDiskPaths(domain)
+			if derr != nil {
+				return fmt.Errorf("cannot verify ownership of legacy-named domain %s before removal: %w", domain, derr)
+			}
+			if !slices.Contains(disks, paths.Disk) {
+				logging.Warn("legacy-named domain does not use this instance's disk (likely another user's same-named instance); leaving it alone",
+					"instance", name, "domain", domain, "disk", paths.Disk)
+				return nil
+			}
+		}
+	}
+	return virsh.DeleteDomain(domain)
 }
 
 // Exists checks if a VM is defined.

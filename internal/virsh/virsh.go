@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -88,7 +89,8 @@ func EmbeddedDomainTemplate() string {
 // This type is shared between ValidateTemplate and DomainXMLWithOptions to
 // ensure they stay in sync.
 type domainTemplateData struct {
-	Name             string
+	Name             string // bare instance name (e.g. "dev"); labels/descriptions only
+	VMName           string // resolved libvirt domain name (e.g. "abox-1000-dev"); used for <name>
 	UUID             string
 	Memory           int
 	CPUs             int
@@ -182,6 +184,7 @@ func DomainXMLWithOptions(inst *config.Instance, paths *config.Paths, opts Domai
 	// Create a safe copy with escaped values for XML
 	data := domainTemplateData{
 		Name:             escapeXML(inst.Name),
+		VMName:           escapeXML(inst.ResolvedVMName()),
 		UUID:             opts.UUID, // UUID is already from libvirt, no escaping needed
 		Memory:           inst.Memory,
 		CPUs:             inst.CPUs,
@@ -210,7 +213,35 @@ func DomainXMLWithOptions(inst *config.Instance, paths *config.Paths, opts Domai
 		return "", fmt.Errorf("failed to execute domain template: %w", err)
 	}
 
+	// A custom template must emit the resolved (per-user) domain name in its
+	// <name> element. A template written against the pre-multi-user variable list
+	// hardcodes abox-{{.Name}}, which renders a DIFFERENT name than every
+	// lifecycle lookup resolves to (ResolvedVMName) — the VM would define under
+	// one name and fail every start/stop/remove afterward, and on a shared host
+	// collide on the legacy name. Fail closed here rather than defining an
+	// unreachable domain. The built-in template uses {{.VMName}}, so this only
+	// ever gates overrides.
+	if opts.CustomTemplate != "" {
+		if got := domainNameFromXML(buf.String()); got != inst.ResolvedVMName() {
+			return "", fmt.Errorf("custom domain template <name> is %q, must be %q "+
+				"(use {{.VMName}} for the <name> element, not abox-{{.Name}})", got, inst.ResolvedVMName())
+		}
+	}
+
 	return buf.String(), nil
+}
+
+// domainNameFromXML extracts the <name> element of a libvirt domain XML document,
+// or "" if absent/malformed. Used to verify a custom template names the domain
+// correctly (see DomainXMLWithOptions).
+func domainNameFromXML(domainXML string) string {
+	var parsed struct {
+		Name string `xml:"name"`
+	}
+	if err := xml.Unmarshal([]byte(domainXML), &parsed); err != nil {
+		return ""
+	}
+	return parsed.Name
 }
 
 // GetDomainUUID returns the UUID of an existing domain, or empty string if not found.
@@ -235,6 +266,38 @@ func GetDomainUUID(name string) string {
 		return ""
 	}
 	return strings.TrimSpace(domain.UUID)
+}
+
+// DomainDiskPaths returns the source file paths of a domain's file-backed disk
+// devices (disk and cdrom). Used to verify that a domain found under a shared
+// (legacy) name actually belongs to an instance — its disk source matching the
+// instance's disk — before acting on it: legacy names are derived from the
+// instance name alone, so on a shared host a same-named domain may be another
+// user's. A failure to inspect is an ERROR, distinct from a readable domain
+// with no matching disks: ownership-gated teardown must fail closed on a probe
+// failure rather than treat the domain as foreign (or as absent).
+func DomainDiskPaths(name string) ([]string, error) {
+	output, err := virsh("dumpxml", name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get domain XML for %s: %w", name, err)
+	}
+	var domain struct {
+		Disks []struct {
+			Source struct {
+				File string `xml:"file,attr"`
+			} `xml:"source"`
+		} `xml:"devices>disk"`
+	}
+	if err := xml.Unmarshal([]byte(output), &domain); err != nil {
+		return nil, fmt.Errorf("failed to parse domain XML for %s: %w", name, err)
+	}
+	var paths []string
+	for _, d := range domain.Disks {
+		if d.Source.File != "" {
+			paths = append(paths, d.Source.File)
+		}
+	}
+	return paths, nil
 }
 
 // GetNWFilterUUID returns the UUID of an existing nwfilter, or empty string if not found.
@@ -312,6 +375,7 @@ func NWFilterXML(inst *config.Instance, uuid string, guestDNSPort int) (string, 
 	// generates iptables rules from nwfilter that are evaluated AFTER NAT PREROUTING.
 	data := struct {
 		Name         string
+		FilterName   string
 		UUID         string
 		Gateway      string
 		DNSPort      int
@@ -319,6 +383,7 @@ func NWFilterXML(inst *config.Instance, uuid string, guestDNSPort int) (string, 
 		GuestDNSPort int
 	}{
 		Name:         escapeXML(inst.Name),
+		FilterName:   escapeXML(inst.ResolvedFilterName()),
 		UUID:         uuid, // UUID is already from libvirt, no escaping needed
 		Gateway:      escapeXML(inst.Gateway),
 		DNSPort:      inst.DNS.Port,
@@ -351,16 +416,24 @@ func virsh(args ...string) (string, error) {
 // virshOutputContainsLine runs a virsh command and checks if any line
 // in the output exactly matches the given name (after trimming whitespace).
 func virshOutputContainsLine(name string, args ...string) bool {
+	ok, err := virshOutputContainsLineErr(name, args...)
+	return err == nil && ok
+}
+
+// virshOutputContainsLineErr is virshOutputContainsLine with the virsh error
+// propagated, for callers that must fail CLOSED: "absent" and "could not list"
+// are different answers when the result gates a destructive action.
+func virshOutputContainsLineErr(name string, args ...string) (bool, error) {
 	output, err := virsh(args...)
 	if err != nil {
-		return false
+		return false, err
 	}
 	for line := range strings.SplitSeq(output, "\n") {
 		if strings.TrimSpace(line) == name {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // DefineNetwork defines a libvirt network from XML.
@@ -407,6 +480,13 @@ func DeleteNetwork(name string) error {
 // NetworkExists checks if a network exists.
 func NetworkExists(name string) bool {
 	return virshOutputContainsLine(name, "net-list", "--all", "--name")
+}
+
+// NetworkDefined is NetworkExists with the listing error propagated. Use it
+// where a false answer authorizes skipping (or performing) a destructive step —
+// a transient virsh failure must not read as "absent" there.
+func NetworkDefined(name string) (bool, error) {
+	return virshOutputContainsLineErr(name, "net-list", "--all", "--name")
 }
 
 // NetworkIsActive checks if a network is active.
@@ -465,14 +545,149 @@ func DeleteDomain(name string) error {
 	return nil
 }
 
+// UndefineDomain removes a libvirt domain definition WITHOUT deleting its storage.
+// Used by the resource-name upgrade, which renames an instance's domain by
+// undefining the old name and letting the next start redefine it under the new
+// name against the SAME (unmoved) disk — so --remove-all-storage must NOT be used
+// here. --snapshots-metadata is deliberately NOT passed either: snapshot metadata
+// records would be silently dropped (breaking `abox snapshot list/restore` for
+// them), so a domain that still carries snapshots must fail the undefine loudly —
+// the upgrade checks for snapshots first and refuses with guidance. The caller is
+// responsible for ensuring the domain is stopped.
+func UndefineDomain(name string) error {
+	logging.Debug("undefining libvirt domain (keeping storage)", "domain", name)
+	if _, err := virsh("undefine", name); err != nil {
+		return fmt.Errorf("failed to undefine domain: %w", err)
+	}
+	return nil
+}
+
+// ListNetworkSubnets returns the IPv4 CIDRs of every libvirt network DEFINED on
+// the host, active or not. Because libvirtd (qemu:///system) is shared across
+// users, this reflects other users' networks too — used by subnet allocation to
+// avoid double-booking a range that a stopped network still claims. CIDRs are
+// returned at their real prefix length (not normalized to /24) so the allocator
+// can also skip a candidate that falls inside a wider network. Best-effort:
+// returns nil on any error (fail-open), and skips networks with no usable IPv4
+// <ip>.
+func ListNetworkSubnets() []*net.IPNet {
+	return ListNetworkSubnetsExcluding("")
+}
+
+// ListNetworkSubnetsExcluding is ListNetworkSubnets minus the named network: used
+// by the post-define double-book check, which must not count the network it just
+// defined as a conflict with itself. An empty exclude skips nothing.
+func ListNetworkSubnetsExcluding(exclude string) []*net.IPNet {
+	out, err := virsh("net-list", "--all", "--name")
+	if err != nil {
+		logging.Debug("listing libvirt networks for subnet allocation failed; treating none as claimed", "error", err)
+		return nil
+	}
+	var subnets []*net.IPNet
+	for line := range strings.SplitSeq(out, "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" || name == exclude {
+			continue
+		}
+		subnets = append(subnets, networkSubnets(name)...)
+	}
+	return subnets
+}
+
+// NetworkSubnets returns the IPv4 CIDRs a single named network declares. Used
+// to verify that a network found under a shared (legacy) name actually belongs
+// to an instance — one of its subnets matching the instance's recorded subnet —
+// before tearing it down (see DomainDiskPaths for the same reasoning on
+// domains). A failure to inspect is an ERROR, distinct from a readable network
+// with no usable IPv4 <ip>: ownership-gated teardown must fail closed on a
+// probe failure.
+func NetworkSubnets(name string) ([]*net.IPNet, error) {
+	out, err := virsh("net-dumpxml", name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get network XML for %s: %w", name, err)
+	}
+	subnets, err := parseNetworkSubnets(out)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse network XML for %s: %w", name, err)
+	}
+	return subnets, nil
+}
+
+// networkSubnets returns the IPv4 CIDRs of a libvirt network's <ip> elements, or
+// nil if it has none usable or cannot be inspected (fail-open, matching its
+// allocation-probe callers).
+func networkSubnets(name string) []*net.IPNet {
+	out, err := virsh("net-dumpxml", name)
+	if err != nil {
+		return nil
+	}
+	subnets, _ := parseNetworkSubnets(out)
+	return subnets
+}
+
+// parseNetworkSubnets extracts the IPv4 CIDRs from a network's XML. A network
+// may declare SEVERAL <ip> elements (a dual-stack network has both an IPv4 and
+// an IPv6 one, in either order), so all are collected and the non-IPv4 ones
+// skipped. libvirt gives the size as a netmask or a prefix; both are handled.
+// An unmarshal failure is an error (NetworkSubnets' ownership-gating callers
+// must fail closed on it), distinct from parseable XML with no usable IPv4.
+func parseNetworkSubnets(out string) ([]*net.IPNet, error) {
+	var parsed struct {
+		IPs []struct {
+			Family  string `xml:"family,attr"`
+			Address string `xml:"address,attr"`
+			Netmask string `xml:"netmask,attr"`
+			Prefix  string `xml:"prefix,attr"`
+		} `xml:"ip"`
+	}
+	if err := xml.Unmarshal([]byte(out), &parsed); err != nil {
+		return nil, err
+	}
+	var cidrs []*net.IPNet
+	for _, e := range parsed.IPs {
+		// family is absent for IPv4 and "ipv6" for IPv6; the To4 check below is
+		// the real guard, this just skips the obvious case early.
+		if e.Family == "ipv6" {
+			continue
+		}
+		ip := net.ParseIP(e.Address).To4()
+		if ip == nil {
+			continue
+		}
+		var mask net.IPMask
+		switch {
+		case e.Netmask != "":
+			mask = net.IPMask(net.ParseIP(e.Netmask).To4())
+		case e.Prefix != "":
+			prefix, perr := strconv.Atoi(e.Prefix)
+			if perr != nil || prefix < 0 || prefix > 32 {
+				continue
+			}
+			mask = net.CIDRMask(prefix, 32)
+		}
+		if mask == nil {
+			continue
+		}
+		cidrs = append(cidrs, &net.IPNet{IP: ip.Mask(mask), Mask: mask})
+	}
+	return cidrs, nil
+}
+
 // DomainExists checks if a domain exists.
 func DomainExists(name string) bool {
 	return virshOutputContainsLine(name, "list", "--all", "--name")
 }
 
+// DomainDefined is DomainExists with the listing error propagated (see
+// NetworkDefined for when that matters).
+func DomainDefined(name string) (bool, error) {
+	return virshOutputContainsLineErr(name, "list", "--all", "--name")
+}
+
 // virsh domstate output values.
 const (
 	domStateRunning = "running"
+	domStateShutOff = "shut off"
 	domStateUnknown = "unknown"
 )
 
@@ -483,6 +698,19 @@ func DomainIsRunning(name string) bool {
 		return false
 	}
 	return strings.TrimSpace(output) == domStateRunning
+}
+
+// DomainIsShutOff reports whether a domain is positively in the "shut off"
+// state. Unlike !DomainIsRunning this fails CLOSED: a paused or pmsuspended
+// domain (an active qemu still holding its disk), and a transient domstate
+// error, all report false. Use it to gate operations that are only safe
+// against a fully inactive domain (e.g. the resource-name upgrade teardown).
+func DomainIsShutOff(name string) bool {
+	output, err := virsh("domstate", name)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(output) == domStateShutOff
 }
 
 // DomainState returns the state of a domain.
@@ -619,6 +847,18 @@ func CreateSnapshot(domainName, snapshotName, description string) error {
 	}
 	_, err := virsh(args...)
 	return err
+}
+
+// DomainHasSnapshots reports whether a domain carries libvirt snapshot metadata.
+// Best-effort false on error: callers use it as a pre-check to produce a good
+// error message, with the bare `virsh undefine` still failing loudly on any
+// snapshot-carrying domain the check missed.
+func DomainHasSnapshots(domainName string) bool {
+	output, err := virsh("snapshot-list", domainName, "--name")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(output) != ""
 }
 
 // ListSnapshots returns a list of snapshots for a domain.

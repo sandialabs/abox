@@ -9,6 +9,7 @@ import (
 	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/netroute"
 	"github.com/sandialabs/abox/internal/profiling"
+	"github.com/sandialabs/abox/internal/virsh"
 	"github.com/sandialabs/abox/pkg/cmd/factory"
 	"github.com/sandialabs/abox/pkg/cmd/root"
 	"github.com/sandialabs/abox/pkg/cmdutil"
@@ -23,6 +24,11 @@ func run() int {
 	// routes elsewhere (e.g. a VPN). Done here (binary only) so unit tests, which
 	// never import main, keep the no-op default and don't shell out to ip/route.
 	config.SetRouteProbe(netroute.SubnetRouted)
+
+	// Wire the defined-network subnet prober so allocation also avoids /24s
+	// claimed by any user's libvirt network that is defined but stopped (which the
+	// route probe can't see). Fail-open: returns nil where virsh is absent.
+	config.SetDefinedSubnetsProbe(virsh.ListNetworkSubnets)
 
 	f := factory.New()
 	defer f.Close()

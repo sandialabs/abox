@@ -19,8 +19,8 @@ flowchart TB
     end
 
     subgraph Host["Host System"]
-        subgraph libvirt["libvirt Network (abox-<name>)"]
-            bridge["abox-<name> bridge<br/>10.10.x.1"]
+        subgraph libvirt["libvirt Network (abx-<hash>)"]
+            bridge["abx-<hash> bridge<br/>10.10.x.1"]
             dnsmasq["dnsmasq<br/>(inert: DNS off port=0, no DHCP)"]
         end
 
@@ -181,14 +181,15 @@ for these domains — keep the list minimal. A tunneled-exception connection is 
 
 ## Component Responsibilities
 
-### libvirt Network (abox-<name>)
+### libvirt Network (abx-&lt;hash&gt;)
 
 Each instance gets its own isolated network:
 - Host-only networking (isolated network, no NAT/uplink); the guest reaches the
   internet only via the host's DNS filter and HTTP proxy
 - Static guest addressing via cloud-init — no DHCP server; the network defines no
   DHCP range and dnsmasq (launched by libvirt) is inert (DNS disabled with `port=0`)
-- Bridge interface: `abox-<name>`
+- Bridge interface: `abx-<hash(uid/name)>` — hashed per (user, instance) so two
+  users' same-named instances never collide in the host-wide interface namespace
 - Unique subnet per instance (10.10.10.0/24, 10.10.11.0/24, etc.)
 - Gateway at .1 address; guest at .10 (baked into cloud-init)
 
@@ -218,7 +219,7 @@ Each instance runs its own httpfilter process:
 - Active/passive/profile mode toggle
 - Managed automatically by abox start/stop
 
-### nwfilter (abox-<name>-traffic)
+### nwfilter (abox-&lt;uid&gt;-&lt;name&gt;-traffic)
 
 - Layer 2/3 packet filtering, **stateful and default-deny in both directions**
 - Outbound: drops all traffic except allowed services (DNS, HTTP proxy, gateway ICMP)
