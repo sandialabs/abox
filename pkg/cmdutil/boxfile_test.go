@@ -1,6 +1,7 @@
 package cmdutil
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sandialabs/abox/internal/boxfile"
@@ -11,9 +12,14 @@ import (
 type stubPrompter struct {
 	confirm bool
 	asked   bool
+	message string
 }
 
-func (p *stubPrompter) Confirm(string) bool                                        { p.asked = true; return p.confirm }
+func (p *stubPrompter) Confirm(msg string) bool {
+	p.asked = true
+	p.message = msg
+	return p.confirm
+}
 func (p *stubPrompter) ConfirmWithDefault(string, bool) bool                       { return p.confirm }
 func (p *stubPrompter) Select(string, []Option) int                                { return -1 }
 func (p *stubPrompter) SelectWithGroups(string, map[string][]Option, []string) int { return -1 }
@@ -66,6 +72,9 @@ func TestTrustBoxfile_InteractiveConfirmTrusts(t *testing.T) {
 	if !p.asked {
 		t.Error("expected an interactive prompt")
 	}
+	if !strings.HasSuffix(p.message, "[y/N] ") {
+		t.Errorf("prompt message must end with %q, got %q", "[y/N] ", p.message)
+	}
 	// Second call is silent (already trusted at this fingerprint).
 	p2 := &stubPrompter{confirm: false}
 	if err := TrustBoxfile(newIO(true), p2, cs, riskyBox(), raw, dir, ""); err != nil {
@@ -86,6 +95,9 @@ func TestTrustBoxfile_InteractiveDeclineAborts(t *testing.T) {
 	}
 	if !p.asked {
 		t.Error("expected an interactive prompt before the decline")
+	}
+	if !strings.HasSuffix(p.message, "[y/N] ") {
+		t.Errorf("prompt message must end with %q, got %q", "[y/N] ", p.message)
 	}
 }
 

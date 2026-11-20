@@ -48,7 +48,7 @@ func TrustBoxfile(io *iostreams.IOStreams, prompter Prompter, cs *ColorScheme, b
 	printSecuritySummary(io, cs, boxDir, summary, fingerprint)
 
 	if io.IsTerminal() && prompter != nil {
-		if prompter.Confirm("Trust and apply these security-relevant settings from abox.yaml? ") {
+		if prompter.Confirm("Trust and apply these security-relevant settings from abox.yaml? [y/N] ") {
 			return boxfile.MarkTrusted(boxDir, fingerprint)
 		}
 		return errors.New("abox.yaml declined; its security-relevant settings were not applied")
