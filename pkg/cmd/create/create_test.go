@@ -153,6 +153,55 @@ func TestRunCreate_FullFlowThroughMock(t *testing.T) {
 	}
 }
 
+// writeStorageDirConfig writes a global config selecting storageDir as the disk
+// storage root. It must run after isolateDataHome, which owns XDG_CONFIG_HOME.
+func writeStorageDirConfig(t *testing.T, storageDir string) {
+	t.Helper()
+	path := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "abox", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("version: 1\nstorage_dir: "+storageDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRunCreate_PersistsCustomStorageDir asserts a configured storage_dir is
+// recorded on the new instance (and that its disk lives under it), not the
+// backend's default root. Later commands rebuild disk paths from the persisted
+// value alone, so dropping it would point them at a disk that isn't there and
+// orphan the real one under the custom root.
+func TestRunCreate_PersistsCustomStorageDir(t *testing.T) {
+	isolateDataHome(t)
+	registerMockBackend(t, "mock", &mock.Backend{})
+	storageDir := filepath.Join(t.TempDir(), "store")
+	writeStorageDirConfig(t, storageDir)
+
+	opts := &Options{
+		Factory: newTestFactory(t),
+		CPUs:    2,
+		Memory:  4096,
+		Base:    "ubuntu-24.04",
+		Disk:    "20G",
+		NoMITM:  true,
+		Brief:   true,
+	}
+	if err := Run(context.Background(), opts, "storevm"); err != nil {
+		t.Fatalf("Run error = %v", err)
+	}
+
+	inst, paths, err := config.Load("storevm")
+	if err != nil {
+		t.Fatalf("config.Load after create: %v", err)
+	}
+	if inst.StorageDir != storageDir {
+		t.Errorf("inst.StorageDir = %q, want configured %q", inst.StorageDir, storageDir)
+	}
+	if !strings.HasPrefix(paths.Disk, storageDir+string(filepath.Separator)) {
+		t.Errorf("paths.Disk = %q, want under %q", paths.Disk, storageDir)
+	}
+}
+
 // TestRunCreate_HonorsRequestedSubnet asserts that a requested --subnet is passed
 // through ResolveNetwork verbatim and persisted on the instance, with the gateway
 // derived from it.

@@ -84,10 +84,18 @@ storage_dir: /scratch/me/abox
 
 No admin configuration is needed. The setting applies to instances created
 afterwards; existing instances keep the `storage_dir` recorded in their own
-`config.yaml`. `abox migrate` always targets the default root.
+`config.yaml`. `abox migrate` always targets the default root, and the helper's
+regroup repair is refused for custom roots: if a backup restore or a copy that
+drops group ownership strips the QEMU group from disks under a custom root, fix
+it yourself (e.g. copy the files back into the setgid directory, or
+`chgrp`/`chmod g+r` them). The directory must not overlap abox's data directory
+(`~/.local/share/abox`, honors `XDG_DATA_HOME`), and must not itself be a
+symlink (the helper opens it without following symlinks; use the resolved
+path).
 
-abox creates the directory as you if it is missing, then asks the helper to
-group-share it. For a path other than the default root, `EnsureStorageRoot`:
+abox creates the directory as you if it is missing — but not its parent, which
+must already exist with search permission the QEMU process can use (see the
+traversal check below) — then asks the helper to group-share it. For a path other than the default root, `EnsureStorageRoot`:
 
 - accepts only an absolute, clean path outside `/var/lib/libvirt/images/abox`
   (and never `/`), and refuses `regroup`;

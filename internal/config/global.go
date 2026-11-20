@@ -98,6 +98,14 @@ func LoadGlobalConfig() (*GlobalConfig, error) {
 				return nil, fmt.Errorf("global config: storage_dir: %w", err)
 			}
 		}
+		// The storage tree's "instances/<name>" and "base" levels would alias
+		// abox's own per-instance config dirs and base-image cache if the two
+		// trees overlapped — and a failed create's disk-dir cleanup would then
+		// delete the instance's config dir.
+		if baseDir, err := getBaseDir(); err == nil &&
+			(validation.PathWithin(cfg.StorageDir, baseDir) || validation.PathWithin(baseDir, cfg.StorageDir)) {
+			return nil, fmt.Errorf("global config: storage_dir must not overlap the abox data directory %s (got %q)", baseDir, cfg.StorageDir)
+		}
 	}
 
 	return cfg, nil

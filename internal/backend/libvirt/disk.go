@@ -4,7 +4,9 @@ package libvirt
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -77,8 +79,18 @@ func (m *DiskManager) ensureStorageRoot(ctx context.Context, inst *config.Instan
 	if root != config.LibvirtStorageDir() {
 		// A user-configured root must exist and be owned by the caller before
 		// the helper will group-share it with the QEMU process; create it as
-		// the calling user. Its mode is converged by the helper.
-		if err := os.MkdirAll(root, 0o750); err != nil {
+		// the calling user. Its mode is converged by the helper. Only the leaf
+		// is created: MkdirAll would create missing parents 0750, which the
+		// helper's traversal check then rejects, so a missing parent is the
+		// user's to create with the permissions they want.
+		parent := filepath.Dir(root)
+		if _, err := os.Stat(parent); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("parent directory %s of storage_dir %s does not exist; create it first", parent, root)
+			}
+			return fmt.Errorf("failed to stat storage root parent %s: %w", parent, err)
+		}
+		if err := os.Mkdir(root, 0o750); err != nil && !errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("failed to create storage root %s: %w", root, err)
 		}
 	}
@@ -303,7 +315,9 @@ func (m *DiskManager) EnsureBaseImage(ctx context.Context, inst *config.Instance
 // by inheritance from its setgid parent at creation time (see prepareDir) and
 // never needs reasserting. If a restore-from-backup dropped the QEMU GROUP off
 // the files OR the dir's setgid bit, that must be repaired by the privileged
-// helper's regroup step (`abox migrate` after a relocation), not here.
+// helper's regroup step (`abox migrate` after a relocation), not here. Regroup
+// covers only the default root; under a custom storage_dir such damage has no
+// abox repair path (see docs/privilege-helper.md).
 func (m *DiskManager) EnsureAccess(ctx context.Context, inst *config.Instance, paths *config.Paths) error {
 	if err := m.ensureStorageRoot(ctx, inst); err != nil {
 		return err

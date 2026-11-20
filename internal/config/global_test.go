@@ -54,6 +54,34 @@ func TestLoadGlobalConfigRejectsBadStorageDir(t *testing.T) {
 	}
 }
 
+func TestLoadGlobalConfigRejectsDataDirOverlap(t *testing.T) {
+	skipOnWindows(t)
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	baseDir := filepath.Join(dataHome, "abox")
+
+	cases := map[string]string{
+		"equal":    baseDir,
+		"inside":   filepath.Join(baseDir, "disks"),
+		"ancestor": dataHome,
+	}
+	for name, dir := range cases {
+		t.Run(name, func(t *testing.T) {
+			writeGlobalConfig(t, "version: 1\nstorage_dir: "+dir+"\n")
+			_, err := LoadGlobalConfig()
+			if err == nil || !strings.Contains(err.Error(), "overlap the abox data directory") {
+				t.Fatalf("LoadGlobalConfig(storage_dir=%q) error = %v, want a data-dir overlap rejection", dir, err)
+			}
+		})
+	}
+
+	// A sibling sharing the "abox" prefix is not an overlap.
+	writeGlobalConfig(t, "version: 1\nstorage_dir: "+baseDir+"-disks\n")
+	if _, err := LoadGlobalConfig(); err != nil {
+		t.Fatalf("LoadGlobalConfig(sibling dir) = %v, want nil", err)
+	}
+}
+
 func TestLoadGlobalConfigAcceptsDefaultPerUserDir(t *testing.T) {
 	skipOnWindows(t)
 	writeGlobalConfig(t, "version: 1\nstorage_dir: "+LibvirtStorageDir()+"\n")
