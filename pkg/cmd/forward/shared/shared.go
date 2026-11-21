@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sandialabs/abox/internal/config"
@@ -105,10 +106,25 @@ func FindForwardByHostPort(instanceDir string, hostPort int) (*ForwardEntry, err
 	return nil, nil //nolint:nilnil // nil means no matching forward found
 }
 
-// FindPIDByPattern returns the PID of a process whose command line contains the
-// given pattern. The lookup mechanism is platform-specific (see the
+// FindPIDByPattern returns the PID of a process whose command line contains
+// every given pattern. The lookup mechanism is platform-specific (see the
 // pid_{linux,darwin,other}.go variants) because there is no portable process
 // table: Linux scans /proc, darwin shells out to pgrep.
+
+// matchesAll reports whether cmdline contains every pattern. Requiring multiple
+// patterns is what keeps tunnel discovery from adopting an unrelated ssh
+// process: the forward spec alone (e.g. "localhost:8080:localhost:80") can
+// legitimately appear in another instance's tunnel or a user's own ssh
+// invocation, so callers additionally require the instance-specific user@ip
+// target.
+func matchesAll(cmdline string, patterns []string) bool {
+	for _, p := range patterns {
+		if !strings.Contains(cmdline, p) {
+			return false
+		}
+	}
+	return true
+}
 
 // IsPIDRunning checks if a process with the given PID is still running.
 func IsPIDRunning(pid int) bool {
@@ -132,6 +148,34 @@ func UpdateForwardPID(instanceDir string, hostPort int, newPID int) error {
 	return fmt.Errorf("no forward found for host port %d", hostPort)
 }
 
+// ForwardArg returns the ssh -L/-R forwarding argument for entry
+// (e.g. "localhost:8080:localhost:80"). It is the tunnel's cmdline fingerprint:
+// StartTunnel passes it to ssh, and FindLiveTunnelPID matches running processes
+// against it, so the two can never drift.
+func ForwardArg(entry ForwardEntry) string {
+	if entry.Reverse {
+		return fmt.Sprintf("localhost:%d:localhost:%d", entry.GuestPort, entry.HostPort)
+	}
+	return fmt.Sprintf("localhost:%d:localhost:%d", entry.HostPort, entry.GuestPort)
+}
+
+// FindLiveTunnelPID reports the PID of a live SSH tunnel process for entry by
+// matching BOTH its forward argument and the instance's user@ip ssh target
+// (the exact string StartTunnel puts on the ssh command line) in the process
+// table. Unlike checking IsPIDRunning on the recorded PID, a cmdline match is
+// immune to PID reuse: a recycled PID belonging to an unrelated process is not
+// mistaken for the tunnel. And unlike matching the forward spec alone, the
+// target requirement prevents adopting an unrelated ssh (another instance's
+// mirrored forward, or the user's own tunnel elsewhere) — whose PID, once
+// recorded, `abox forward remove` would later kill.
+func FindLiveTunnelPID(user, ip string, entry ForwardEntry) (int, bool) {
+	pid, err := FindPIDByPattern(ForwardArg(entry), sshutil.Target(user, ip))
+	if err != nil {
+		return 0, false
+	}
+	return pid, true
+}
+
 // StartTunnel spawns an SSH tunnel for the given forward entry and returns the PID.
 func StartTunnel(paths *config.Paths, user, ip string, entry ForwardEntry) (int, error) {
 	sshArgs := sshutil.CommonOptions(paths)
@@ -140,16 +184,15 @@ func StartTunnel(paths *config.Paths, user, ip string, entry ForwardEntry) (int,
 	sshArgs = append(sshArgs, sshutil.ConnectTimeoutOptions()...)
 	sshArgs = append(sshArgs, sshutil.TunnelOptions()...)
 
-	var forwardArg string
+	forwardArg := ForwardArg(entry)
 	if entry.Reverse {
-		forwardArg = fmt.Sprintf("localhost:%d:localhost:%d", entry.GuestPort, entry.HostPort)
 		sshArgs = append(sshArgs, "-R", forwardArg)
 	} else {
-		forwardArg = fmt.Sprintf("localhost:%d:localhost:%d", entry.HostPort, entry.GuestPort)
 		sshArgs = append(sshArgs, "-L", forwardArg)
 	}
 
-	sshArgs = append(sshArgs, "-N", "-f", sshutil.Target(user, ip))
+	target := sshutil.Target(user, ip)
+	sshArgs = append(sshArgs, "-N", "-f", target)
 
 	cmd := exec.Command("ssh", sshArgs...)
 	cmd.Stdout = os.Stdout
@@ -159,7 +202,9 @@ func StartTunnel(paths *config.Paths, user, ip string, entry ForwardEntry) (int,
 		return 0, fmt.Errorf("failed to create SSH tunnel: %w", err)
 	}
 
-	pid, err := WaitForSSHProcess(forwardArg, 10*time.Second)
+	// Match on both the forward spec and the target so a concurrent identical
+	// forward against another instance cannot be picked up by mistake.
+	pid, err := WaitForSSHProcess(10*time.Second, forwardArg, target)
 	if err != nil {
 		return 0, fmt.Errorf("SSH tunnel failed to start: %w", err)
 	}
@@ -167,12 +212,13 @@ func StartTunnel(paths *config.Paths, user, ip string, entry ForwardEntry) (int,
 	return pid, nil
 }
 
-// WaitForSSHProcess waits for the SSH tunnel process to start and returns the PID.
-func WaitForSSHProcess(pattern string, timeout time.Duration) (int, error) {
+// WaitForSSHProcess waits for an SSH tunnel process matching every pattern to
+// start and returns its PID.
+func WaitForSSHProcess(timeout time.Duration, patterns ...string) (int, error) {
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
-		pid, err := FindPIDByPattern(pattern)
+		pid, err := FindPIDByPattern(patterns...)
 		if err == nil {
 			return pid, nil
 		}

@@ -47,3 +47,35 @@ func IsMounted(path string) bool {
 	// they compare directly without a width-normalizing conversion.
 	return st.Dev != pst.Dev
 }
+
+// State classifies path using the same lstat/dev-compare logic as IsMounted but
+// as a tri-state: a dead FUSE/SSHFS endpoint (lstat fails with ENOTCONN) is
+// reported as StateStale instead of being folded into "mounted". A path that
+// does not exist is StateNotMounted. Any other lstat failure (on the path or
+// its parent) is returned as an error alongside StateNotMounted so callers can
+// surface it; IsMounted's bind-mount limitation applies here too.
+func State(path string) (MountState, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, syscall.ENOTCONN) {
+			return StateStale, nil
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			return StateNotMounted, nil
+		}
+		return StateNotMounted, err
+	}
+	parent, err := os.Lstat(filepath.Dir(path))
+	if err != nil {
+		return StateNotMounted, err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	pst, ok2 := parent.Sys().(*syscall.Stat_t)
+	if !ok || !ok2 {
+		return StateNotMounted, nil
+	}
+	if st.Dev != pst.Dev {
+		return StateMounted, nil
+	}
+	return StateNotMounted, nil
+}

@@ -25,3 +25,29 @@ func TestIsMounted(t *testing.T) {
 		t.Error("IsMounted(nonexistent) = true; want false")
 	}
 }
+
+func TestState(t *testing.T) {
+	// A plain subdirectory shares its parent's device: not mounted.
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "child")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	state, err := State(sub)
+	if err != nil {
+		t.Fatalf("State(%q) error: %v", sub, err)
+	}
+	if state != StateNotMounted {
+		t.Errorf("State(%q) = %v; want StateNotMounted for a plain subdirectory", sub, state)
+	}
+
+	// A nonexistent path is not mounted and not an error.
+	missing := filepath.Join(dir, "does-not-exist")
+	state, err = State(missing)
+	if err != nil {
+		t.Fatalf("State(nonexistent) error: %v", err)
+	}
+	if state != StateNotMounted {
+		t.Errorf("State(nonexistent) = %v; want StateNotMounted", state)
+	}
+}

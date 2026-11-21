@@ -11,3 +11,9 @@ package mountutil
 func IsMounted(_ string) bool {
 	return false
 }
+
+// State mirrors IsMounted's conservative stance off unix: with no portable
+// st_dev comparison every path reads as not mounted.
+func State(_ string) (MountState, error) {
+	return StateNotMounted, nil
+}

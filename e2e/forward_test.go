@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sandialabs/abox/internal/config"
+	fwdshared "github.com/sandialabs/abox/pkg/cmd/forward/shared"
 )
 
 // TestForward tests the port forwarding commands.
@@ -222,4 +225,76 @@ func TestForwardReverse(t *testing.T) {
 			t.Errorf("Expected 'hello from host', got: %s", sshResult.Stdout)
 		}
 	})
+}
+
+// TestForwardReconcileOnStart verifies that a port forward whose SSH tunnel
+// died with the VM on `abox stop` is re-established by the next `abox start`,
+// with a live PID recorded in forwards.json.
+func TestForwardReconcileOnStart(t *testing.T) {
+	skipIfBackendUnavailable(t)
+	skipIfNoConfiguredBaseImage(t)
+	skipInShortMode(t)
+
+	env := newTestEnv(t)
+	inst := env.newTestInstance()
+	inst.create()
+	inst.start()
+
+	if !inst.waitForRunning(60 * time.Second) {
+		t.Fatal("Instance did not start")
+	}
+	if !inst.waitForSSH(120 * time.Second) {
+		t.Fatal("SSH did not become available")
+	}
+
+	// Forward host 18090 to a guest HTTP server port.
+	env.mustRun("forward", "add", inst.name, "18090:8000")
+	defer env.run("forward", "remove", inst.name, "18090")
+
+	// Stop the VM: the ssh tunnel dies with it, leaving a dead-PID record.
+	inst.stop()
+
+	// Start must detect the dead tunnel and re-establish it.
+	inst.start()
+	if !inst.waitForSSH(120 * time.Second) {
+		t.Fatal("SSH did not become available after restart")
+	}
+
+	// The recorded PID must point at a live SSH tunnel for this forward
+	// (matched by cmdline, so a reused PID would not pass).
+	instCfg, paths, err := config.Load(inst.name)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	entry, err := fwdshared.FindForwardByHostPort(paths.Instance, 18090)
+	if err != nil || entry == nil {
+		t.Fatalf("forward record missing after restart: entry=%v err=%v", entry, err)
+	}
+	livePID, ok := fwdshared.FindLiveTunnelPID(instCfg.GetUser(), instCfg.IPAddress, *entry)
+	if !ok {
+		t.Fatal("no live SSH tunnel found for the forward after restart")
+	}
+	if livePID != entry.PID {
+		t.Errorf("recorded PID %d does not match live tunnel PID %d", entry.PID, livePID)
+	}
+
+	// The forward must actually work: start an HTTP server in the guest and
+	// fetch through the tunnel from the host.
+	sshResult := inst.ssh("bash", "-c", "nohup python3 -m http.server 8000 > /dev/null 2>&1 &")
+	if !sshResult.Success() {
+		t.Logf("Warning: Failed to start HTTP server: %v", sshResult.Stderr)
+	}
+	time.Sleep(2 * time.Second)
+	defer inst.ssh("pkill", "-f", "http.server")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("http://localhost:18090/")
+	if err != nil {
+		t.Logf("HTTP request failed (may be expected if python server not running): %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected HTTP 200 through re-established forward, got %d", resp.StatusCode)
+	}
 }

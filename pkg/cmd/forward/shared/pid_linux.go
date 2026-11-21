@@ -10,8 +10,9 @@ import (
 	"strings"
 )
 
-// FindPIDByPattern scans /proc/*/cmdline for a process matching the given pattern.
-func FindPIDByPattern(pattern string) (int, error) {
+// FindPIDByPattern scans /proc/*/cmdline for a process whose command line
+// contains every given pattern.
+func FindPIDByPattern(patterns ...string) (int, error) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return 0, fmt.Errorf("failed to read /proc: %w", err)
@@ -29,7 +30,8 @@ func FindPIDByPattern(pattern string) (int, error) {
 
 		// No /proc/[pid]/exe check: this function finds SSH tunnel processes
 		// (not abox processes), so the exe is /usr/bin/ssh, not our binary.
-		// The cmdline pattern (e.g. "localhost:8080:localhost:80") is specific
+		// Callers pass the forward spec (e.g. "localhost:8080:localhost:80")
+		// plus the instance's user@ip target, which together are specific
 		// enough to avoid false matches.
 		cmdlinePath := filepath.Join("/proc", entry.Name(), "cmdline")
 		data, err := os.ReadFile(cmdlinePath)
@@ -39,10 +41,10 @@ func FindPIDByPattern(pattern string) (int, error) {
 
 		// cmdline uses null bytes as separators
 		cmdline := strings.ReplaceAll(string(data), "\x00", " ")
-		if strings.Contains(cmdline, pattern) {
+		if matchesAll(cmdline, patterns) {
 			return pid, nil
 		}
 	}
 
-	return 0, fmt.Errorf("no process found matching pattern: %s", pattern)
+	return 0, fmt.Errorf("no process found matching pattern: %s", strings.Join(patterns, " "))
 }

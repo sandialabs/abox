@@ -1,6 +1,6 @@
 //go:build linux
 
-package remove
+package mountutil
 
 import (
 	"fmt"
@@ -8,9 +8,9 @@ import (
 	"strings"
 )
 
-// doUnmount unmounts a FUSE/SSHFS mount on Linux via fusermount. With force it
+// Unmount unmounts a FUSE/SSHFS mount on Linux via fusermount. With force it
 // performs a lazy unmount (-z), which detaches a busy mount immediately.
-func doUnmount(path string, force bool) error {
+func Unmount(path string, force bool) error {
 	args := []string{"-u"}
 	if force {
 		args = append(args, "-z") // lazy unmount

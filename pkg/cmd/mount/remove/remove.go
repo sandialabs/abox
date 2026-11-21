@@ -103,8 +103,8 @@ When specifying an instance name, all mounts for that instance are unmounted.`,
 }
 
 // doUnmountFn is the mount-teardown seam, overridable in tests. It defaults to
-// the platform doUnmount (fusermount on Linux, diskutil on macOS).
-var doUnmountFn = doUnmount
+// the platform mountutil.Unmount (fusermount on Linux, diskutil on macOS).
+var doUnmountFn = mountutil.Unmount
 
 // Run executes the unmount command for a single target.
 func (o *Options) Run(target string) error {

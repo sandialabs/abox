@@ -1,7 +1,8 @@
-// Package shared holds the record layer for the `abox mount` subcommands. It
-// persists mount records (mounts.json) under an instance directory and is
-// depended on by mount/add, mount/list, and mount/remove. It must not import any
-// pkg/cmd/* package so those verb packages can depend on it without a cycle.
+// Package shared holds the record layer and the sshfs mount routine for the
+// `abox mount` subcommands. It persists mount records (mounts.json) under an
+// instance directory and is depended on by mount/add, mount/list, mount/remove,
+// and the start command's mount/forward reconciliation. It must not import any
+// pkg/cmd/* package so those packages can depend on it without a cycle.
 package shared
 
 import (
@@ -11,11 +12,16 @@ import (
 	"time"
 )
 
-// MountEntry represents a single mount record.
+// MountEntry represents a single mount record. ReadOnly and AllowOther record
+// the sshfs flags the mount was created with so it can be re-established with
+// the same semantics (omitempty keeps old records decoding to false, i.e. a
+// read-write mount with default access — matching their pre-flag behavior).
 type MountEntry struct {
 	LocalPath  string    `json:"local_path"`
 	RemotePath string    `json:"remote_path"`
 	MountedAt  time.Time `json:"mounted_at"`
+	ReadOnly   bool      `json:"read_only,omitempty"`
+	AllowOther bool      `json:"allow_other,omitempty"`
 }
 
 // MountsFile represents the mounts.json structure.
@@ -56,18 +62,18 @@ func saveMounts(instanceDir string, mounts *MountsFile) error {
 	return os.WriteFile(path, data, 0o600)
 }
 
-// AddMountRecord adds a mount to the mounts file.
-func AddMountRecord(instanceDir, localPath, remotePath string) error {
+// AddMountRecord adds a mount to the mounts file. A zero MountedAt is stamped
+// with the current time.
+func AddMountRecord(instanceDir string, entry MountEntry) error {
 	mounts, err := loadMounts(instanceDir)
 	if err != nil {
 		return err
 	}
 
-	mounts.Mounts = append(mounts.Mounts, MountEntry{
-		LocalPath:  localPath,
-		RemotePath: remotePath,
-		MountedAt:  time.Now(),
-	})
+	if entry.MountedAt.IsZero() {
+		entry.MountedAt = time.Now()
+	}
+	mounts.Mounts = append(mounts.Mounts, entry)
 
 	return saveMounts(instanceDir, mounts)
 }
