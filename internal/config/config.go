@@ -366,6 +366,7 @@ type Paths struct {
 	Base             string // ~/.local/share/abox
 	Instances        string // ~/.local/share/abox/instances
 	UserBaseImages   string // ~/.local/share/abox/base (user-writable, for downloads)
+	StorageDir       string // <storage_dir>: backend-accessible root for disk images
 	BaseImages       string // <storage_dir>/base (backend-accessible)
 	TetragonCache    string // ~/.local/share/abox/tetragon (user-writable, for Tetragon downloads)
 	Instance         string // ~/.local/share/abox/instances/<name>
@@ -472,6 +473,7 @@ func GetPathsWithStorage(name, storageDir string) (*Paths, error) {
 		Base:             base,
 		Instances:        instancesDir,
 		UserBaseImages:   filepath.Join(base, "base"),
+		StorageDir:       storageDir,
 		BaseImages:       filepath.Join(storageDir, "base"),
 		TetragonCache:    filepath.Join(base, "tetragon"),
 		Instance:         cleanInstanceDir,
@@ -887,10 +889,10 @@ func validateHTTPConfig(h *HTTPConfig) error {
 // shares the LibvirtImagesDir prefix — is explicitly NOT legacy.
 func IsLegacyStorage(inst *Instance, paths *Paths) bool {
 	perUser := LibvirtStorageDir()
-	if inst.StorageDir == perUser || strings.HasPrefix(paths.Disk, perUser+string(filepath.Separator)) {
+	if inst.StorageDir == perUser || validation.PathWithin(paths.Disk, perUser) {
 		return false
 	}
-	return inst.StorageDir == LibvirtImagesDir || strings.HasPrefix(paths.Disk, LibvirtImagesDir+string(filepath.Separator))
+	return inst.StorageDir == LibvirtImagesDir || validation.PathWithin(paths.Disk, LibvirtImagesDir)
 }
 
 // validateStorageDir rejects a storage dir that is relative or escapes via "..".
@@ -1016,29 +1018,37 @@ func SetRouteProbe(f func(gatewayIP string) bool) { routeProbe = f }
 // has installed a real prober.
 func RouteConflicts(gatewayIP string) bool { return routeProbe(gatewayIP) }
 
+// parseSubnetPool parses a subnet pool CIDR and returns its IPv4 base address,
+// whose first two octets prefix every allocated /24. Shared by AllocateSubnet
+// and global config parsing so a bad subnet_pool is rejected when the config is
+// loaded, by the same rule the allocator applies.
+func parseSubnetPool(pool string) (net.IP, error) {
+	_, poolNet, err := net.ParseCIDR(pool)
+	if err != nil {
+		return nil, fmt.Errorf("invalid subnet pool %q: %w", pool, err)
+	}
+	poolIP := poolNet.IP.To4()
+	if poolIP == nil {
+		return nil, fmt.Errorf("invalid subnet pool %q: IPv6 not supported", pool)
+	}
+	return poolIP, nil
+}
+
 // AllocateSubnet finds the next available subnet for a new instance.
-// If pool is empty, it uses the global config pool or the default "10.10.0.0/16".
+// If pool is empty, it uses the global config pool (default "10.10.0.0/16"). A
+// global config that fails to parse is an error, not a silent fallback.
 func AllocateSubnet(pool string) (subnet, gateway string, thirdOctet int, err error) {
 	if pool == "" {
 		globalCfg, err := LoadGlobalConfig()
 		if err != nil {
-			logging.Debug("failed to load global config, using default subnet pool", "error", err)
-			pool = "10.10.0.0/16"
-		} else {
-			pool = globalCfg.SubnetPool
+			return "", "", 0, err
 		}
+		pool = globalCfg.SubnetPool
 	}
 
-	// Parse the pool to get the base network
-	_, poolNet, err := net.ParseCIDR(pool)
+	poolIP, err := parseSubnetPool(pool)
 	if err != nil {
-		return "", "", 0, fmt.Errorf("invalid subnet pool %q: %w", pool, err)
-	}
-
-	// Extract base octets from pool
-	poolIP := poolNet.IP.To4()
-	if poolIP == nil {
-		return "", "", 0, errors.New("IPv6 not supported")
+		return "", "", 0, err
 	}
 
 	usedSubnets, err := UsedInstanceSubnets()

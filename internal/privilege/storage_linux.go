@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/sandialabs/abox/internal/logging"
 	"github.com/sandialabs/abox/internal/rpc"
+	"github.com/sandialabs/abox/internal/validation"
 )
 
 // libvirtImagesParent is the shared parent for every user's abox disk storage.
@@ -58,7 +60,14 @@ func (s *EgressServer) EnsureStorageRoot(_ context.Context, req *rpc.EnsureStora
 	uid := s.allowedUID
 	want := filepath.Join(libvirtImagesParent, strconv.Itoa(uid))
 	if filepath.Clean(req.GetPath()) != want {
-		return nil, fmt.Errorf("storage root %q not permitted; caller (uid %d) may only provision %q", req.GetPath(), uid, want)
+		// Not the default root: the only other thing a caller may ask for is to
+		// group-share a directory it already owns (a user-configured
+		// storage_dir). That path is never created or chowned by root; see
+		// ensureCallerOwnedRoot.
+		if err := validation.ValidateStorageRoot(req.GetPath(), libvirtImagesParent); err != nil {
+			return nil, fmt.Errorf("storage root %q not permitted; caller (uid %d) may only provision %q or a directory it owns: %w", req.GetPath(), uid, want, err)
+		}
+		return s.ensureCallerOwnedStorageRoot(req)
 	}
 
 	gid, groupName, err := resolveQEMUGroupGID()
@@ -99,6 +108,155 @@ func (s *EgressServer) EnsureStorageRoot(_ context.Context, req *rpc.EnsureStora
 
 	logging.Audit("storage root ensured", "path", want, "uid", uid, "group", groupName, "gid", gid, "regroup", req.GetRegroup())
 	return &rpc.Empty{}, nil
+}
+
+// ensureCallerOwnedStorageRoot handles EnsureStorageRoot for a user-configured
+// storage root: it group-shares a directory the caller ALREADY OWNS with the
+// QEMU runtime group. This grants the caller nothing it could not do itself if
+// it were a group member — files created beneath inherit the group but never
+// setgid (the kernel strips S_ISGID from a non-member's files), the owner is
+// never changed, and QEMU only reads disks the caller names in its own domain.
+// Regroup is refused: it chowns a whole subtree and is only used by `abox
+// migrate`, which targets the default root.
+func (s *EgressServer) ensureCallerOwnedStorageRoot(req *rpc.EnsureStorageRootReq) (*rpc.Empty, error) {
+	uid, path := s.allowedUID, req.GetPath()
+	if req.GetRegroup() {
+		return nil, fmt.Errorf("regroup is only permitted for the default storage root, not %q", path)
+	}
+	gid, groupName, err := resolveQEMUGroupGID()
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureCallerOwnedRoot(path, uid, gid); err != nil {
+		return nil, err
+	}
+	if err := checkTraversable(filepath.Dir(path), gid, groupName); err != nil {
+		return nil, err
+	}
+	logging.Audit("storage root ensured", "path", path, "uid", uid, "group", groupName, "gid", gid, "mode", "caller-owned")
+	return &rpc.Empty{}, nil
+}
+
+// ensureCallerOwnedRoot converges a caller-owned directory to the storage-root
+// group and mode, and provisions its sharedStorageSubdirs. Every mutation goes
+// through an fd opened by openDirNoFollow and is preceded by an ownership check
+// on that same fd, so the inode acted on is always one the caller owns:
+// swapping a symlink anywhere in the path gains nothing. Subdirs are resolved
+// relative to the root's fd, never by re-walking the path. The owner is never
+// changed, except to hand the caller a subdir the helper itself just created.
+func ensureCallerOwnedRoot(path string, uid, gid int) error {
+	root, err := openDirNoFollow(unix.AT_FDCWD, path)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	st, err := requireOwnedBy(root, uid, false)
+	if err != nil {
+		return err
+	}
+	if err := requireDedicatedDir(root, st, gid); err != nil {
+		return err
+	}
+	if err := convergeDir(root, -1, gid, storageRootMode); err != nil {
+		return err
+	}
+
+	for _, sub := range sharedStorageSubdirs {
+		if err := ensureCallerOwnedSubdir(root, sub, uid, gid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureCallerOwnedSubdir creates (if absent) and converges the shared subdir
+// name directly under the already-verified root fd.
+func ensureCallerOwnedSubdir(root *os.File, name string, uid, gid int) error {
+	created := true
+	if err := unix.Mkdirat(int(root.Fd()), name, uint32(storageRootMode.Perm())); err != nil {
+		if !errors.Is(err, unix.EEXIST) {
+			return fmt.Errorf("failed to create %s: %w", filepath.Join(root.Name(), name), err)
+		}
+		created = false
+	}
+	dir, err := openDirNoFollow(int(root.Fd()), name)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	st, err := requireOwnedBy(dir, uid, created)
+	if err != nil {
+		return err
+	}
+	owner := -1
+	if int(st.Uid) != uid { // root-owned: the helper just created it
+		owner = uid
+	}
+	return convergeDir(dir, owner, gid, storageRootMode)
+}
+
+// requireOwnedBy fstats dir and requires it to be owned by uid — or, when
+// allowRoot is set (a directory the helper itself just created), by root.
+func requireOwnedBy(dir *os.File, uid int, allowRoot bool) (*unix.Stat_t, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(int(dir.Fd()), &st); err != nil {
+		return nil, fmt.Errorf("failed to stat %s: %w", dir.Name(), err)
+	}
+	if int(st.Uid) != uid && (!allowRoot || st.Uid != 0) {
+		return nil, fmt.Errorf("storage directory %s is owned by uid %d, not the caller (uid %d); refusing to share it", dir.Name(), st.Uid, uid)
+	}
+	return &st, nil
+}
+
+// requireDedicatedDir refuses to convert a directory that is already in use
+// for something else (e.g. a storage_dir pointed at $HOME or ~/.ssh), since the
+// root is re-grouped and narrowed to 2750. A directory qualifies if it is
+// already a storage root (setgid, QEMU group) or holds nothing but the shared
+// storage subdirs. Call it only after requireOwnedBy, so the helper never lists
+// (and so never discloses entries of) a directory the caller does not own.
+func requireDedicatedDir(dir *os.File, st *unix.Stat_t, gid int) error {
+	if int(st.Gid) == gid && st.Mode&unix.S_ISGID != 0 {
+		return nil
+	}
+	names, err := dir.Readdirnames(-1)
+	if err != nil {
+		return fmt.Errorf("failed to list %s: %w", dir.Name(), err)
+	}
+	for _, name := range names {
+		if !slices.Contains(sharedStorageSubdirs, name) {
+			return fmt.Errorf("storage directory %s is not empty (contains %q); use a new, dedicated directory for storage_dir", dir.Name(), name)
+		}
+	}
+	return nil
+}
+
+// checkTraversable verifies the QEMU process can reach a storage root below
+// dir: every directory from dir up to "/" must grant search (x) to others, or
+// to the QEMU group when it is the directory's group. A directory carrying a
+// POSIX ACL is accepted as-is, since its mode bits alone can't tell. This is a
+// usability check, not a security boundary — it turns an opaque "Cannot access
+// storage file" at `virsh start` into an actionable error at create time.
+func checkTraversable(dir string, gid int, groupName string) error {
+	for {
+		var st unix.Stat_t
+		if err := unix.Stat(dir, &st); err != nil {
+			return fmt.Errorf("failed to stat %s: %w", dir, err)
+		}
+		ok := st.Mode&unix.S_IXOTH != 0 || (int(st.Gid) == gid && st.Mode&unix.S_IXGRP != 0)
+		if !ok {
+			if n, err := unix.Getxattr(dir, "system.posix_acl_access", nil); err == nil && n > 0 {
+				ok = true
+			}
+		}
+		if !ok {
+			return fmt.Errorf("the QEMU process (group %s) cannot traverse %s (mode %04o); grant search permission, e.g. `chmod o+x %s`", groupName, dir, st.Mode&0o7777, dir)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil
+		}
+		dir = parent
+	}
 }
 
 // diskFileName is the basename of the writable CoW disk (see config.Paths.Disk
@@ -234,15 +392,30 @@ func ensureDir(path string, uid, gid int, mode os.FileMode) error {
 	if err := os.Mkdir(path, mode.Perm()); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
-	// O_NOFOLLOW: fail (ELOOP) if path is a symlink. O_DIRECTORY: fail (ENOTDIR)
-	// if it is not a directory. Either way a non-directory/symlink planted here is
-	// refused rather than operated on.
-	fd, err := unix.Open(path, unix.O_NOFOLLOW|unix.O_DIRECTORY|unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	f, err := openDirNoFollow(unix.AT_FDCWD, path)
 	if err != nil {
-		return fmt.Errorf("failed to open %s safely: %w", path, err)
+		return err
 	}
-	f := os.NewFile(uintptr(fd), path)
 	defer f.Close()
+	return convergeDir(f, uid, gid, mode)
+}
+
+// openDirNoFollow opens name (relative to dirfd, or absolute with
+// unix.AT_FDCWD) as a directory. O_NOFOLLOW: fail (ELOOP) if it is a symlink.
+// O_DIRECTORY: fail (ENOTDIR) if it is not a directory. Either way a
+// non-directory/symlink planted there is refused rather than operated on.
+func openDirNoFollow(dirfd int, name string) (*os.File, error) {
+	fd, err := unix.Openat(dirfd, name, unix.O_NOFOLLOW|unix.O_DIRECTORY|unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open %s safely: %w", name, err)
+	}
+	return os.NewFile(uintptr(fd), name), nil
+}
+
+// convergeDir applies owner (uid -1 leaves it unchanged), group and mode
+// through the open fd. Chmod comes after chown so the explicit mode (including
+// setgid) is set last — see ensureDir.
+func convergeDir(f *os.File, uid, gid int, mode os.FileMode) error {
 	if err := f.Chown(uid, gid); err != nil {
 		return err
 	}

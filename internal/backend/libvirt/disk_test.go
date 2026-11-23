@@ -4,13 +4,18 @@ package libvirt
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
 
+	"github.com/sandialabs/abox/internal/backend"
+	"github.com/sandialabs/abox/internal/backend/mock"
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/qemuimg"
 )
@@ -651,5 +656,64 @@ func TestDiskExportFlattenInvokesConvert(t *testing.T) {
 	}
 	if !sawConvert {
 		t.Errorf("flatten Export should invoke qemu-img convert; calls=%v", calls)
+	}
+}
+
+// TestEnsureStorageRootUsesInstanceStorageDir verifies the helper is asked to
+// provision the instance's own persisted storage_dir (so changing the global
+// setting never strands an existing instance), that a custom root is created
+// as the calling user first, and that an unset storage_dir falls back to the
+// default per-user root.
+func TestEnsureStorageRootUsesInstanceStorageDir(t *testing.T) {
+	rec := &mock.StorageEnforcer{}
+	m := &DiskManager{storageProvider: func() (backend.StorageEnforcer, error) { return rec, nil }}
+
+	custom := filepath.Join(t.TempDir(), "abox")
+	if err := m.ensureStorageRoot(context.Background(), &config.Instance{StorageDir: custom}); err != nil {
+		t.Fatalf("ensureStorageRoot(custom): %v", err)
+	}
+	if info, err := os.Stat(custom); err != nil || !info.IsDir() {
+		t.Errorf("custom root not created as the caller: %v", err)
+	}
+	if err := m.ensureStorageRoot(context.Background(), &config.Instance{}); err != nil {
+		t.Fatalf("ensureStorageRoot(default): %v", err)
+	}
+
+	want := []mock.StorageEnforcerCall{{Path: custom}, {Path: config.LibvirtStorageDir()}}
+	if !slices.Equal(rec.Calls, want) {
+		t.Errorf("EnsureStorageRoot calls = %+v, want %+v", rec.Calls, want)
+	}
+}
+
+// TestEnsureStorageRootRequiresExistingParent verifies a custom root whose
+// parent is missing is refused before the helper is asked, rather than created
+// with MkdirAll: abox-created 0750 parents would fail the helper's traversal
+// check, so the parent is left for the user to create with suitable modes.
+func TestEnsureStorageRootRequiresExistingParent(t *testing.T) {
+	rec := &mock.StorageEnforcer{}
+	m := &DiskManager{storageProvider: func() (backend.StorageEnforcer, error) { return rec, nil }}
+
+	parent := filepath.Join(t.TempDir(), "scratch")
+	custom := filepath.Join(parent, "abox")
+	err := m.ensureStorageRoot(context.Background(), &config.Instance{StorageDir: custom})
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("ensureStorageRoot(missing parent) error = %v, want parent-does-not-exist error", err)
+	}
+	if _, err := os.Stat(parent); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("parent %s was created (stat err = %v); it must be left to the user", parent, err)
+	}
+	if len(rec.Calls) != 0 {
+		t.Errorf("EnsureStorageRoot called despite missing parent: %+v", rec.Calls)
+	}
+
+	// An already-existing root is accepted as-is.
+	if err := os.Mkdir(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(custom, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ensureStorageRoot(context.Background(), &config.Instance{StorageDir: custom}); err != nil {
+		t.Fatalf("ensureStorageRoot(existing root): %v", err)
 	}
 }

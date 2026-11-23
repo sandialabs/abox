@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -683,5 +684,31 @@ func TestParseDiskSize(t *testing.T) {
 				t.Errorf("ParseDiskSize(%q) = %d, want %d", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestValidateStorageRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX paths")
+	}
+	const reserved = "/var/lib/libvirt/images/abox"
+	tests := []struct {
+		path    string
+		wantErr bool
+	}{
+		{"/scratch/abox", false},
+		{"/var/lib/libvirt/images/abox2", false}, // sibling, not inside
+		{"/scratch/abox/", true},
+		{"/scratch/../abox", true},
+		{"scratch/abox", true},
+		{"/", true},
+		{"", true},
+		{reserved, true},
+		{reserved + "/1000", true},
+	}
+	for _, tt := range tests {
+		if err := ValidateStorageRoot(tt.path, reserved); (err != nil) != tt.wantErr {
+			t.Errorf("ValidateStorageRoot(%q) error = %v, wantErr %v", tt.path, err, tt.wantErr)
+		}
 	}
 }

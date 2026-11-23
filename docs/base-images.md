@@ -204,7 +204,9 @@ differs:
 - **Backend store** (converted copy the VM actually boots from): uid-scoped under
   the per-user libvirt storage root for libvirt (e.g.
   `/var/lib/libvirt/images/abox/<uid>/base/`), and
-  `~/.local/share/abox/disks/base/` for vfkit and vmware.
+  `~/.local/share/abox/disks/base/` for vfkit and vmware. A `storage_dir` in
+  `~/.config/abox/config.yaml` replaces either root (see
+  [Custom storage location](privilege-helper.md#custom-storage-location)).
 
 Other notes:
 

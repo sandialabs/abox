@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/sandialabs/abox/internal/rpc"
@@ -28,8 +29,11 @@ func TestEnsureStorageRootRejectsForeignPath(t *testing.T) {
 	}{
 		{"another user's uid", filepath.Join(libvirtImagesParent, "1000")},
 		{"the shared parent itself", libvirtImagesParent},
-		{"an arbitrary path", "/etc"},
+		{"inside the shared parent", filepath.Join(libvirtImagesParent, "4242", "instances")},
 		{"traversal into parent", filepath.Join(libvirtImagesParent, "4242", "..", "0")},
+		{"unclean path", "/scratch/abox/../etc"},
+		{"relative path", "scratch/abox"},
+		{"filesystem root", "/"},
 		{"empty", ""},
 	}
 	for _, tc := range cases {
@@ -275,5 +279,161 @@ func TestRegroupSubtreeRefusesHardlink(t *testing.T) {
 	}
 	if oinfo.Mode().Perm() != 0o600 {
 		t.Errorf("out-of-subtree target mode = %o, want 600 (regroup must not touch a hardlink target)", oinfo.Mode().Perm())
+	}
+}
+
+// TestEnsureStorageRootCallerOwnedRefusesRegroup verifies regroup (a recursive
+// chown used only by `abox migrate`) is never applied to a user-chosen root.
+func TestEnsureStorageRootCallerOwnedRefusesRegroup(t *testing.T) {
+	s := &EgressServer{allowedUID: os.Getuid()}
+	_, err := s.EnsureStorageRoot(context.Background(), &rpc.EnsureStorageRootReq{Path: t.TempDir(), Regroup: true})
+	if err == nil || !strings.Contains(err.Error(), "regroup") {
+		t.Fatalf("EnsureStorageRoot(custom, regroup) error = %v, want a regroup refusal", err)
+	}
+}
+
+// TestEnsureCallerOwnedRootSharesDir verifies a caller-owned root and its
+// shared subdirs end up setgid to the target group with the owner unchanged.
+// It runs unprivileged by using the caller's own uid/gid.
+func TestEnsureCallerOwnedRootSharesDir(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "abox")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	for range 2 { // idempotent
+		if err := ensureCallerOwnedRoot(root, uid, gid); err != nil {
+			t.Fatalf("ensureCallerOwnedRoot: %v", err)
+		}
+	}
+	for _, dir := range []string{root, filepath.Join(root, "instances"), filepath.Join(root, "base")} {
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := storageRootMode | os.ModeDir; info.Mode() != want {
+			t.Errorf("%s mode = %v, want %v", dir, info.Mode(), want)
+		}
+		st := info.Sys().(*syscall.Stat_t)
+		if int(st.Uid) != uid || int(st.Gid) != gid {
+			t.Errorf("%s owner = %d:%d, want %d:%d", dir, st.Uid, st.Gid, uid, gid)
+		}
+	}
+}
+
+// TestEnsureCallerOwnedRootRefusesForeignOwner verifies the helper never
+// touches a directory the caller does not own (e.g. /etc, another user's dir).
+func TestEnsureCallerOwnedRootRefusesForeignOwner(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := ensureCallerOwnedRoot(root, os.Getuid()+1, os.Getgid())
+	if err == nil || !strings.Contains(err.Error(), "not the caller") {
+		t.Fatalf("error = %v, want a foreign-owner refusal", err)
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o700 || info.Mode()&os.ModeSetgid != 0 {
+		t.Errorf("foreign dir mode changed to %v", info.Mode())
+	}
+	if _, err := os.Stat(filepath.Join(root, "instances")); !os.IsNotExist(err) {
+		t.Errorf("subdir created in a foreign dir (stat err = %v)", err)
+	}
+}
+
+// TestEnsureCallerOwnedRootRefusesSymlinks verifies a symlink at the root or at
+// a shared subdir is refused rather than followed to its target.
+func TestEnsureCallerOwnedRootRefusesSymlinks(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "outside")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCallerOwnedRoot(link, os.Getuid(), os.Getgid()); err == nil {
+		t.Error("ensureCallerOwnedRoot must refuse a symlinked root")
+	}
+
+	root := filepath.Join(base, "root")
+	if err := os.Mkdir(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, "instances")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCallerOwnedRoot(root, os.Getuid(), os.Getgid()); err == nil {
+		t.Error("ensureCallerOwnedRoot must refuse a symlinked instances subdir")
+	}
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o700 || info.Mode()&os.ModeSetgid != 0 {
+		t.Errorf("symlink target mode changed to %v; O_NOFOLLOW should have refused it", info.Mode())
+	}
+}
+
+// TestCheckTraversable verifies a parent the QEMU process cannot search is
+// reported, and a world-searchable one passes.
+func TestCheckTraversable(t *testing.T) {
+	// t.TempDir and its per-test parent are 0700; open them up so only the
+	// directory under test can fail the check.
+	base := t.TempDir()
+	for _, d := range []string{filepath.Dir(base), base} {
+		if err := os.Chmod(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A gid the test dirs don't carry, so only the "other" bits count.
+	const qemuGID = 4242
+	if err := checkTraversable(base, qemuGID, "libvirt-qemu"); err != nil {
+		t.Skipf("temp dir ancestors are not world-searchable on this host: %v", err)
+	}
+	parent := filepath.Join(base, "user")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := checkTraversable(parent, qemuGID, "libvirt-qemu")
+	if err == nil || !strings.Contains(err.Error(), parent) {
+		t.Fatalf("checkTraversable(0700 dir) error = %v, want one naming %s", err, parent)
+	}
+	if err := os.Chmod(parent, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkTraversable(parent, qemuGID, "libvirt-qemu"); err != nil {
+		t.Errorf("checkTraversable(0711 dir) = %v, want nil", err)
+	}
+}
+
+// TestEnsureCallerOwnedRootRefusesNonEmptyDir verifies a storage_dir pointed at
+// a directory already in use (e.g. $HOME) is refused rather than re-grouped
+// and narrowed to 2750.
+func TestEnsureCallerOwnedRootRefusesNonEmptyDir(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".bashrc"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gid := os.Getgid()
+	err := ensureCallerOwnedRoot(root, os.Getuid(), gid)
+	if err == nil || !strings.Contains(err.Error(), "not empty") {
+		t.Fatalf("error = %v, want a non-empty refusal", err)
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 || info.Mode()&os.ModeSetgid != 0 {
+		t.Errorf("in-use dir mode changed to %v", info.Mode())
 	}
 }

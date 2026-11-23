@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sandialabs/abox/internal/backend"
+	"github.com/sandialabs/abox/internal/backend/mock"
 	"github.com/sandialabs/abox/internal/config"
 	"github.com/sandialabs/abox/internal/iostreams"
 	"github.com/sandialabs/abox/pkg/cmd/export"
@@ -246,5 +248,50 @@ func TestExtractTarFile_RejectsOversizedHeader(t *testing.T) {
 	err := extractTarFile(tar.NewReader(bytes.NewReader(nil)), h, filepath.Join(t.TempDir(), "big"), &total)
 	if err == nil || !strings.Contains(err.Error(), "per-file cap") {
 		t.Fatalf("expected per-file cap rejection, got %v", err)
+	}
+}
+
+// TestAllocateResources_PersistsCustomStorageDir asserts an imported instance
+// records the configured storage_dir (and gets its disk under it) rather than
+// the backend's default root, mirroring create: later commands rebuild disk
+// paths from the persisted value alone.
+func TestAllocateResources_PersistsCustomStorageDir(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("HOME", t.TempDir())
+
+	storageDir := filepath.Join(t.TempDir(), "store")
+	cfgPath := filepath.Join(configHome, "abox", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte("version: 1\nstorage_dir: "+storageDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	backend.ResetForTesting()
+	t.Cleanup(backend.ResetForTesting)
+	defaultRoot := t.TempDir()
+	be := &mock.Backend{
+		NameFunc:       func() string { return "mock" },
+		StorageDirFunc: func() string { return defaultRoot },
+	}
+	backend.Register("mock", 10, func() backend.Backend { return be })
+	t.Setenv(factory.EnvBackend, "mock")
+
+	ios, _, _, _ := iostreams.Test()
+	opts := &Options{Factory: &factory.Factory{IO: ios, ColorScheme: cmdutil.NewColorScheme(false)}}
+	manifest := &export.Manifest{Instance: export.ManifestInstance{Name: "imported", CPUs: 2, Memory: 2048}}
+
+	inst, paths, _, _, err := allocateResources(opts, "imported", manifest, ios.ErrOut)
+	if err != nil {
+		t.Fatalf("allocateResources: %v", err)
+	}
+	if inst.StorageDir != storageDir {
+		t.Errorf("inst.StorageDir = %q, want configured %q", inst.StorageDir, storageDir)
+	}
+	if !strings.HasPrefix(paths.Disk, storageDir+string(filepath.Separator)) {
+		t.Errorf("paths.Disk = %q, want under %q", paths.Disk, storageDir)
 	}
 }

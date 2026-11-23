@@ -135,6 +135,7 @@ func stubStartPhase(t *testing.T) {
 // to return nil and that is asserted rather than discarded.
 func TestDoNewInstance_AppliesBoxfileToInstanceConfig(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	// Socket and PID paths derive from XDG_RUNTIME_DIR, not from the data home,
 	// so it needs isolating separately or the test writes into the real one.

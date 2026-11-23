@@ -74,14 +74,12 @@ type storageTarget struct {
 }
 
 // defaultStorageTarget resolves the real destination via the factory: the
-// backend's StorageDir (the per-user root, mirroring create.go) and a storage
-// enforcer backed by the privilege helper.
+// default per-user libvirt root and a storage enforcer backed by the privilege
+// helper. It deliberately ignores a user-configured storage_dir: migration
+// relies on the helper's regroup step, which is only permitted for the default
+// per-user root.
 func defaultStorageTarget(f *factory.Factory, name string) (*storageTarget, error) {
-	be, err := f.BackendFor(name)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get backend: %w", err)
-	}
-	storageDir := be.StorageDir()
+	storageDir := config.LibvirtStorageDir()
 	paths, err := config.GetPathsWithStorage(name, storageDir)
 	if err != nil {
 		return nil, err
